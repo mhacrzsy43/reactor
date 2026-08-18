@@ -114,7 +114,10 @@ fn selector(selector: &Selector, path: &str) -> Result<String, CompileError> {
         return Ok(quote(text));
     }
     if let Some(coordinate) = selector.coordinate {
-        return Ok(format!("point: {},{}", coordinate.x, coordinate.y));
+        return Ok(format!(
+            "{{ point: {} }}",
+            quote(&format!("{},{}", coordinate.x, coordinate.y))
+        ));
     }
     Err(CompileError::UnsupportedSelector {
         path: path.to_owned(),
@@ -155,5 +158,27 @@ mod tests {
         let output = compile_maestro(&flow).unwrap();
         assert!(output.setup.contains("clearState"));
         assert!(output.measured.contains("tapOn: \"List scenario\""));
+    }
+
+    #[test]
+    fn coordinate_selector_compiles_as_a_valid_inline_maestro_mapping() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "canvas".to_owned(),
+            name: "Canvas".to_owned(),
+            app_id: "com.reactor.demo".to_owned(),
+            platform: Platform::Android,
+            intent: None,
+            setup: vec![],
+            measured: vec![Step::Tap {
+                target: Selector {
+                    coordinate: Some(reactor_protocol::Coordinate { x: 720.0, y: 522.0 }),
+                    ..Selector::default()
+                },
+            }],
+            teardown: vec![],
+        };
+        let output = compile_maestro(&flow).unwrap();
+        assert!(output.measured.contains("tapOn: { point: \"720,522\" }"));
     }
 }

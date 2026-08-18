@@ -28,7 +28,7 @@ use reactor_analysis::{
 use reactor_core::{CompiledFlow, compile_maestro};
 use reactor_inspector::{InspectorElement, inspect_hierarchy};
 use reactor_protocol::{
-    Flow, FlowLock, FlowTrialEvidence, GenerationProvenance, Platform, Selector,
+    Flow, FlowLock, FlowTrialEvidence, GenerationProvenance, Platform, Selector, Step,
     canonical_flow_hash, navigation_destination_marker, requires_navigation_intent,
 };
 use reactor_runner::{
@@ -37,8 +37,8 @@ use reactor_runner::{
     capture_android_ui_tree, capture_ios_current_ui_tree, capture_ios_screenshot,
     capture_ios_trial_failure, capture_ios_ui_tree, discover_android_devices,
     discover_ios_simulators, doctor, enqueue_android, enqueue_demo, enqueue_ios,
-    execute_android_job, execute_demo_job, execute_ios_job, recover_orphaned_jobs, trial_android,
-    trial_ios_simulator,
+    execute_android_job, execute_demo_job, execute_explorer_step, execute_ios_job,
+    recover_orphaned_jobs, trial_android, trial_ios_simulator,
 };
 use reactor_store::{Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
@@ -79,6 +79,15 @@ struct DeviceInspectorSnapshot {
     captured_at: DateTime<Utc>,
     elements: Vec<InspectorElement>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PerformExplorerStepInput {
+    platform: Platform,
+    device_id: String,
+    app_id: String,
+    step: Step,
 }
 
 const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
@@ -791,6 +800,12 @@ async fn preview_generation_context(
 async fn capture_device_inspector(
     input: CaptureDeviceInspectorInput,
 ) -> Result<DeviceInspectorSnapshot, String> {
+    capture_device_inspector_for(input).await
+}
+
+async fn capture_device_inspector_for(
+    input: CaptureDeviceInspectorInput,
+) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
     let (screenshot, hierarchy) = match input.platform {
@@ -838,6 +853,55 @@ async fn capture_device_inspector(
         elements,
         warnings,
     })
+}
+
+#[tauri::command]
+async fn perform_explorer_step(
+    input: PerformExplorerStepInput,
+) -> Result<DeviceInspectorSnapshot, String> {
+    let root = workspace();
+    ensure_inspector_capture_allowed(&root)?;
+    execute_explorer_step(
+        &root,
+        input.platform,
+        &input.device_id,
+        &input.app_id,
+        input.step,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    ensure_inspector_capture_allowed(&root)?;
+    let stable = wait_for_explorer_stability(&root, input.platform, &input.device_id).await;
+    let mut snapshot = capture_device_inspector_for(CaptureDeviceInspectorInput {
+        platform: input.platform,
+        device_id: input.device_id,
+    })
+    .await?;
+    if !stable {
+        snapshot
+            .warnings
+            .push("页面在 4 秒内未形成连续一致的 UI 树；请检查动画、键盘或动态内容".to_owned());
+    }
+    Ok(snapshot)
+}
+
+async fn wait_for_explorer_stability(root: &Path, platform: Platform, device_id: &str) -> bool {
+    let mut previous = None;
+    for _ in 0..8 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let tree = match platform {
+            Platform::Android => capture_android_current_ui_tree(root, device_id).await,
+            Platform::Ios => capture_ios_current_ui_tree(root, device_id).await,
+        };
+        let Ok(tree) = tree else {
+            continue;
+        };
+        if previous.as_ref() == Some(&tree) {
+            return true;
+        }
+        previous = Some(tree);
+    }
+    false
 }
 
 fn ensure_inspector_capture_allowed(root: &Path) -> Result<(), String> {
@@ -1837,6 +1901,7 @@ pub fn run() {
             probe_flow,
             preview_generation_context,
             capture_device_inspector,
+            perform_explorer_step,
             doctor_cli_providers,
             doctor_local_model,
             compile_flow_preview,

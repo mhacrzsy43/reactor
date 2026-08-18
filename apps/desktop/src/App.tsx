@@ -836,10 +836,15 @@ function App() {
           <FlowExplorer
             devices={environment?.devices ?? []}
             selectedDeviceId={selectedDeviceId}
+            appId={appId}
             activeJobRunning={Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.job.state))}
             onSelectDevice={(device) => {
               setSelectedDeviceId(device.id);
               setPlatform(device.platform === "ios" ? "ios" : "android");
+            }}
+            onAppIdChange={(value) => {
+              setAppId(value);
+              invalidateGeneratedFlow();
             }}
             onRefreshDevices={() => void onRefresh()}
           />

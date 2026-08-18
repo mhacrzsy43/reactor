@@ -258,15 +258,34 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .explorer-toolbar-summary b, .explorer-toolbar-summary span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .explorer-toolbar-summary b { color: var(--text); font: 10px DM Mono, monospace; }
 .explorer-toolbar-summary span { margin-top: 4px; color: var(--muted); font-size: 9px; }
+.recording-console { max-width: 1390px; margin: 0 auto 12px; padding: 12px 14px; display: grid; grid-template-columns: 300px minmax(260px, 380px) 1fr auto; align-items: end; gap: 14px; }
+.recording-mode { height: 42px; padding: 3px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
+.recording-mode button { padding: 0 8px; display: grid; align-content: center; justify-items: start; gap: 1px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: 9px; }
+.recording-mode button span { font-size: 7px; opacity: .78; }
+.recording-mode button.active { color: white; background: var(--purple-strong); }
+.recording-app-id input { font-family: DM Mono, monospace; }
+.recording-progress { min-width: 0; min-height: 42px; display: flex; align-items: center; gap: 9px; color: var(--purple); }
+.recording-progress > div { min-width: 0; }
+.recording-progress b, .recording-progress span { display: block; }
+.recording-progress b { color: var(--text); font-size: 10px; }
+.recording-progress span { margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }
+.recorded-step-strip { max-width: 1390px; margin: 0 auto 18px; padding: 0 2px; display: flex; gap: 7px; overflow-x: auto; }
+.recorded-step-strip > div { min-width: 150px; padding: 8px 9px; display: grid; grid-template-columns: 22px 1fr; gap: 2px 7px; border: 1px solid color-mix(in srgb, var(--purple) 26%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--purple) 5%, var(--surface)); }
+.recorded-step-strip span { grid-row: 1 / 3; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: var(--purple); background: color-mix(in srgb, var(--purple) 12%, transparent); font: 8px DM Mono, monospace; }
+.recorded-step-strip b { font-size: 8px; }
+.recorded-step-strip code { max-width: 115px; overflow: hidden; color: var(--muted); font: 7px DM Mono, monospace; white-space: nowrap; text-overflow: ellipsis; }
 .explorer-guard { max-width: 1390px; margin: 0 auto 18px; padding: 13px 15px; display: flex; align-items: center; gap: 11px; border: 1px solid color-mix(in srgb, var(--orange) 30%, var(--line)); border-radius: 10px; color: var(--orange); background: color-mix(in srgb, var(--orange) 7%, var(--surface)); }
 .explorer-guard b, .explorer-guard span { display: block; }
 .explorer-guard b { font-size: 11px; }
 .explorer-guard span { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.explorer-guard.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
+.explorer-guard.danger > div { flex: 1; }
 .explorer-error { margin-top: 0; }
 .explorer-grid { max-width: 1390px; margin: 0 auto; display: grid; grid-template-columns: minmax(360px, 1.05fr) minmax(330px, .95fr); gap: 18px; align-items: start; }
 .explorer-device-card, .selector-inspector-card { min-height: 620px; padding: 20px; }
 .device-mirror-stage { min-height: 492px; padding: 18px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #07080b; }
 .device-mirror { position: relative; width: min(100%, 360px); overflow: visible; cursor: crosshair; user-select: none; box-shadow: 0 18px 55px rgba(0,0,0,.48); }
+.device-mirror.record { cursor: pointer; box-shadow: 0 0 0 2px color-mix(in srgb, var(--purple) 52%, transparent), 0 18px 55px rgba(0,0,0,.48); }
 .device-mirror img { width: 100%; height: auto; display: block; border-radius: 5px; pointer-events: none; }
 .element-highlight { position: absolute; z-index: 2; border: 2px solid var(--purple); background: color-mix(in srgb, var(--purple) 17%, transparent); box-shadow: 0 0 0 1px rgba(255,255,255,.32), 0 0 18px color-mix(in srgb, var(--purple) 36%, transparent); pointer-events: none; }
 .element-highlight > span { position: absolute; left: -2px; bottom: calc(100% + 4px); max-width: 220px; padding: 4px 6px; overflow: hidden; border-radius: 4px; color: white; background: var(--purple-strong); font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }

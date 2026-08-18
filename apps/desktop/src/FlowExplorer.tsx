@@ -1,13 +1,15 @@
-import { Check, Copy, Crosshair, MousePointer2, Pause, Play, RefreshCw, ScanSearch, ShieldCheck, Smartphone } from "lucide-react";
+import { AlertTriangle, Check, Copy, Crosshair, ListPlus, MousePointer2, Pause, Play, RefreshCw, ScanSearch, ShieldCheck, Smartphone, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captureDeviceInspector } from "./api";
-import type { Device, DeviceInspectorSnapshot, InspectorElement, InspectorSelectorCandidate } from "./types";
+import { captureDeviceInspector, performExplorerStep } from "./api";
+import type { Device, DeviceInspectorSnapshot, FlowStep, InspectorElement, InspectorSelectorCandidate } from "./types";
 
 interface FlowExplorerProps {
   devices: Device[];
   selectedDeviceId: string;
+  appId: string;
   activeJobRunning: boolean;
   onSelectDevice: (device: Device) => void;
+  onAppIdChange: (appId: string) => void;
   onRefreshDevices: () => void;
 }
 
@@ -20,8 +22,10 @@ const stabilityNames = {
 export function FlowExplorer({
   devices,
   selectedDeviceId,
+  appId,
   activeJobRunning,
   onSelectDevice,
+  onAppIdChange,
   onRefreshDevices,
 }: FlowExplorerProps) {
   const selectedDevice = useMemo(
@@ -32,7 +36,11 @@ export function FlowExplorer({
   const [selectedElementKey, setSelectedElementKey] = useState<string>();
   const [point, setPoint] = useState<{ x: number; y: number }>();
   const [loading, setLoading] = useState(false);
+  const [interacting, setInteracting] = useState(false);
   const [live, setLive] = useState(false);
+  const [mode, setMode] = useState<"inspect" | "record">("inspect");
+  const [recordedSteps, setRecordedSteps] = useState<FlowStep[]>([]);
+  const [pendingDanger, setPendingDanger] = useState<InspectorElement>();
   const [error, setError] = useState("");
   const [copiedStrategy, setCopiedStrategy] = useState("");
   const captureInFlight = useRef(false);
@@ -85,6 +93,43 @@ export function FlowExplorer({
     const hit = hitTest(snapshot.elements, x, y);
     setPoint({ x, y });
     setSelectedElementKey(hit?.key);
+    if (mode === "record" && hit) {
+      if (!hit.clickable) {
+        setError("此位置只有结构元素，Reactor 不会自动执行脆弱坐标；请审查后显式选择坐标降级。");
+        return;
+      }
+      if (isDangerousElement(hit)) {
+        setPendingDanger(hit);
+      } else {
+        void recordTap(hit);
+      }
+    }
+  }
+
+  async function recordTap(element: InspectorElement) {
+    const candidate = element.candidates[0];
+    if (!selectedDevice || !candidate || !appId.trim() || activeJobRunning || interacting) return;
+    const step: FlowStep = { action: "tap", target: candidate.selector };
+    setLive(false);
+    setInteracting(true);
+    setError("");
+    setPendingDanger(undefined);
+    try {
+      const next = await performExplorerStep({
+        platform: selectedDevice.platform === "ios" ? "ios" : "android",
+        deviceId: selectedDevice.id,
+        appId: appId.trim(),
+        step,
+      });
+      setRecordedSteps((current) => [...current, step]);
+      setSnapshot(next);
+      setSelectedElementKey(undefined);
+      setPoint(undefined);
+    } catch (reason) {
+      setError(`交互执行失败，步骤未加入 Flow：${String(reason)}`);
+    } finally {
+      setInteracting(false);
+    }
   }
 
   async function copySelector(candidate: InspectorSelectorCandidate) {
@@ -100,11 +145,11 @@ export function FlowExplorer({
   return (
     <>
       <header className="topbar">
-        <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10A</p><h1>看见页面，也看见 Selector</h1></div>
+        <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10B</p><h1>看见页面，逐步录成 Flow</h1></div>
         <div className="top-actions">
-          <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : live ? "低频同步中 · 3 秒" : "本地观察模式"}</span>
-          <button className="secondary-button" disabled={!selectedDevice || loading || activeJobRunning} onClick={() => void capture()}>{loading ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}刷新画面</button>
-          <button className="secondary-button" disabled={!selectedDevice || activeJobRunning} onClick={() => setLive((value) => !value)}>{live ? <Pause size={16} /> : <Play size={16} />}{live ? "暂停同步" : "开始同步"}</button>
+          <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : interacting ? "正在执行并等待页面稳定" : live ? "低频同步中 · 3 秒" : mode === "record" ? "录制/交互模式" : "审查模式"}</span>
+          <button className="secondary-button" disabled={!selectedDevice || loading || interacting || activeJobRunning} onClick={() => void capture()}>{loading ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}刷新画面</button>
+          <button className="secondary-button" disabled={!selectedDevice || interacting || activeJobRunning} onClick={() => setLive((value) => !value)}>{live ? <Pause size={16} /> : <Play size={16} />}{live ? "暂停同步" : "开始同步"}</button>
         </div>
       </header>
 
@@ -126,6 +171,20 @@ export function FlowExplorer({
         <button className="secondary-button" onClick={onRefreshDevices}><RefreshCw size={15} />刷新设备列表</button>
       </section>
 
+      <section className="recording-console card">
+        <div className="recording-mode" role="group" aria-label="Flow Explorer 模式">
+          <button className={mode === "inspect" ? "active" : ""} onClick={() => { setMode("inspect"); setPendingDanger(undefined); }}>审查模式<span>只看 Selector</span></button>
+          <button className={mode === "record" ? "active" : ""} onClick={() => { setMode("record"); setLive(false); }}>录制/交互模式<span>点击后进入下一页</span></button>
+        </div>
+        <label className="recording-app-id"><span>当前 App 包名 / Bundle ID</span><input value={appId} onChange={(event) => onAppIdChange(event.target.value)} placeholder="com.example.app" /></label>
+        <div className="recording-progress"><ListPlus size={17} /><div><b>{recordedSteps.length} 个已录制步骤</b><span>{mode === "record" ? "点击画面后 Reactor 使用最佳语义 Selector 真实执行，并等待下一页面稳定。" : "切换到录制/交互模式后才会操作设备。"}</span></div></div>
+        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} onClick={() => setRecordedSteps((steps) => steps.slice(0, -1))}><Undo2 size={15} />移除最后一步</button>
+      </section>
+
+      {recordedSteps.length > 0 && <section className="recorded-step-strip" aria-label="已录制步骤">{recordedSteps.map((step, index) => <div key={`${step.action}-${index}`}><span>{index + 1}</span><b>{step.action === "tap" ? "点击" : step.action}</b><code>{step.action === "tap" ? selectorLabel(step.target) : ""}</code></div>)}</section>}
+
+      {pendingDanger && <div className="explorer-guard danger"><AlertTriangle size={18} /><div><b>检测到潜在敏感操作：{elementName(pendingDanger)}</b><span>当前安全阶段不会执行或写入步骤；敏感操作确认凭证接通后才会开放“确认并继续”。</span></div><button className="secondary-button" onClick={() => setPendingDanger(undefined)}>取消</button></div>}
+
       {activeJobRunning && <div className="explorer-guard"><ShieldCheck size={17} /><div><b>性能测量隔离已生效</b><span>Reactor 不会在任何运行任务期间截屏或读取 UI 树。任务结束后可继续探索。</span></div></div>}
       {error && <div className="error-banner explorer-error">{error}</div>}
 
@@ -134,16 +193,16 @@ export function FlowExplorer({
       ) : (
         <div className="explorer-grid">
           <section className="card explorer-device-card">
-            <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>点击画面只选择控件；M8.10B 才会录制和执行操作。</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
+            <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
             <div className="device-mirror-stage">
               {snapshot ? (
-                <div className="device-mirror" onClick={inspectPoint} title="点击审查此位置的最小 UI 元素">
+                <div className={`device-mirror ${mode}`} onClick={inspectPoint} title={mode === "record" ? "点击并录制此控件" : "点击审查此位置的 UI 元素"}>
                   <img src={snapshot.screenshotDataUrl} alt={`${selectedDevice?.name ?? selectedDevice?.id} 当前画面`} draggable={false} />
                   {selectedElement && <span className="element-highlight" style={highlightStyle(selectedElement, snapshot)}><span>{elementName(selectedElement)}</span></span>}
                   {point && <span className="inspection-point" style={{ left: `${(point.x / snapshot.viewportWidth) * 100}%`, top: `${(point.y / snapshot.viewportHeight) * 100}%` }} />}
                 </div>
               ) : (
-                <div className="mirror-placeholder">{loading ? <RefreshCw size={28} className="spin" /> : <ScanSearch size={32} />}<b>{loading ? "正在同步画面与 UI 树" : "等待首次画面"}</b><span>截图与 UI 树并行获取，不写入测试产物。</span></div>
+                <div className="mirror-placeholder">{loading || interacting ? <RefreshCw size={28} className="spin" /> : <ScanSearch size={32} />}<b>{interacting ? "正在执行步骤并等待下一页面" : loading ? "正在同步画面与 UI 树" : "等待首次画面"}</b><span>截图与 UI 树并行获取，不写入测试产物。</span></div>
               )}
             </div>
             {snapshot?.warnings.map((warning) => <div className="explorer-warning" key={warning}>{warning}</div>)}
@@ -191,6 +250,15 @@ function hitTest(elements: InspectorElement[], x: number, y: number): InspectorE
 
 function elementName(element: InspectorElement): string {
   return element.text ?? element.accessibilityText ?? element.resourceId?.split("/").pop() ?? "未命名元素";
+}
+
+function isDangerousElement(element: InspectorElement): boolean {
+  const value = [element.text, element.accessibilityText, element.resourceId].filter(Boolean).join(" ").toLowerCase();
+  return ["delete", "remove account", "pay", "purchase", "buy", "checkout", "transfer", "submit", "authorize", "删除", "支付", "购买", "下单", "转账", "授权", "提交", "注销", "退出登录"].some((keyword) => value.includes(keyword));
+}
+
+function selectorLabel(selector: InspectorSelectorCandidate["selector"]): string {
+  return selector.accessibilityId ?? selector.semanticId ?? selector.text ?? (selector.coordinate ? `${Math.round(selector.coordinate.x)},${Math.round(selector.coordinate.y)}` : "未知 Selector");
 }
 
 function formatBounds(element: InspectorElement): string {

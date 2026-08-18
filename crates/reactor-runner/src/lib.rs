@@ -12,7 +12,7 @@ use reactor_core::{aggregate_iterations, compile_maestro, mean, percentile, rend
 use reactor_protocol::{
     AndroidNativeMetrics, DeviceMetadata, Flow, FlowLock, FlowTrialEvidence, FlowValidationError,
     IosMetricAvailability, IosNativeMetrics, IterationMetrics, NormalizedResult, ResultSource,
-    TrialMode, canonical_flow_hash,
+    Step, TrialMode, canonical_flow_hash,
 };
 use reactor_store::{ArtifactIssue, Job, JobEvent, JobState, Store};
 use regex::Regex;
@@ -709,6 +709,63 @@ pub async fn capture_ios_screenshot(
         "capture iOS inspector screenshot",
         MAX_SCREENSHOT_BYTES,
     )
+}
+
+/// Executes one reviewed Flow Explorer step against the current screen without launching or
+/// resetting the application. The ephemeral Maestro document is removed after execution and is
+/// never indexed as benchmark evidence.
+///
+/// # Errors
+///
+/// Returns an error when the step is not an interactive recorder action, validation fails, the
+/// managed automation runtime is unavailable, or the device command fails.
+pub async fn execute_explorer_step(
+    workspace: &Path,
+    platform: reactor_protocol::Platform,
+    device_id: &str,
+    app_id: &str,
+    step: Step,
+) -> Result<(), RunnerError> {
+    if !matches!(
+        &step,
+        Step::Tap { .. } | Step::InputText { .. } | Step::Swipe { .. } | Step::Pause { .. }
+    ) {
+        return Err(RunnerError::CommandFailed {
+            command: "Flow Explorer interaction".to_owned(),
+            output: "only tap, input_text, swipe, and pause are interactive recorder actions"
+                .to_owned(),
+        });
+    }
+    let flow = Flow {
+        schema_version: 1,
+        id: "flow-explorer-step".to_owned(),
+        name: "Flow Explorer reviewed step".to_owned(),
+        app_id: app_id.to_owned(),
+        platform,
+        intent: None,
+        setup: vec![],
+        measured: vec![step],
+        teardown: vec![],
+    };
+    let compiled = compile_maestro(&flow)?;
+    let tools = resolve_tools(workspace);
+    let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
+    let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;
+    let directory = workspace
+        .join(".reactor/runtime/explorer")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&directory).await?;
+    let path = directory.join("step.yaml");
+    fs::write(&path, compiled.measured).await?;
+    let result = match platform {
+        reactor_protocol::Platform::Android => {
+            let adb = tools.adb.ok_or(RunnerError::MissingTool("adb"))?;
+            run_maestro(&maestro, &java, &adb, &path, Some(device_id)).await
+        }
+        reactor_protocol::Platform::Ios => run_maestro_ios(&maestro, &java, &path, device_id).await,
+    };
+    let _ = fs::remove_dir_all(&directory).await;
+    result
 }
 
 fn validate_screenshot_output(

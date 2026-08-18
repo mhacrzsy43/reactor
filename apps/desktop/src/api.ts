@@ -143,6 +143,16 @@ export async function captureDeviceInspector(input: {
   return invoke("capture_device_inspector", { input });
 }
 
+export async function performExplorerStep(input: {
+  platform: Platform;
+  deviceId: string;
+  appId: string;
+  step: FlowStep;
+}): Promise<DeviceInspectorSnapshot> {
+  if (!inTauri) throw new Error("设备交互录制请在 Reactor 桌面应用中使用");
+  return invoke("perform_explorer_step", { input });
+}
+
 export async function doctorCliProviders(input: {
   codexExecutable?: string;
   claudeExecutable?: string;
