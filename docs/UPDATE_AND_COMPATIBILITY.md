@@ -38,3 +38,5 @@
 ## 发布门禁
 
 稳定通道发布前必须通过：格式化、全仓测试、严格 clippy、前端生产构建、Android/iOS 对应模拟器门禁、数据库升级/回滚测试、诊断包隐私测试、签名 manifest 校验和候选版本健康检查。Apple notarization、Windows Authenticode 和对应平台真实安装验证仍需要各自开发者账号/环境，缺失时必须标记“未执行”，不能冒充通过。
+
+没有 Apple 开发者账号的 macOS 可体验版仍对整个 `.app`（可执行文件与 Resources）执行 identity `-` 的 ad-hoc codesign，并以 `codesign --verify --deep --strict` 作为本地完整性门禁；这不等于 Developer ID 签名或 Apple notarization。取得账号后，发布 CI 必须用受保护的 Developer ID identity 覆盖 ad-hoc 配置并增加 notarize/staple 门禁。

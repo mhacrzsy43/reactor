@@ -31,6 +31,9 @@
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
     "shortDescription": "AI-driven mobile performance testing",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "resources": {
       "../../../.reactor/downloads": "managed-tool-archives"
     }
