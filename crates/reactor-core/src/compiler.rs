@@ -167,10 +167,16 @@ fn selector(selector: &Selector, path: &str) -> Result<String, CompileError> {
         .as_deref()
         .or(selector.semantic_id.as_deref())
     {
-        return Ok(format!("{{ id: {} }}", quote(id)));
+        return Ok(match selector.enabled {
+            Some(enabled) => format!("{{ id: {}, enabled: {enabled} }}", quote(id)),
+            None => format!("{{ id: {} }}", quote(id)),
+        });
     }
     if let Some(text) = selector.text.as_deref() {
-        return Ok(quote(text));
+        return Ok(match selector.enabled {
+            Some(enabled) => format!("{{ text: {}, enabled: {enabled} }}", quote(text)),
+            None => quote(text),
+        });
     }
     if let Some(coordinate) = selector.coordinate {
         return Ok(format!(
@@ -239,6 +245,33 @@ mod tests {
         };
         let output = compile_maestro(&flow).unwrap();
         assert!(output.measured.contains("tapOn: { point: \"720,522\" }"));
+    }
+
+    #[test]
+    fn enabled_state_assertion_compiles_into_the_maestro_selector() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "enabled-state".to_owned(),
+            name: "Enabled state".to_owned(),
+            app_id: "com.reactor.demo".to_owned(),
+            platform: Platform::Android,
+            intent: None,
+            setup: vec![],
+            measured: vec![Step::AssertVisible {
+                target: Selector {
+                    text: Some("Continue".to_owned()),
+                    enabled: Some(true),
+                    ..Selector::default()
+                },
+            }],
+            teardown: vec![],
+        };
+        let output = compile_maestro(&flow).unwrap();
+        assert!(
+            output
+                .measured
+                .contains("assertVisible: { text: \"Continue\", enabled: true }")
+        );
     }
 
     #[test]

@@ -857,6 +857,17 @@ function App() {
               invalidateGeneratedFlow();
             }}
             onRefreshDevices={() => void onRefresh()}
+            onPerformanceHandoff={(lock, nextPreparation, compiled) => {
+              setGenerated(nextPreparation.generated);
+              setCompiledFlow(compiled);
+              setPreparation(nextPreparation);
+              setFlowLock(lock);
+              setStage("locked");
+              setResults([]);
+              setReportPath("");
+              setFlowEditNotice("Flow Explorer 已完成真实回放、目标页唯一性证明和哈希锁定；请选择采集预设后开始正式测量。");
+              setPage("flow");
+            }}
           />
         ) : page === "devices" ? (
           <DeviceLab

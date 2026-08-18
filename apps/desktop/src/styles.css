@@ -276,6 +276,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .explorer-guard span { margin-top: 3px; color: var(--muted); font-size: 9px; }
 .explorer-guard.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
 .explorer-guard.danger > div { flex: 1; }
+.danger-confirm-button { padding: 7px 10px; color: white; border-color: var(--danger); background: var(--danger); }
 .explorer-error { margin-top: 0; }
 .explorer-grid { max-width: 1390px; margin: 0 auto; display: grid; grid-template-columns: minmax(360px, 1.05fr) minmax(330px, .95fr); gap: 18px; align-items: start; }
 .explorer-device-card, .selector-inspector-card { min-height: 620px; padding: 20px; }
@@ -368,6 +369,20 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .state-suggestion span { color: var(--muted); font: 7px DM Mono, monospace; }
 .state-suggestion p { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.5; }
 .state-suggestion button { width: 100%; justify-content: center; }
+.assertion-builder-panel { margin-bottom: 18px; padding: 13px; display: grid; gap: 9px; border: 1px solid color-mix(in srgb, var(--purple) 35%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--purple) 4%, var(--surface-raised)); }
+.assertion-readiness { display: grid; gap: 5px; }
+.assertion-readiness span { padding: 6px 7px; border-radius: 7px; color: var(--muted); background: color-mix(in srgb, var(--muted) 7%, transparent); font: 7px DM Mono, monospace; }
+.assertion-readiness span.ready { color: var(--green); background: color-mix(in srgb, var(--green) 9%, transparent); }
+.assertion-mode { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; color: var(--muted); font-size: 8px; }
+.assertion-mode select { width: 100%; }
+.goal-proof { padding: 8px; display: grid; gap: 4px; border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); border-radius: 8px; }
+.goal-proof.verified { border-color: color-mix(in srgb, var(--green) 50%, var(--line)); }
+.goal-proof b { font-size: 9px; }
+.goal-proof span, .goal-proof small { color: var(--muted); font: 7px DM Mono, monospace; line-height: 1.5; }
+.explorer-lock { padding: 8px; display: flex; align-items: center; gap: 8px; color: var(--green); border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); border-radius: 8px; }
+.explorer-lock > div { min-width: 0; display: grid; gap: 3px; }
+.explorer-lock b { font-size: 9px; }
+.explorer-lock code { overflow: hidden; color: var(--muted); font-size: 7px; text-overflow: ellipsis; }
 .current-selector-heading { margin: 4px 0 9px; display: flex; align-items: center; justify-content: space-between; }
 .current-selector-heading b { font-size: 11px; }
 .current-selector-heading span { color: var(--muted); font-size: 8px; }

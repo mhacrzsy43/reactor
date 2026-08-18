@@ -143,6 +143,8 @@ pub struct Selector {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinate: Option<Coordinate>,

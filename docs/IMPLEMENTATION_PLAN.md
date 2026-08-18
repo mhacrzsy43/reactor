@@ -18,7 +18,7 @@
 | M7 | ✅ 完成 | 历史中心、平台分组、任务详情、事件分页、虚拟列表、2Hz 轮询、10 万事件门禁和 Flow 草稿恢复均已完成；正式任务运行中关闭 UI 后 Worker 继续，重开自动恢复同一任务、进度、事件与最终结果的桌面门禁已通过 |
 | M8 | ✅ 完成 | 结果分析、确定性回归、RN 组件诊断、Profile Diff、CI 输出与 Release 已完成；Offline、Codex CLI、Claude Code CLI 的 Flow 生成与结果解释真实门禁通过，Local Model/Cloud 为可选配置 |
 | M8.9 | ✅ 完成 | 导航 Flow 必须验证最后一次导航；目标标记不能复用入口或只用坐标；试跑后比较起始/目标 UI 树，只有目标页独有标记成立才允许锁定。Android 任务 `75db50f2…` 已通过完整门禁 |
-| M8.10 | 🟡 进行中（必做） | M8.10A/B/C 已完成：镜像/Selector、低延迟录制、安全输入、编辑回放与 AI 安全状态图均通过 Android Emulator 门禁；下一步为 M8.10D Assertion Builder、目标页证明、锁定与性能测试衔接 |
+| M8.10 | ✅ 完成（必做） | A–D 全部完成：镜像/Selector、低延迟录制、安全输入、编辑回放、AI 状态图、可见/文本/启用状态断言、目标页唯一性证明、哈希锁定与性能测试衔接均通过 Android Emulator 门禁 |
 | M9 | ✅ 完成 | Android Emulator 正式实验 12/12 完成；统一结果与 HTML 报告已生成，模拟器实验集与物理设备结果严格隔离 |
 | M10 | 🟡 进行中 | macOS `.app`/DMG、隔离工作区启动、任务/历史/报告、数据库升级安全、诊断/隐私和资源策略已验收；自动更新通道与稳定版升级承诺待补 |
 
@@ -116,6 +116,8 @@ M8.10B 安全输入门禁：Flow 输入值已升级为 `literal | variableRef | 
 M8.10B 编辑与回放门禁：录制工作台提供步骤 / 完整 Flow JSON / Rust 编译后的 Maestro YAML 三视图，支持复制、删除、同 section 重排、一步撤销、JSON 插入或修改 Selector，以及显式选择 setup/measured 边界；跨 section 误拖会被拒绝。新录制默认加入可见的 `launch_app` 起点，避免从未知页面回放。逐步回放不重复写入 Flow；整体回放把 setup/measured/teardown 交给同一 Maestro 进程，Prompt 值必须本次重新输入。Android Emulator 实测 `launch_app → tap List scenario → measured swipe UP`：JSON 经 Rust 校验后生成三段实际 YAML，整体回放成功返回列表并完成滑动，刷新 UI 树为 65 个元素。第一次缺少启动起点的失败被明确显示且未冒充通过，随后据此补齐起点约束。
 
 M8.10C AI 状态图门禁：Flow Explorer 复用 Flow Studio 的 Reactor Offline、Local Model、Codex CLI、Claude Code 与 Cloud AI Provider 配置；只把脱敏后的可见文本、resource ID、交互属性和 bounds 作为模型上下文，不发送截图、输入值或 Secret。建议默认只展示，危险目标禁止执行，未知目标拒绝盲点，坐标降级要求再次确认。状态图只登记包含真实 UI 元素的页面，并把 Android 低延迟动作产生的空树瞬态延迟到完整 UI 树后再登记转移。Android Emulator 实测 Offline 从 RN 首页建议 `List scenario`，人工确认后以当前真实控件中心执行、Flow 自动加入 `launch_app + tap`，最终准确得到 2 个真实状态和 1 条转移；建议生成前后均未自动操作设备。
+
+M8.10D Assertion/Performance Handoff 门禁：目标页可点选稳定元素生成“元素可见、文本完全匹配、启用状态与当前一致”三类断言；状态断言编译为 Maestro selector 的 `enabled` 条件，坐标不能作为目标页证明。断言自动放在 measured 边界之前；危险人工操作必须在首次点选后再次明确确认，AI 建议仍不能执行危险动作。Android Emulator 实测从 RN 首页保存 18 元素起始证据，进入列表后选择 `List ready`，形成 `launch_app → tap → assert_visible → measured swipe`；受管 Maestro 整体回放证明标记在起始页不存在、目标页存在（18→59 elements），锁定哈希 `f44177b31775…`。一键交给 Flow Studio 后完成快速真实性能任务 `8f598dd2…`：P95 18.6 ms、Jank 4.1%、冷启动 143 ms、PSS 57.8 MB、CPU 2.7%，原始证据与 HTML 报告已生成。M8.10 完成，下一必选项为 M10.5。
 
 ### 2.3 实验设计助手
 

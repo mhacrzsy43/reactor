@@ -1,7 +1,7 @@
-import { AlertTriangle, ArrowDown, ArrowUp, Braces, Check, Code2, Copy, Crosshair, GitBranch, ListPlus, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Braces, Check, Code2, Copy, Crosshair, GitBranch, ListPlus, LockKeyhole, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captureDeviceInspector, compileFlowPreview, getFlowSecretStatus, performExplorerStep, probeFlow, replayRecordedFlow, saveFlowSecret } from "./api";
-import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowStep, InputValue, InspectorElement, InspectorSelectorCandidate } from "./types";
+import { captureDeviceInspector, compileFlowPreview, confirmFlow, getFlowSecretStatus, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, saveFlowSecret, trialGeneratedFlow } from "./api";
+import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowLock, FlowStep, GeneratedFlow, InputValue, InspectorElement, InspectorSelectorCandidate, RedactedUiContext, TrialPreparation } from "./types";
 
 interface ExplorerGraphNode {
   id: string;
@@ -46,6 +46,7 @@ interface FlowExplorerProps {
   onSelectDevice: (device: Device) => void;
   onAppIdChange: (appId: string) => void;
   onRefreshDevices: () => void;
+  onPerformanceHandoff: (lock: FlowLock, preparation: TrialPreparation, compiled: CompiledFlow) => void;
 }
 
 const stabilityNames = {
@@ -64,6 +65,7 @@ export function FlowExplorer({
   onSelectDevice,
   onAppIdChange,
   onRefreshDevices,
+  onPerformanceHandoff,
 }: FlowExplorerProps) {
   const selectedDevice = useMemo(
     () => devices.find((device) => device.id === selectedDeviceId) ?? devices[0],
@@ -93,6 +95,13 @@ export function FlowExplorer({
   const [suggesting, setSuggesting] = useState(false);
   const [suggestion, setSuggestion] = useState<ExplorerSuggestion>();
   const [suggestionConfirmed, setSuggestionConfirmed] = useState(false);
+  const [sourceContext, setSourceContext] = useState<RedactedUiContext>();
+  const [targetAssertion, setTargetAssertion] = useState<FlowStep>();
+  const [assertionMode, setAssertionMode] = useState<"visible" | "text" | "enabled">("text");
+  const [gateBusy, setGateBusy] = useState(false);
+  const [gatePreparation, setGatePreparation] = useState<TrialPreparation>();
+  const [gateLock, setGateLock] = useState<FlowLock>();
+  const [gateError, setGateError] = useState("");
   const [pendingDanger, setPendingDanger] = useState<InspectorElement>();
   const [error, setError] = useState("");
   const [copiedStrategy, setCopiedStrategy] = useState("");
@@ -110,6 +119,7 @@ export function FlowExplorer({
   const teardownStartRef = useRef(0);
   const currentGraphStateRef = useRef<string | undefined>(undefined);
   const pendingGraphStepRef = useRef<FlowStep | undefined>(undefined);
+  const sourceContextRef = useRef<RedactedUiContext | undefined>(undefined);
 
   useEffect(() => {
     teardownStartRef.current = teardownStart;
@@ -119,8 +129,14 @@ export function FlowExplorer({
     setGraphNodes([]);
     setGraphTransitions([]);
     setSuggestion(undefined);
+    setSourceContext(undefined);
+    setTargetAssertion(undefined);
+    setGatePreparation(undefined);
+    setGateLock(undefined);
+    setGateError("");
     currentGraphStateRef.current = undefined;
     pendingGraphStepRef.current = undefined;
+    sourceContextRef.current = undefined;
   }, [selectedDeviceId, appId]);
 
   function observeSnapshot(next: DeviceInspectorSnapshot, step?: FlowStep) {
@@ -148,11 +164,12 @@ export function FlowExplorer({
       name: "Interactive recording",
       appId: appId.trim(),
       platform: selectedDevice?.platform === "ios" ? "ios" : "android",
+      intent: goal.trim() || undefined,
       setup: recordedSteps.slice(0, setupEnd),
       measured: measurementStart === undefined ? [] : recordedSteps.slice(measurementStart, teardownStart),
       teardown: recordedSteps.slice(teardownStart),
     };
-  }, [appId, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
+  }, [appId, goal, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
 
   const promptReferences = useMemo(() => collectPromptReferences(explorerFlow), [explorerFlow]);
 
@@ -177,6 +194,12 @@ export function FlowExplorer({
     return () => { cancelled = true; };
   }, [explorerFlow, jsonDirty]);
 
+  useEffect(() => {
+    setGatePreparation(undefined);
+    setGateLock(undefined);
+    setGateError("");
+  }, [explorerFlow]);
+
   const capture = useCallback(async () => {
     if (!selectedDevice || activeJobRunning || captureInFlight.current) return;
     captureInFlight.current = true;
@@ -191,6 +214,19 @@ export function FlowExplorer({
       const pendingStep = pendingGraphStepRef.current;
       observeSnapshot(next, pendingStep);
       if (next.elements.length > 0) pendingGraphStepRef.current = undefined;
+      if (next.elements.length > 0 && !sourceContextRef.current && appId.trim()) {
+        try {
+          const context = await previewGenerationContext({
+            appId: appId.trim(),
+            platform: selectedDevice.platform === "ios" ? "ios" : "android",
+            deviceId: selectedDevice.id,
+          });
+          sourceContextRef.current = context;
+          setSourceContext(context);
+        } catch (reason) {
+          setGateError(`无法保存起始页证明：${cleanError(reason)}`);
+        }
+      }
       setSelectedElementKey((current) => current && next.elements.some((element) => element.key === current) ? current : undefined);
     } catch (reason) {
       setError(String(reason));
@@ -199,7 +235,7 @@ export function FlowExplorer({
       setLoading(false);
       captureInFlight.current = false;
     }
-  }, [activeJobRunning, selectedDevice]);
+  }, [activeJobRunning, appId, selectedDevice]);
 
   useEffect(() => {
     setSnapshot(undefined);
@@ -407,7 +443,11 @@ export function FlowExplorer({
 
   function removeRecordedStep(index: number) {
     rememberEditorState();
-    setRecordedSteps((steps) => steps.filter((_, stepIndex) => stepIndex !== index));
+    setRecordedSteps((steps) => {
+      const next = steps.filter((_, stepIndex) => stepIndex !== index);
+      setTargetAssertion(findDestinationAssertion(next));
+      return next;
+    });
     if (measurementStart !== undefined && index < measurementStart) {
       setMeasurementStart(Math.max(0, measurementStart - 1));
     }
@@ -433,6 +473,7 @@ export function FlowExplorer({
   function undoEditorChange() {
     if (!editorUndo) return;
     setRecordedSteps(editorUndo.steps);
+    setTargetAssertion(findDestinationAssertion(editorUndo.steps));
     setMeasurementStart(editorUndo.measurementStart);
     setTeardownStart(editorUndo.teardownStart);
     setEditorUndo(undefined);
@@ -448,6 +489,7 @@ export function FlowExplorer({
       const compiled = await compileFlowPreview(parsed);
       rememberEditorState();
       setRecordedSteps([...parsed.setup, ...parsed.measured, ...parsed.teardown]);
+      setTargetAssertion(findDestinationAssertion([...parsed.setup, ...parsed.measured]));
       setMeasurementStart(parsed.setup.length);
       setTeardownStart(parsed.setup.length + parsed.measured.length);
       setCompiledFlow(compiled);
@@ -580,6 +622,76 @@ export function FlowExplorer({
     setSuggestionConfirmed(false);
   }
 
+  function addTargetPageAssertion(element: InspectorElement) {
+    if (targetAssertion) {
+      setGateError("当前 Flow 已有目标页断言；如需替换，请先在步骤或 JSON 视图删除原断言。");
+      return;
+    }
+    const candidate = element.candidates.find((item) => isStableSelector(item.selector));
+    if (!candidate) {
+      setGateError("该元素只有坐标定位，不能作为目标页唯一性证明；请选择带文本、语义 ID 或 accessibility ID 的元素。");
+      return;
+    }
+    const exactText = element.text ?? element.accessibilityText;
+    if (assertionMode === "text" && !exactText) {
+      setGateError("该元素没有可验证文本，请改用可见性或启用状态断言。");
+      return;
+    }
+    const target = assertionMode === "text"
+      ? { text: exactText }
+      : assertionMode === "enabled"
+        ? { ...candidate.selector, enabled: element.enabled }
+        : candidate.selector;
+    const step: FlowStep = { action: "assert_visible", target };
+    const insertAt = measurementStart ?? teardownStart;
+    rememberEditorState();
+    setRecordedSteps((steps) => [...steps.slice(0, insertAt), step, ...steps.slice(insertAt)]);
+    if (measurementStart !== undefined) setMeasurementStart(measurementStart + 1);
+    const nextTeardownStart = teardownStart + 1;
+    teardownStartRef.current = nextTeardownStart;
+    setTeardownStart(nextTeardownStart);
+    setTargetAssertion(step);
+    setMode("record");
+    setJsonDirty(false);
+    setGateError("");
+  }
+
+  async function validateLockAndProveTarget() {
+    if (!selectedDevice || !compiledFlow || !sourceContext || !targetAssertion) return;
+    if (promptReferences.length > 0) {
+      setGateError("正式性能任务不能暂停等待 promptRef；请改用本机 Secret、CI Secret、测试验证码服务或预认证状态后再锁定。");
+      return;
+    }
+    setGateBusy(true);
+    setGateError("");
+    setGatePreparation(undefined);
+    setGateLock(undefined);
+    try {
+      const generated: GeneratedFlow = {
+        flow: explorerFlow,
+        provider: ai.provider === "offline" ? "reactor-explorer" : ai.provider,
+        model: ai.provider === "offline" ? "human-ai-state-graph-v1" : ai.model || "provider-default",
+        promptTemplateVersion: "interactive-explorer-v1",
+        notes: ["Built from real device states, human-confirmed actions, and a selected destination assertion"],
+      };
+      const preparation = await trialGeneratedFlow(generated, selectedDevice.id, sourceContext);
+      setGatePreparation(preparation);
+      if (preparation.failure || !preparation.trial) {
+        throw new Error(preparation.failure?.message ?? "整体 Maestro 回放未生成可信试跑证据");
+      }
+      if (preparation.goalEvidence && !preparation.goalEvidence.verified) {
+        throw new Error("目标页标记没有通过起始页/目标页唯一性证明");
+      }
+      const lock = await confirmFlow(preparation);
+      setGateLock(lock);
+      void capture();
+    } catch (reason) {
+      setGateError(`无法锁定：${cleanError(reason)}`);
+    } finally {
+      setGateBusy(false);
+    }
+  }
+
   async function copyFlowSource() {
     const source = flowView === "yaml" && compiledFlow ? maestroPreview(compiledFlow) : flowView === "json" ? jsonDraft : JSON.stringify(recordedSteps, null, 2);
     try {
@@ -634,7 +746,7 @@ export function FlowExplorer({
   return (
     <>
       <header className="topbar">
-        <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10B</p><h1>看见页面，逐步录成 Flow</h1></div>
+        <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10</p><h1>看见页面，逐步录成 Flow</h1></div>
         <div className="top-actions">
           <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : interacting ? "正在执行并等待页面稳定" : live ? "低频同步中 · 3 秒" : mode === "record" ? "录制/交互模式" : "审查模式"}</span>
           <button className="secondary-button" disabled={!selectedDevice || loading || interacting || activeJobRunning} onClick={() => void capture()}>{loading ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}刷新画面</button>
@@ -670,7 +782,7 @@ export function FlowExplorer({
         <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => removeRecordedStep(recordedSteps.length - 1)}><Undo2 size={15} />移除记录最后一步</button>
       </section>
 
-      {pendingDanger && <div className="explorer-guard danger"><AlertTriangle size={18} /><div><b>检测到潜在敏感操作：{elementName(pendingDanger)}</b><span>当前安全阶段不会执行或写入步骤；敏感操作确认凭证接通后才会开放“确认并继续”。</span></div><button className="secondary-button" onClick={() => setPendingDanger(undefined)}>取消</button></div>}
+      {pendingDanger && <div className="explorer-guard danger"><AlertTriangle size={18} /><div><b>检测到潜在敏感操作：{elementName(pendingDanger)}</b><span>这可能触发删除、支付、授权、提交或退出登录。只有你明确再次确认后，Reactor 才会在当前测试目标执行并写入 Flow。</span></div><button className="secondary-button" onClick={() => setPendingDanger(undefined)}>取消</button><button className="danger-confirm-button" disabled={interacting || activeJobRunning} onClick={() => void recordTap(pendingDanger)}>确认风险并执行</button></div>}
 
       {activeJobRunning && <div className="explorer-guard"><ShieldCheck size={17} /><div><b>性能测量隔离已生效</b><span>Reactor 不会在任何运行任务期间截屏或读取 UI 树。任务结束后可继续探索。</span></div></div>}
       {error && <div className="error-banner explorer-error">{error}</div>}
@@ -747,6 +859,20 @@ export function FlowExplorer({
               <button className="secondary-button state-suggest-button" disabled={!snapshot || suggesting || activeJobRunning} onClick={() => void generateNextSuggestion()}>{suggesting ? <RefreshCw size={14} className="spin" /> : <Sparkles size={14} />}{suggesting ? "正在生成安全建议" : "生成下一步建议"}</button>
               {suggestion && <div className={`state-suggestion ${suggestion.dangerous || !suggestion.knownTarget ? "warning" : "safe"}`}><div><b>{flowStepName(suggestion.step)} · {suggestion.label}</b><span>{suggestion.provider} · {suggestion.model}</span></div><p>{suggestion.dangerous ? "命中删除、支付、授权、提交等危险语义；Reactor 拒绝自动执行。" : !suggestion.knownTarget ? "目标未在当前真实 UI 树中命中，Reactor 不会盲目执行；请先在镜像中审查目标。" : suggestion.coordinateFallback ? "这是坐标降级，确认布局无变化后才能执行。" : "目标已在当前页面命中；建议不会自动执行或写入 Flow。"}</p><button className="primary-button" disabled={suggestion.dangerous || !suggestion.knownTarget || replaying} onClick={() => void executeSuggestion()}>{suggestion.coordinateFallback && !suggestionConfirmed ? "审查坐标风险" : "确认、执行并加入 Flow"}</button></div>}
             </section>
+            <section className="assertion-builder-panel" aria-label="目标页断言与性能测试衔接">
+              <div className="state-graph-heading"><div><p className="eyebrow">ASSERTION BUILDER · M8.10D</p><h3>证明目标页，再锁定性能 Flow</h3></div><ShieldCheck size={17} /></div>
+              <div className="assertion-readiness">
+                <span className={sourceContext ? "ready" : "waiting"}>{sourceContext ? `起始页已保存 · ${sourceContext.preview.elementCount} elements` : "等待保存起始页"}</span>
+                <span className={targetAssertion ? "ready" : "waiting"}>{targetAssertion ? `目标断言 · ${flowStepDetail(targetAssertion)}` : "尚未选择目标页标记"}</span>
+                <span className={compiledFlow ? "ready" : "waiting"}>{compiledFlow ? `${explorerFlow.measured.length} 个 measured 步骤 · Rust 校验通过` : "请指定至少一个 measured 步骤"}</span>
+              </div>
+              <p className="state-graph-privacy">请在目标页点选一个只属于该页面的稳定文本或语义 ID。坐标不能证明目标页，整体回放成功也不能替代唯一性证明。</p>
+              <label className="assertion-mode"><span>断言类型</span><select value={assertionMode} disabled={Boolean(targetAssertion)} onChange={(event) => setAssertionMode(event.target.value as typeof assertionMode)}><option value="visible">元素可见</option><option value="text">文本完全匹配</option><option value="enabled">启用状态与当前一致</option></select></label>
+              <button className="secondary-button state-suggest-button" disabled={!selectedElement || Boolean(targetAssertion) || !selectedElement.candidates.some((candidate) => isStableSelector(candidate.selector))} onClick={() => selectedElement && addTargetPageAssertion(selectedElement)}><Crosshair size={14} />{targetAssertion ? "目标页断言已加入 Flow" : selectedElement ? `把“${elementName(selectedElement)}”设为目标页断言` : "先在镜像中点选目标页标记"}</button>
+              {gatePreparation?.goalEvidence && <div className={`goal-proof ${gatePreparation.goalEvidence.verified ? "verified" : "failed"}`}><b>{gatePreparation.goalEvidence.verified ? "目标页唯一性证明通过" : "目标页唯一性证明失败"}</b><span>“{gatePreparation.goalEvidence.marker}” · 起始页 {gatePreparation.goalEvidence.sourceContainsMarker ? "存在" : "不存在"} · 目标页 {gatePreparation.goalEvidence.destinationContainsMarker ? "存在" : "不存在"}</span><small>{gatePreparation.goalEvidence.sourceElements} → {gatePreparation.goalEvidence.destinationElements} elements</small></div>}
+              {gateError && <div className="flow-editor-error">{gateError}</div>}
+              {gateLock ? <><div className="explorer-lock"><LockKeyhole size={15} /><div><b>Flow 已锁定</b><code>{gateLock.flowHash}</code></div></div><button className="primary-button state-suggest-button" onClick={() => compiledFlow && onPerformanceHandoff(gateLock, gatePreparation!, compiledFlow)}><ArrowRight size={14} />交给正式性能测试</button></> : <button className="primary-button state-suggest-button" disabled={gateBusy || !compiledFlow || !sourceContext || !targetAssertion || activeJobRunning} onClick={() => void validateLockAndProveTarget()}>{gateBusy ? <RefreshCw size={14} className="spin" /> : <LockKeyhole size={14} />}{gateBusy ? "整体 Maestro 回放与证明中" : "整体回放、证明并锁定"}</button>}
+            </section>
             <div className="current-selector-heading"><b>当前 Selector</b><span>{selectedElement ? "待审查 / 待执行" : "尚未选择控件"}</span></div>
             {selectedElement ? (
               <>
@@ -812,11 +938,12 @@ function inputValueLabel(value: InputValue): string {
 
 function isDangerousElement(element: InspectorElement): boolean {
   const value = [element.text, element.accessibilityText, element.resourceId].filter(Boolean).join(" ").toLowerCase();
-  return ["delete", "remove account", "pay", "purchase", "buy", "checkout", "transfer", "submit", "authorize", "删除", "支付", "购买", "下单", "转账", "授权", "提交", "注销", "退出登录"].some((keyword) => value.includes(keyword));
+  return ["delete", "remove account", "pay", "purchase", "buy", "checkout", "transfer", "submit", "authorize", "permissioncontroller", "allow permission", "删除", "支付", "购买", "下单", "转账", "授权", "允许访问", "提交", "注销", "退出登录"].some((keyword) => value.includes(keyword));
 }
 
 function selectorLabel(selector: InspectorSelectorCandidate["selector"]): string {
-  return selector.accessibilityId ?? selector.semanticId ?? selector.text ?? (selector.coordinate ? `${Math.round(selector.coordinate.x)},${Math.round(selector.coordinate.y)}` : "未知 Selector");
+  const identity = selector.accessibilityId ?? selector.semanticId ?? selector.text ?? (selector.coordinate ? `${Math.round(selector.coordinate.x)},${Math.round(selector.coordinate.y)}` : "未知 Selector");
+  return selector.enabled === undefined ? identity : `${identity} · enabled=${selector.enabled}`;
 }
 
 function flowStepName(step: FlowStep): string {
@@ -831,6 +958,7 @@ function flowStepDetail(step: FlowStep): string {
   if (step.action === "tap") return selectorLabel(step.target);
   if (step.action === "swipe") return `${step.direction.toUpperCase()} · ${step.duration_ms} ms`;
   if (step.action === "input_text") return `${selectorLabel(step.target)} · ${inputValueLabel(step.value)}`;
+  if (step.action === "wait_for" || step.action === "assert_visible") return selectorLabel(step.target);
   if (step.action === "pause") return `${step.duration_ms} ms`;
   return "";
 }
@@ -928,9 +1056,17 @@ function selectorsOverlap(element: InspectorElement, selector: InspectorSelector
   );
 }
 
+function isStableSelector(selector: InspectorSelectorCandidate["selector"]): boolean {
+  return Boolean(selector.semanticId || selector.accessibilityId || selector.text);
+}
+
+function findDestinationAssertion(steps: FlowStep[]): FlowStep | undefined {
+  return [...steps].reverse().find((step) => step.action === "assert_visible" && isStableSelector(step.target));
+}
+
 function isDangerousSelector(selector: InspectorSelectorCandidate["selector"]): boolean {
   const value = [selector.semanticId, selector.accessibilityId, selector.text].filter(Boolean).join(" ").toLowerCase();
-  return ["delete", "remove account", "pay", "purchase", "checkout", "transfer", "submit", "authorize", "删除", "支付", "购买", "下单", "转账", "授权", "提交", "注销"].some((keyword) => value.includes(keyword));
+  return ["delete", "remove account", "pay", "purchase", "checkout", "transfer", "submit", "authorize", "permissioncontroller", "allow permission", "删除", "支付", "购买", "下单", "转账", "授权", "允许访问", "提交", "注销"].some((keyword) => value.includes(keyword));
 }
 
 function providerLabel(provider: "offline" | "local" | "codex" | "claude" | "cloud"): string {

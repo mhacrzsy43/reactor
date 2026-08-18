@@ -4,6 +4,7 @@ export interface Selector {
   semanticId?: string;
   accessibilityId?: string;
   text?: string;
+  enabled?: boolean;
   index?: number;
   coordinate?: { x: number; y: number };
 }
