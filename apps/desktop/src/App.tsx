@@ -837,6 +837,16 @@ function App() {
             devices={environment?.devices ?? []}
             selectedDeviceId={selectedDeviceId}
             appId={appId}
+            goal={intent}
+            ai={{
+              provider: providerMode,
+              endpoint: providerMode === "local" ? localEndpoint : endpoint,
+              model: providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel : model,
+              apiKey: providerMode === "cloud" ? apiKey || undefined : undefined,
+              saveApiKey: providerMode === "cloud" && saveApiKey,
+              useSavedApiKey: providerMode === "cloud" && useSavedApiKey,
+              cliExecutable: providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined,
+            }}
             activeJobRunning={Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.job.state))}
             onSelectDevice={(device) => {
               setSelectedDeviceId(device.id);

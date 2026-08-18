@@ -1,12 +1,47 @@
-import { AlertTriangle, ArrowDown, ArrowUp, Braces, Check, Code2, Copy, Crosshair, ListPlus, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Smartphone, Trash2, Undo2 } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Braces, Check, Code2, Copy, Crosshair, GitBranch, ListPlus, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captureDeviceInspector, compileFlowPreview, getFlowSecretStatus, performExplorerStep, replayRecordedFlow, saveFlowSecret } from "./api";
+import { captureDeviceInspector, compileFlowPreview, getFlowSecretStatus, performExplorerStep, probeFlow, replayRecordedFlow, saveFlowSecret } from "./api";
 import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowStep, InputValue, InspectorElement, InspectorSelectorCandidate } from "./types";
+
+interface ExplorerGraphNode {
+  id: string;
+  label: string;
+  elementCount: number;
+  capturedAt: string;
+}
+
+interface ExplorerGraphTransition {
+  id: string;
+  from: string;
+  to: string;
+  action: string;
+}
+
+interface ExplorerSuggestion {
+  step: FlowStep;
+  label: string;
+  provider: string;
+  model: string;
+  knownTarget: boolean;
+  dangerous: boolean;
+  coordinateFallback: boolean;
+  executionPoint?: { x: number; y: number };
+}
 
 interface FlowExplorerProps {
   devices: Device[];
   selectedDeviceId: string;
   appId: string;
+  goal: string;
+  ai: {
+    provider: "offline" | "local" | "codex" | "claude" | "cloud";
+    endpoint: string;
+    model: string;
+    apiKey?: string;
+    saveApiKey: boolean;
+    useSavedApiKey: boolean;
+    cliExecutable?: string;
+  };
   activeJobRunning: boolean;
   onSelectDevice: (device: Device) => void;
   onAppIdChange: (appId: string) => void;
@@ -23,6 +58,8 @@ export function FlowExplorer({
   devices,
   selectedDeviceId,
   appId,
+  goal,
+  ai,
   activeJobRunning,
   onSelectDevice,
   onAppIdChange,
@@ -51,6 +88,11 @@ export function FlowExplorer({
   const [editorUndo, setEditorUndo] = useState<{ steps: FlowStep[]; measurementStart?: number; teardownStart: number }>();
   const [replaying, setReplaying] = useState(false);
   const [promptValues, setPromptValues] = useState<Record<string, string>>({});
+  const [graphNodes, setGraphNodes] = useState<ExplorerGraphNode[]>([]);
+  const [graphTransitions, setGraphTransitions] = useState<ExplorerGraphTransition[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestion, setSuggestion] = useState<ExplorerSuggestion>();
+  const [suggestionConfirmed, setSuggestionConfirmed] = useState(false);
   const [pendingDanger, setPendingDanger] = useState<InspectorElement>();
   const [error, setError] = useState("");
   const [copiedStrategy, setCopiedStrategy] = useState("");
@@ -66,10 +108,37 @@ export function FlowExplorer({
   const mirrorRef = useRef<HTMLDivElement>(null);
   const lastWheelGestureAt = useRef(0);
   const teardownStartRef = useRef(0);
+  const currentGraphStateRef = useRef<string | undefined>(undefined);
+  const pendingGraphStepRef = useRef<FlowStep | undefined>(undefined);
 
   useEffect(() => {
     teardownStartRef.current = teardownStart;
   }, [teardownStart]);
+
+  useEffect(() => {
+    setGraphNodes([]);
+    setGraphTransitions([]);
+    setSuggestion(undefined);
+    currentGraphStateRef.current = undefined;
+    pendingGraphStepRef.current = undefined;
+  }, [selectedDeviceId, appId]);
+
+  function observeSnapshot(next: DeviceInspectorSnapshot, step?: FlowStep) {
+    if (next.elements.length === 0) return;
+    const node = graphNode(next);
+    const from = currentGraphStateRef.current;
+    setGraphNodes((nodes) => nodes.some((candidate) => candidate.id === node.id) ? nodes : [...nodes, node]);
+    if (step && from) {
+      const transition: ExplorerGraphTransition = {
+        id: `${from}:${node.id}:${flowStepName(step)}`,
+        from,
+        to: node.id,
+        action: flowStepName(step),
+      };
+      setGraphTransitions((transitions) => transitions.some((candidate) => candidate.id === transition.id) ? transitions : [...transitions, transition]);
+    }
+    currentGraphStateRef.current = node.id;
+  }
 
   const explorerFlow = useMemo<Flow>(() => {
     const setupEnd = measurementStart ?? teardownStart;
@@ -119,6 +188,9 @@ export function FlowExplorer({
         deviceId: selectedDevice.id,
       });
       setSnapshot(next);
+      const pendingStep = pendingGraphStepRef.current;
+      observeSnapshot(next, pendingStep);
+      if (next.elements.length > 0) pendingGraphStepRef.current = undefined;
       setSelectedElementKey((current) => current && next.elements.some((element) => element.key === current) ? current : undefined);
     } catch (reason) {
       setError(String(reason));
@@ -305,13 +377,16 @@ export function FlowExplorer({
         runtimeInput,
       });
       setRecordedSteps((current) => {
-        const insertAt = Math.min(teardownStartRef.current, current.length);
-        const next = [...current.slice(0, insertAt), step, ...current.slice(insertAt)];
+        const base: FlowStep[] = current.length === 0 ? [{ action: "launch_app" }] : current;
+        const insertAt = current.length === 0 ? 1 : Math.min(teardownStartRef.current, base.length);
+        const next = [...base.slice(0, insertAt), step, ...base.slice(insertAt)];
         teardownStartRef.current = insertAt + 1;
         setTeardownStart(insertAt + 1);
         return next;
       });
       setSnapshot(next);
+      if (next.elements.length > 0) observeSnapshot(next, step);
+      else pendingGraphStepRef.current = step;
       setSelectedElementKey(undefined);
       setPoint(undefined);
       if (next.platform === "android" && next.elements.length === 0) {
@@ -401,6 +476,7 @@ export function FlowExplorer({
         promptValues,
       });
       setSnapshot(next);
+      observeSnapshot(next);
       setPromptValues({});
       setSelectedElementKey(undefined);
     } catch (reason) {
@@ -429,12 +505,79 @@ export function FlowExplorer({
         runtimeInput,
       });
       setSnapshot(next);
+      observeSnapshot(next, step);
       if (promptReference) setPromptValues((values) => ({ ...values, [promptReference]: "" }));
     } catch (reason) {
       setEditorError(`逐步回放失败：${cleanError(reason)}`);
     } finally {
       setReplaying(false);
     }
+  }
+
+  async function generateNextSuggestion() {
+    if (!snapshot || !appId.trim()) return;
+    setSuggesting(true);
+    setSuggestion(undefined);
+    setSuggestionConfirmed(false);
+    setEditorError("");
+    try {
+      if (ai.provider === "offline") {
+        const offline = offlineNextSuggestion(snapshot, goal);
+        if (!offline) throw new Error("当前页面没有可安全建议的语义控件");
+        setSuggestion(offline);
+        return;
+      }
+      const generated = await probeFlow({
+        intent: goal,
+        appId: appId.trim(),
+        platform: explorerFlow.platform,
+        uiTree: explorerAiContext(snapshot),
+        provider: ai.provider,
+        endpoint: ai.endpoint,
+        model: ai.model,
+        apiKey: ai.apiKey,
+        saveApiKey: ai.saveApiKey,
+        useSavedApiKey: ai.useSavedApiKey,
+        cliExecutable: ai.cliExecutable,
+      });
+      const steps = [...generated.flow.setup, ...generated.flow.measured, ...generated.flow.teardown];
+      const step = steps.find((candidate) => candidate.action === "tap" || candidate.action === "swipe");
+      if (!step) throw new Error("Provider 没有返回可审查的下一步动作");
+      const target = step.action === "tap" ? step.target : undefined;
+      const targetElement = target ? snapshot.elements.find((element) => selectorsOverlap(element, target)) : undefined;
+      const knownTarget = !target || Boolean(targetElement) || Boolean(target.coordinate);
+      setSuggestion({
+        step,
+        label: flowStepDetail(step) || flowStepName(step),
+        provider: generated.provider,
+        model: generated.model,
+        knownTarget,
+        dangerous: target ? isDangerousSelector(target) || Boolean(targetElement && isDangerousElement(targetElement)) : false,
+        coordinateFallback: Boolean(target?.coordinate),
+        executionPoint: targetElement
+          ? { x: targetElement.bounds.x + targetElement.bounds.width / 2, y: targetElement.bounds.y + targetElement.bounds.height / 2 }
+          : target?.coordinate,
+      });
+    } catch (reason) {
+      setEditorError(`无法生成下一步建议：${cleanError(reason)}`);
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
+  async function executeSuggestion() {
+    if (!suggestion || suggestion.dangerous) return;
+    if (!suggestion.knownTarget) {
+      setEditorError("AI 建议的目标不在当前真实 UI 树中，Reactor 不会盲目执行；请先在镜像中审查目标。");
+      return;
+    }
+    if (suggestion.coordinateFallback && !suggestionConfirmed) {
+      setSuggestionConfirmed(true);
+      return;
+    }
+    await executeRecordedStep(suggestion.step, `AI 建议：${suggestion.label}`, suggestion.executionPoint);
+    setSuggestion(undefined);
+    setSuggestionConfirmed(false);
   }
 
   async function copyFlowSource() {
@@ -594,6 +737,16 @@ export function FlowExplorer({
                 <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={!compiledFlow || replaying || activeJobRunning} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? "整体回放中" : "整体回放"}</button></div>
               </section>
             )}
+            <section className="state-graph-panel" aria-label="AI 状态图探索">
+              <div className="state-graph-heading"><div><p className="eyebrow">AI STATE GRAPH · M8.10C</p><h3>只基于真实观察页面建议下一步</h3></div><GitBranch size={17} /></div>
+              <p className="state-graph-goal">目标：{goal}</p>
+              <div className="state-graph-summary"><span>{graphNodes.length} 个状态</span><span>{graphTransitions.length} 条真实转移</span><span>{providerLabel(ai.provider)}</span></div>
+              {graphNodes.length > 0 && <div className="state-graph-nodes">{graphNodes.slice(-5).map((node) => <div className={node.id === currentGraphStateRef.current ? "current" : ""} key={node.id}><span>{node.id.slice(0, 6)}</span><b>{node.label}</b><small>{node.elementCount} elements</small></div>)}</div>}
+              {graphTransitions.length > 0 && <div className="state-graph-transitions">{graphTransitions.slice(-4).map((transition) => <span key={transition.id}>{transition.from.slice(0, 4)} → {transition.to.slice(0, 4)} · {transition.action}</span>)}</div>}
+              <p className="state-graph-privacy">仅发送脱敏后的可见文本、资源 ID、交互/输入类型和 bounds；不发送截图、输入值或 Secret。</p>
+              <button className="secondary-button state-suggest-button" disabled={!snapshot || suggesting || activeJobRunning} onClick={() => void generateNextSuggestion()}>{suggesting ? <RefreshCw size={14} className="spin" /> : <Sparkles size={14} />}{suggesting ? "正在生成安全建议" : "生成下一步建议"}</button>
+              {suggestion && <div className={`state-suggestion ${suggestion.dangerous || !suggestion.knownTarget ? "warning" : "safe"}`}><div><b>{flowStepName(suggestion.step)} · {suggestion.label}</b><span>{suggestion.provider} · {suggestion.model}</span></div><p>{suggestion.dangerous ? "命中删除、支付、授权、提交等危险语义；Reactor 拒绝自动执行。" : !suggestion.knownTarget ? "目标未在当前真实 UI 树中命中，Reactor 不会盲目执行；请先在镜像中审查目标。" : suggestion.coordinateFallback ? "这是坐标降级，确认布局无变化后才能执行。" : "目标已在当前页面命中；建议不会自动执行或写入 Flow。"}</p><button className="primary-button" disabled={suggestion.dangerous || !suggestion.knownTarget || replaying} onClick={() => void executeSuggestion()}>{suggestion.coordinateFallback && !suggestionConfirmed ? "审查坐标风险" : "确认、执行并加入 Flow"}</button></div>}
+            </section>
             <div className="current-selector-heading"><b>当前 Selector</b><span>{selectedElement ? "待审查 / 待执行" : "尚未选择控件"}</span></div>
             {selectedElement ? (
               <>
@@ -708,6 +861,109 @@ function maestroPreview(compiled: CompiledFlow): string {
 
 function cleanError(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason).replace(/^Error:\s*/, "");
+}
+
+function graphNode(snapshot: DeviceInspectorSnapshot): ExplorerGraphNode {
+  const safeElements = snapshot.elements.filter((element) => !isSystemNoiseElement(element)).map((element) => ({
+    id: element.resourceId ?? "",
+    text: element.editable || element.password ? "" : safeUiText(element.text ?? element.accessibilityText ?? ""),
+    editable: element.editable,
+    clickable: element.clickable,
+    bounds: element.bounds,
+  }));
+  const fingerprint = JSON.stringify(safeElements);
+  const labels = safeElements.map((element) => element.text).filter(Boolean).slice(0, 3);
+  return {
+    id: stableShortHash(`${snapshot.platform}:${fingerprint}`),
+    label: labels.join(" · ") || `${snapshot.platform} page`,
+    elementCount: snapshot.elements.length,
+    capturedAt: snapshot.capturedAt,
+  };
+}
+
+function explorerAiContext(snapshot: DeviceInspectorSnapshot): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    platform: snapshot.platform,
+    viewport: { width: snapshot.viewportWidth, height: snapshot.viewportHeight },
+    elements: snapshot.elements.filter((element) => !isSystemNoiseElement(element)).map((element) => ({
+      resourceId: element.resourceId,
+      text: element.editable || element.password ? "[REDACTED_EDITABLE_VALUE]" : safeUiText(element.text ?? element.accessibilityText ?? ""),
+      clickable: element.clickable,
+      editable: element.editable,
+      password: element.password,
+      enabled: element.enabled,
+      bounds: element.bounds,
+    })),
+  });
+}
+
+function safeUiText(value: string): string {
+  const trimmed = value.trim().slice(0, 160);
+  if (/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/.test(trimmed)) return "[REDACTED_EMAIL]";
+  if (/\b(?:\d[ -]?){7,}\d\b/.test(trimmed)) return "[REDACTED_NUMBER]";
+  return trimmed;
+}
+
+function isSystemNoiseElement(element: InspectorElement): boolean {
+  const id = element.resourceId?.toLowerCase() ?? "";
+  const text = (element.text ?? element.accessibilityText ?? "").trim();
+  return id.includes("com.android.systemui") || /^\d{1,2}:\d{2}$/.test(text);
+}
+
+function stableShortHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function selectorsOverlap(element: InspectorElement, selector: InspectorSelectorCandidate["selector"]): boolean {
+  return Boolean(
+    selector.semanticId && selector.semanticId === element.resourceId
+    || selector.accessibilityId && selector.accessibilityId === element.resourceId
+    || selector.text && [element.text, element.accessibilityText].includes(selector.text),
+  );
+}
+
+function isDangerousSelector(selector: InspectorSelectorCandidate["selector"]): boolean {
+  const value = [selector.semanticId, selector.accessibilityId, selector.text].filter(Boolean).join(" ").toLowerCase();
+  return ["delete", "remove account", "pay", "purchase", "checkout", "transfer", "submit", "authorize", "删除", "支付", "购买", "下单", "转账", "授权", "提交", "注销"].some((keyword) => value.includes(keyword));
+}
+
+function providerLabel(provider: "offline" | "local" | "codex" | "claude" | "cloud"): string {
+  return { offline: "Reactor Offline", local: "Local Model", codex: "Codex CLI", claude: "Claude Code", cloud: "Cloud AI" }[provider];
+}
+
+function offlineNextSuggestion(snapshot: DeviceInspectorSnapshot, goal: string): ExplorerSuggestion | undefined {
+  const keywords = goal.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 2);
+  const candidates = snapshot.elements
+    .filter((element) => element.enabled && element.clickable && element.candidates.length > 0 && !isDangerousElement(element))
+    .map((element) => {
+      const label = elementName(element);
+      const lower = label.toLowerCase();
+      const relevance = keywords.reduce((score, keyword) => score + (lower.includes(keyword) ? 20 : 0), 0);
+      return { element, label, score: relevance + element.candidates[0].score };
+    })
+    .sort((left, right) => right.score - left.score);
+  const best = candidates[0];
+  if (!best) return undefined;
+  const step: FlowStep = { action: "tap", target: best.element.candidates[0].selector };
+  return {
+    step,
+    label: best.label,
+    provider: "reactor-safe-rules",
+    model: "deterministic-next-action-v1",
+    knownTarget: true,
+    dangerous: false,
+    coordinateFallback: Boolean(best.element.candidates[0].selector.coordinate),
+    executionPoint: {
+      x: best.element.bounds.x + best.element.bounds.width / 2,
+      y: best.element.bounds.y + best.element.bounds.height / 2,
+    },
+  };
 }
 
 function formatBounds(element: InspectorElement): string {

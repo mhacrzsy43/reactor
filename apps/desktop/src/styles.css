@@ -346,6 +346,28 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .replay-prompts span { color: var(--muted); font: 7px DM Mono, monospace; }
 .flow-editor-error { margin-top: 9px; padding: 8px; border-radius: 7px; color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); font-size: 8px; line-height: 1.5; }
 .flow-editor-actions { margin-top: 10px; justify-content: space-between; }
+.state-graph-panel { margin-bottom: 18px; padding: 13px; display: grid; gap: 9px; border: 1px solid color-mix(in srgb, var(--green) 30%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--green) 4%, var(--surface-raised)); }
+.state-graph-heading { display: flex; align-items: flex-start; justify-content: space-between; color: var(--green); }
+.state-graph-heading .eyebrow { margin: 0 0 4px; font-size: 7px; }
+.state-graph-heading h3 { margin: 0; color: var(--text); font-size: 11px; }
+.state-graph-goal, .state-graph-privacy { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.5; }
+.state-graph-summary { display: flex; flex-wrap: wrap; gap: 5px; }
+.state-graph-summary span { padding: 4px 6px; border-radius: 999px; color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); font: 7px DM Mono, monospace; }
+.state-graph-nodes { display: grid; gap: 5px; }
+.state-graph-nodes > div { padding: 7px; display: grid; grid-template-columns: 45px minmax(0, 1fr) auto; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 7px; }
+.state-graph-nodes > div.current { border-color: color-mix(in srgb, var(--green) 50%, var(--line)); }
+.state-graph-nodes span, .state-graph-nodes small, .state-graph-transitions span { color: var(--muted); font: 7px DM Mono, monospace; }
+.state-graph-nodes b { overflow: hidden; font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }
+.state-graph-transitions { display: flex; flex-wrap: wrap; gap: 5px; }
+.state-graph-transitions span { padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; }
+.state-suggest-button { width: 100%; justify-content: center; }
+.state-suggestion { padding: 9px; display: grid; gap: 7px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); border-radius: 8px; }
+.state-suggestion.warning { border-color: color-mix(in srgb, var(--orange) 55%, var(--line)); }
+.state-suggestion > div { display: grid; gap: 3px; }
+.state-suggestion b { font-size: 9px; }
+.state-suggestion span { color: var(--muted); font: 7px DM Mono, monospace; }
+.state-suggestion p { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.5; }
+.state-suggestion button { width: 100%; justify-content: center; }
 .current-selector-heading { margin: 4px 0 9px; display: flex; align-items: center; justify-content: space-between; }
 .current-selector-heading b { font-size: 11px; }
 .current-selector-heading span { color: var(--muted); font-size: 8px; }
