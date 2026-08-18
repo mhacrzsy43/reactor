@@ -105,6 +105,8 @@ M8.10A Android Emulator 桌面验收：Reactor 同步 `emulator-5554` 的 1440×
 
 M8.10B 第一段 Android Emulator 门禁：切换“录制/交互模式”后点击 `List scenario`，Reactor 使用 82/100 文本 Selector 生成单步临时 Maestro Flow；真实执行后进入列表页面，等待 UI 稳定，将 UI 树从 18 个元素刷新为 62 个元素，并在录制时间线追加第 1 个 `tap`。临时执行文件位于 runtime 且执行后删除，不登记为性能证据。联调发现并修复坐标 Selector 的旧 YAML 语法；结构元素不会被一次点击自动执行坐标降级。
 
+M8.10B 镜像交互修正：审查模式选中控件后，Selector 面板始终提供“在设备上点击并继续”，不要求用户回到页面顶部猜测当前模式；执行期间镜像遮罩显示具体动作和页面稳定等待。镜像内滚轮/触控板事件必须阻止 Reactor 页面滚动，并在录制模式转换为设备 `swipe`。Android Emulator 已用受管 Maestro 2.8.0 验证 500ms `UP` swipe 成功。
+
 ### 2.3 实验设计助手
 
 - 根据测试目标推荐场景、预热次数、正式迭代次数和设备控制项。

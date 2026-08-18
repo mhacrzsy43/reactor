@@ -37,6 +37,7 @@ export function FlowExplorer({
   const [point, setPoint] = useState<{ x: number; y: number }>();
   const [loading, setLoading] = useState(false);
   const [interacting, setInteracting] = useState(false);
+  const [interactingLabel, setInteractingLabel] = useState("");
   const [live, setLive] = useState(false);
   const [mode, setMode] = useState<"inspect" | "record">("inspect");
   const [recordedSteps, setRecordedSteps] = useState<FlowStep[]>([]);
@@ -44,6 +45,7 @@ export function FlowExplorer({
   const [error, setError] = useState("");
   const [copiedStrategy, setCopiedStrategy] = useState("");
   const captureInFlight = useRef(false);
+  const interactionInFlight = useRef(false);
 
   const capture = useCallback(async () => {
     if (!selectedDevice || activeJobRunning || captureInFlight.current) return;
@@ -93,6 +95,7 @@ export function FlowExplorer({
     const hit = hitTest(snapshot.elements, x, y);
     setPoint({ x, y });
     setSelectedElementKey(hit?.key);
+    setError("");
     if (mode === "record" && hit) {
       if (!hit.clickable) {
         setError("此位置只有结构元素，Reactor 不会自动执行脆弱坐标；请审查后显式选择坐标降级。");
@@ -108,10 +111,22 @@ export function FlowExplorer({
 
   async function recordTap(element: InspectorElement) {
     const candidate = element.candidates[0];
-    if (!selectedDevice || !candidate || !appId.trim() || activeJobRunning || interacting) return;
+    if (!selectedDevice || !candidate || !appId.trim() || activeJobRunning || interactionInFlight.current) return;
     const step: FlowStep = { action: "tap", target: candidate.selector };
+    await executeRecordedStep(step, `点击 ${elementName(element)}`);
+  }
+
+  async function recordSwipe(direction: "up" | "down") {
+    const step: FlowStep = { action: "swipe", direction, duration_ms: 500 };
+    await executeRecordedStep(step, direction === "up" ? "向上滚动" : "向下滚动");
+  }
+
+  async function executeRecordedStep(step: FlowStep, label: string) {
+    if (!selectedDevice || !appId.trim() || activeJobRunning || interactionInFlight.current) return;
+    interactionInFlight.current = true;
     setLive(false);
     setInteracting(true);
+    setInteractingLabel(label);
     setError("");
     setPendingDanger(undefined);
     try {
@@ -129,7 +144,20 @@ export function FlowExplorer({
       setError(`交互执行失败，步骤未加入 Flow：${String(reason)}`);
     } finally {
       setInteracting(false);
+      setInteractingLabel("");
+      interactionInFlight.current = false;
     }
+  }
+
+  function handleMirrorWheel(event: React.WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (Math.abs(event.deltaY) < 8 || interactionInFlight.current) return;
+    if (mode !== "record") {
+      setError("镜像内滚动已被 Reactor 拦截；切换到录制/交互模式后会转换为设备滑动。");
+      return;
+    }
+    void recordSwipe(event.deltaY > 0 ? "up" : "down");
   }
 
   async function copySelector(candidate: InspectorSelectorCandidate) {
@@ -196,10 +224,11 @@ export function FlowExplorer({
             <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
             <div className="device-mirror-stage">
               {snapshot ? (
-                <div className={`device-mirror ${mode}`} onClick={inspectPoint} title={mode === "record" ? "点击并录制此控件" : "点击审查此位置的 UI 元素"}>
+                <div className={`device-mirror ${mode}`} onClick={inspectPoint} onWheel={handleMirrorWheel} title={mode === "record" ? "点击并录制；滚轮/触控板转换为设备滑动" : "点击审查；镜像内滚动不会滚动 Reactor"}>
                   <img src={snapshot.screenshotDataUrl} alt={`${selectedDevice?.name ?? selectedDevice?.id} 当前画面`} draggable={false} />
                   {selectedElement && <span className="element-highlight" style={highlightStyle(selectedElement, snapshot)}><span>{elementName(selectedElement)}</span></span>}
                   {point && <span className="inspection-point" style={{ left: `${(point.x / snapshot.viewportWidth) * 100}%`, top: `${(point.y / snapshot.viewportHeight) * 100}%` }} />}
+                  {interacting && <span className="mirror-interaction-overlay"><RefreshCw size={22} className="spin" /><b>{interactingLabel}</b><small>正在操作设备并等待下一页面稳定</small></span>}
                 </div>
               ) : (
                 <div className="mirror-placeholder">{loading || interacting ? <RefreshCw size={28} className="spin" /> : <ScanSearch size={32} />}<b>{interacting ? "正在执行步骤并等待下一页面" : loading ? "正在同步画面与 UI 树" : "等待首次画面"}</b><span>截图与 UI 树并行获取，不写入测试产物。</span></div>
@@ -220,6 +249,7 @@ export function FlowExplorer({
                   <div><span>层级</span><b>Depth {selectedElement.depth}</b></div>
                   <div><span>状态</span><b>{selectedElement.enabled ? "Enabled" : "Disabled"}</b></div>
                 </div>
+                <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning || !appId.trim()} onClick={() => { setMode("record"); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>
                 <div className="selector-candidates">
                   <div className="selector-list-heading"><b>候选 Selector</b><span>按稳定性排序</span></div>
                   {selectedElement.candidates.map((candidate) => (
