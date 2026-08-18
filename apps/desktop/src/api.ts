@@ -76,6 +76,7 @@ export interface MaintenanceStatus {
     currentVersion: string;
     defaultChannel: "stable" | "beta";
     stableEndpoint: string;
+    betaEndpoint: string;
     manifestSchemaVersion: number;
     signatureAlgorithm: string;
     signatureRequired: boolean;
@@ -83,6 +84,12 @@ export interface MaintenanceStatus {
     stagedInstall: boolean;
     rollbackOnFailedHealthCheck: boolean;
     compatibilityLine: string;
+  };
+  lastUpdate?: {
+    version: string;
+    phase: "staged" | "activating" | "probing" | "healthy" | "rolled_back" | "quarantined";
+    createdAt: string;
+    error?: string;
   };
 }
 
@@ -98,6 +105,14 @@ export interface PrivacyEraseResult {
   removedBytes: number;
   credentialsRemoved: boolean;
   fullReset: boolean;
+}
+
+export interface StagedUpdate {
+  channel: "stable" | "beta";
+  version: string;
+  transactionPath: string;
+  artifactBytes: number;
+  restartRequired: boolean;
 }
 
 export interface RealRunInput {
@@ -348,6 +363,7 @@ export async function getMaintenanceStatus(): Promise<MaintenanceStatus> {
         currentVersion: "0.1.0",
         defaultChannel: "stable",
         stableEndpoint: "https://github.com/mhacrzsy43/reactor/releases/latest/download/stable.json",
+        betaEndpoint: "https://github.com/mhacrzsy43/reactor/releases/download/beta/beta.json",
         manifestSchemaVersion: 1,
         signatureAlgorithm: "Ed25519",
         signatureRequired: true,
@@ -356,6 +372,7 @@ export async function getMaintenanceStatus(): Promise<MaintenanceStatus> {
         rollbackOnFailedHealthCheck: true,
         compatibilityLine: "1.x keeps Flow v1, Result v1 and transactional database upgrades readable",
       },
+      lastUpdate: undefined,
     };
   }
   return invoke("maintenance_status");
@@ -364,6 +381,16 @@ export async function getMaintenanceStatus(): Promise<MaintenanceStatus> {
 export async function createDiagnosticBundle(): Promise<DiagnosticBundleResult> {
   if (!inTauri) throw new Error("诊断包请在 Reactor 桌面应用中生成");
   return invoke("create_diagnostic_bundle");
+}
+
+export async function stageUpdate(channel: "stable" | "beta"): Promise<StagedUpdate> {
+  if (!inTauri) throw new Error("应用更新请在 Reactor 桌面应用中执行");
+  return invoke("stage_update", { input: { channel } });
+}
+
+export async function installStagedUpdate(transactionPath: string): Promise<void> {
+  if (!inTauri) throw new Error("应用更新请在 Reactor 桌面应用中执行");
+  await invoke("install_staged_update", { input: { transactionPath } });
 }
 
 export async function erasePrivateData(mode: "sensitive_artifacts" | "all_local_data"): Promise<PrivacyEraseResult> {

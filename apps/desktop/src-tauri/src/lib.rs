@@ -47,6 +47,8 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager as _;
 use zeroize::Zeroizing;
 
+mod updater;
+
 // Tauri embeds the current production frontend into release and direct Cargo builds.
 
 const MANAGED_TOOLS_MANIFEST: &str = include_str!("../../../../tools/managed-tools-v1.json");
@@ -136,6 +138,8 @@ const LOCAL_TRACE_MIN_FREE_BYTES: u64 = 128 * 1024 * 1024;
 const UPDATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const STABLE_UPDATE_ENDPOINT: &str =
     "https://github.com/mhacrzsy43/reactor/releases/latest/download/stable.json";
+const BETA_UPDATE_ENDPOINT: &str =
+    "https://github.com/mhacrzsy43/reactor/releases/download/beta/beta.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +165,7 @@ struct MaintenanceStatus {
     sensitive_artifact_count: u64,
     policy: ResourcePolicyView,
     update: UpdatePolicyView,
+    last_update: Option<updater::UpdateTransactionView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +175,7 @@ struct UpdatePolicyView {
     current_version: &'static str,
     default_channel: &'static str,
     stable_endpoint: &'static str,
+    beta_endpoint: &'static str,
     manifest_schema_version: u32,
     signature_algorithm: &'static str,
     signature_required: bool,
@@ -238,6 +244,18 @@ struct VerifiedUpdateManifest {
     version: String,
     artifact_count: usize,
     key_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallStagedUpdateInput {
+    transaction_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StageUpdateInput {
+    channel: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -546,6 +564,7 @@ fn update_policy() -> UpdatePolicyView {
         current_version: env!("CARGO_PKG_VERSION"),
         default_channel: "stable",
         stable_endpoint: STABLE_UPDATE_ENDPOINT,
+        beta_endpoint: BETA_UPDATE_ENDPOINT,
         manifest_schema_version: UPDATE_MANIFEST_SCHEMA_VERSION,
         signature_algorithm: "Ed25519",
         signature_required: true,
@@ -673,6 +692,7 @@ fn maintenance_status_for(root: &Path) -> Result<MaintenanceStatus, String> {
         sensitive_artifact_count: sensitive.len() as u64,
         policy: resource_policy(),
         update: update_policy(),
+        last_update: updater::latest_transaction(root),
     })
 }
 
@@ -847,6 +867,84 @@ fn verify_update_manifest(manifest_json: String) -> Result<VerifiedUpdateManifes
         artifact_count: manifest.artifacts.len(),
         key_id: manifest.signature.key_id,
     })
+}
+
+fn current_install_path() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        executable
+            .ancestors()
+            .find(|path| path.extension().and_then(std::ffi::OsStr::to_str) == Some("app"))
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                "自动安装只能从已打包的 Reactor.app 启动；开发二进制只允许验证更新".to_owned()
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        executable
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "无法定位当前 Reactor 安装目录".to_owned())
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn stage_update(input: StageUpdateInput) -> Result<updater::StagedUpdate, String> {
+    let root = workspace();
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    if store.has_active_jobs().map_err(|error| error.to_string())? {
+        return Err("存在运行中的任务；正式测量结束后才能检查或安装更新".to_owned());
+    }
+    let supported_schema = store.schema_version().map_err(|error| error.to_string())?;
+    drop(store);
+    let public_key = option_env!("REACTOR_UPDATE_PUBLIC_KEY")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "当前构建未配置正式发布公钥；Reactor 拒绝下载或安装更新".to_owned())?;
+    let endpoint = match input.channel.as_str() {
+        "stable" => STABLE_UPDATE_ENDPOINT,
+        "beta" => BETA_UPDATE_ENDPOINT,
+        _ => return Err("更新通道必须是 stable 或 beta".to_owned()),
+    };
+    updater::fetch_and_stage(
+        &root,
+        endpoint,
+        &input.channel,
+        public_key,
+        supported_schema,
+        &current_install_path()?,
+    )
+    .await
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn install_staged_update(
+    input: InstallStagedUpdateInput,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let root = workspace();
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    if store.has_active_jobs().map_err(|error| error.to_string())? {
+        return Err("存在运行中的任务；正式测量结束后才能安装更新".to_owned());
+    }
+    let transaction_path = PathBuf::from(input.transaction_path);
+    let allowed_root = root.join(".reactor/updates/transactions");
+    let canonical_transaction =
+        std::fs::canonicalize(&transaction_path).map_err(|error| error.to_string())?;
+    let canonical_root = std::fs::canonicalize(&allowed_root).map_err(|error| error.to_string())?;
+    if !canonical_transaction.starts_with(&canonical_root)
+        || canonical_transaction.file_name() != Some(std::ffi::OsStr::new("transaction.json"))
+    {
+        return Err("更新事务不属于 Reactor 的受管目录".to_owned());
+    }
+    updater::spawn_install_helper(&canonical_transaction)?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2150,7 +2248,44 @@ fn spawn_worker(workspace: &Path, job_id: &str, request: &WorkerRequest) -> Resu
 #[must_use]
 pub fn run_worker_from_args() -> bool {
     let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() != Some(std::ffi::OsStr::new("--reactor-worker")) {
+    let Some(mode) = args.next() else {
+        return false;
+    };
+    if mode == std::ffi::OsStr::new("--reactor-update-helper") {
+        let result = args
+            .next()
+            .ok_or_else(|| "missing update transaction path".to_owned())
+            .and_then(|path| {
+                let parent_pid = args
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or_else(|| "missing update parent pid".to_owned())?;
+                updater::run_helper(Path::new(&path), parent_pid)
+            });
+        if let Err(error) = result {
+            eprintln!("{error}");
+        }
+        return true;
+    }
+    if mode == std::ffi::OsStr::new("--reactor-update-health-probe") {
+        let result = args
+            .next()
+            .ok_or_else(|| "missing health probe workspace".to_owned())
+            .and_then(|root| {
+                let expected_version = args
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .ok_or_else(|| "missing expected update version".to_owned())?;
+                run_update_health_probe(Path::new(&root), &expected_version)
+            });
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return true;
+    }
+    if mode != std::ffi::OsStr::new("--reactor-worker") {
         return false;
     }
     let Some(request_path) = args.next() else {
@@ -2194,6 +2329,27 @@ pub fn run_worker_from_args() -> bool {
     true
 }
 
+fn run_update_health_probe(root: &Path, expected_version: &str) -> Result<(), String> {
+    if expected_version != env!("CARGO_PKG_VERSION") {
+        return Err(format!(
+            "候选版本不匹配：期望 {expected_version}，实际 {}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    let _ = store.schema_version().map_err(|error| error.to_string())?;
+    let _ = store.list_jobs(1).map_err(|error| error.to_string())?;
+    let manifest: ManagedToolsManifest =
+        serde_json::from_str(MANAGED_TOOLS_MANIFEST).map_err(|error| error.to_string())?;
+    for required in ["maestro", "adb", "flashlight", "trace_processor"] {
+        if !manifest.tools.iter().any(|tool| tool.id == required) {
+            return Err(format!("候选版本缺少内置适配器声明：{required}"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the Reactor desktop shell.
 ///
@@ -2215,6 +2371,8 @@ pub fn run() {
             bootstrap,
             maintenance_status,
             verify_update_manifest,
+            stage_update,
+            install_staged_update,
             create_diagnostic_bundle,
             erase_private_data,
             setup_tools,
@@ -2392,6 +2550,19 @@ mod tests {
         assert!(policy.rollback_on_failed_health_check);
         assert!(policy.stable_endpoint.starts_with("https://"));
         assert!(policy.compatibility_line.contains("Flow v1"));
+    }
+
+    #[test]
+    fn candidate_health_probe_checks_version_database_history_and_tools() {
+        let root = temporary_workspace("update-health");
+        let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3")).unwrap();
+        store
+            .create_job(&serde_json::json!({ "mode": "demo" }))
+            .unwrap();
+        drop(store);
+        run_update_health_probe(&root, env!("CARGO_PKG_VERSION")).unwrap();
+        assert!(run_update_health_probe(&root, "99.0.0").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

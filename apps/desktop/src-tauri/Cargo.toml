@@ -15,7 +15,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+flate2.workspace = true
 fs2.workspace = true
+futures-util.workspace = true
+hex.workspace = true
 reactor-ai = { path = "../../../crates/reactor-ai" }
 reactor-analysis = { path = "../../../crates/reactor-analysis" }
 reactor-core = { path = "../../../crates/reactor-core" }
@@ -25,11 +28,15 @@ reactor-runner = { path = "../../../crates/reactor-runner" }
 reactor-store = { path = "../../../crates/reactor-store" }
 reactor-toolchain = { path = "../../../crates/reactor-toolchain" }
 ring.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
 tauri = { version = "2", features = [] }
 tokio.workspace = true
 uuid.workspace = true
+zip.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

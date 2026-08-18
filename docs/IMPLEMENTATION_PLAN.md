@@ -419,7 +419,7 @@ M8 已完成。Local Model 与 Cloud API 属于可选 Provider：无本地模型
 | M10.2 升级与数据安全 | 必选 | ✅ 完成 | v1→v2 保留历史；迁移失败事务回滚；未来版本数据库拒绝覆盖；严格测试通过 |
 | M10.3 诊断与隐私 | 必选 | ✅ 完成 | 安全诊断包默认无凭据/任务正文/路径/截图/UI 树；敏感 artifact 与全部本地数据擦除入口完成 |
 | M10.4 插件与资源加固 | 必选 | ✅ 完成 | 仅启用内置可信适配器，外部插件默认禁用；CLI 超时/输出、Profile/Source Map 大小和 Trace 磁盘门禁公开且强制 |
-| M10.5 更新与稳定版承诺 | 必选 | ✅ 完成 | stable/beta 通道、manifest v1、Ed25519 发布公钥注入、分阶段安装/健康检查/失败回滚和 1.x Flow/Result/数据库兼容承诺已固化并在设置页公开；开发构建无生产公钥时明确拒绝未签名更新 |
+| M10.5 更新与稳定版承诺 | 必选 | ✅ 完成 | Stable/Beta 检查、受限流式下载、安全暂存、App/数据库备份、Helper 原子切换、候选版本健康探针和失败自动回滚已实现；Ed25519 发布工作流与 1.x 兼容承诺通过门禁 |
 | M10-Windows | 可选平台 | ⬜ 待对应环境 | 在真实 Windows 环境验证安装包、签名、Android 工具链及 Codex/Claude CLI；缺少 Windows 不阻塞当前版本 |
 | M10-Linux | 可选平台 | ⬜ 待对应环境 | 在真实 Linux 环境验证发行包、桌面集成、Android 工具链及 Codex/Claude CLI；缺少 Linux 不阻塞当前版本 |
 | M10-Signing | 可选账号门禁 | ⬜ 待账号 | macOS notarization 与 Windows 正式签名只在具备相应开发者账号时执行，不以临时或伪造签名冒充通过 |
@@ -428,7 +428,7 @@ Windows/Linux 与签名门禁采用和 Local Model/Cloud Provider 相同的条�
 
 M10.1–M10.4 真实验收（2026-08-18）：最新 Release 在 `/tmp/reactor-m10-qa.Tu83E4` 全新工作区启动；设置页显示数据库 Schema v2、插件契约 v1、120 秒 AI CLI 超时、1 MiB/256 KiB 输出上限、64 MiB Profile、128 MiB Source Map 与 128 MiB Trace 磁盘门禁。桌面生成安全诊断包后复核 JSON，不含绝对路径、凭据、任务输入、错误正文、截图或 UI 树。独立 Worker 完成导览任务 `82b407e9-ae77-4ed5-9353-9f01b938c658`，历史页展示 6 条事件、三框架明确 `SIMULATED` 结果和报告入口；退出并重开同一 Release 后任务、事件和结果仍完整恢复。数据库升级、失败回滚、未来 Schema 拒绝、隐私擦除和导入上限均有 Rust 测试覆盖。
 
-M10.5 契约门禁（2026-08-19）：设置页公开当前版本、默认 stable 通道、manifest v1、Ed25519 签名必需、分阶段安装与健康检查失败回滚；正式发布公钥只允许通过 `REACTOR_UPDATE_PUBLIC_KEY` 由 CI 注入，开发构建没有生产公钥时明确显示并拒绝降级接受未签名更新。`docs/update-manifest.schema.json` 固化平台/架构、HTTPS URL、SHA-256、大小、兼容矩阵和签名元数据；`docs/UPDATE_AND_COMPATIBILITY.md` 承诺 1.x 保持 Flow v1、Result v1、Flow Lock v1、插件契约 v1 与数据库历史可读。Apple notarization、Windows 签名及 Windows/Linux 真环境仍是条件门禁，不被本项冒充完成。
+M10.5 执行门禁（2026-08-19）：设置页可显式选择 Stable/Beta，开发构建没有生产公钥时拒绝下载或安装。正式链路先验证 Ed25519 manifest、协议兼容、平台/架构和版本，再以有界流式下载校验大小/SHA-256；安全解包限制为 2 GiB/10 万文件并拒绝链接与越界路径。候选 App 复制到当前安装同卷，Helper 等待桌面退出后备份 App 与 SQLite/WAL/SHM、原子切换，并由候选二进制检查精确版本、数据库/历史和受管工具声明；失败恢复旧 App/数据库，最近事务状态回显在设置页。更新单元/故障测试 16 项、全仓测试、严格 clippy、前端生产构建、真实候选健康探针正反门禁与临时 Ed25519 manifest 生成均通过。`.github/workflows/release.yml` 强制公私钥匹配后才构建和签名，Beta prerelease 不污染 Stable latest。Apple notarization、Windows 签名及 Windows/Linux 真环境仍是条件门禁，不被本项冒充完成。
 
 交付：
 

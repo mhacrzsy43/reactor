@@ -19,7 +19,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Reactor contributors"]
-repository = "https://github.com/reactor-performance/reactor"
+repository = "https://github.com/mhacrzsy43/reactor"
 
 [workspace.dependencies]
 async-trait = "0.1"

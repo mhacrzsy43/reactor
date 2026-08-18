@@ -1,0 +1,83 @@
+name: Reactor signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.2.0
+        required: true
+      channel:
+        description: Update channel
+        required: true
+        type: choice
+        options: [stable, beta]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    env:
+      REACTOR_UPDATE_PUBLIC_KEY: ${{ secrets.REACTOR_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Require isolated release keys
+        env:
+          PRIVATE_KEY: ${{ secrets.REACTOR_UPDATE_PRIVATE_KEY_BASE64 }}
+        run: |
+          test -n "$REACTOR_UPDATE_PUBLIC_KEY"
+          test -n "$PRIVATE_KEY"
+          printf '%s' "$PRIVATE_KEY" | base64 --decode > "$RUNNER_TEMP/reactor-update-key.pem"
+          chmod 600 "$RUNNER_TEMP/reactor-update-key.pem"
+      - name: Verify and build
+        run: |
+          pnpm --dir apps/desktop install --frozen-lockfile
+          cargo test --workspace
+          cargo clippy --workspace --all-targets -- -D warnings
+          pnpm --dir apps/desktop build
+          pnpm --dir apps/desktop tauri build
+      - name: Package and sign update manifest
+        env:
+          TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          VERSION="${TAG#v}"
+          test "$VERSION" = "$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          ARCH="$(uname -m)"
+          test "$ARCH" != arm64 || ARCH=aarch64
+          ARTIFACT="Reactor_${VERSION}_${ARCH}.app.tar.gz"
+          tar -C target/release/bundle/macos -czf "$ARTIFACT" Reactor.app
+          python3 tools/sign_update_manifest.py \
+            --artifact "$ARTIFACT" \
+            --artifact-url "https://github.com/mhacrzsy43/reactor/releases/download/${TAG}/${ARTIFACT}" \
+            --version "$VERSION" --platform darwin --arch "$ARCH" --channel "$CHANNEL" \
+            --private-key "$RUNNER_TEMP/reactor-update-key.pem" \
+            --public-key-base64 "$REACTOR_UPDATE_PUBLIC_KEY" \
+            --key-id reactor-release-v1 --output "${CHANNEL}.json"
+          shasum -a 256 "$ARTIFACT" target/release/bundle/dmg/*.dmg > SHA256SUMS.txt
+      - name: Publish immutable artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          if [ "$CHANNEL" = beta ]; then
+            gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Reactor $TAG beta" --generate-notes --prerelease
+          else
+            gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Reactor $TAG" --generate-notes
+          fi
+          gh release upload "$TAG" Reactor_*.app.tar.gz target/release/bundle/dmg/*.dmg SHA256SUMS.txt "${CHANNEL}.json" --clobber
+          if [ "$CHANNEL" = beta ]; then
+            gh release view beta >/dev/null 2>&1 || gh release create beta --title "Reactor Beta Channel" --prerelease --notes "Rolling signed beta manifest."
+            gh release upload beta beta.json --clobber
+          fi

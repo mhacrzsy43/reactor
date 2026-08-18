@@ -21,6 +21,12 @@
 5. 健康检查失败时恢复上一版本及迁移前数据库；失败版本进入隔离区，不循环重试。
 6. 更新成功后只删除更旧的 staging 文件，原始性能结果、报告、Flow 锁和受管工具缓存不随应用更新清除。
 
+桌面端的“检查并暂存更新”真实执行 HTTPS manifest/安装包下载；manifest 最大 1 MiB，安装包最大 1 GiB，解压后最大 2 GiB/10 万文件。下载按流写入磁盘，不把完整安装包常驻内存；最终重定向、平台/架构、声明大小、SHA-256 或安全解包任一失败都会在安装切换前终止。候选 App 被复制到当前安装同一卷后才允许重启切换，避免跨卷原子重命名失效。
+
+安装由同一个已发布 Reactor 二进制的无界面 Helper 执行。Helper 等待桌面进程退出，保留旧 App 和 SQLite/WAL/SHM 快照，原子切换候选版本，并调用候选二进制的健康探针。健康探针必须同时证明版本号匹配、数据库与历史可读、Worker 命令入口可启动、受管 Maestro/ADB/Flashlight/Trace Processor 声明完整；失败时恢复旧 App 与数据库。最近事务的 staged/healthy/rolled_back/quarantined 状态会在设置页显示。
+
+`.github/workflows/release.yml` 是唯一正式 manifest 生成入口：发布 CI 从隔离 Secret 注入原始 Ed25519 公钥和 PKCS#8 私钥，先验证二者匹配，再构建内含公钥的 App，最后由 `tools/sign_update_manifest.py` 对固定字段顺序载荷签名。Stable 使用 GitHub latest release；Beta 使用不影响 latest 的 prerelease artifact 和滚动的仅 manifest 通道。
+
 ## 1.x 稳定版兼容承诺
 
 - Reactor Flow v1、Result v1、Flow Lock v1、插件契约 v1 和数据库历史在整个 1.x 系列保持可读。

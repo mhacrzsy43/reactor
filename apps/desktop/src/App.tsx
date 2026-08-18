@@ -29,8 +29,8 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getJobSnapshot, getMaintenanceStatus, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, trialGeneratedFlow } from "./api";
-import type { CliProviderStatus, LocalModelStatus, MaintenanceStatus } from "./api";
+import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, stageUpdate, trialGeneratedFlow } from "./api";
+import type { CliProviderStatus, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
 import { FlowExplorer } from "./FlowExplorer";
 import type {
@@ -1838,6 +1838,8 @@ function SettingsCenter({
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [maintenanceNotice, setMaintenanceNotice] = useState("");
   const [maintenanceError, setMaintenanceError] = useState("");
+  const [stagedUpdate, setStagedUpdate] = useState<StagedUpdate>();
+  const [updateChannel, setUpdateChannel] = useState<"stable" | "beta">("stable");
 
   async function refreshMaintenance() {
     setMaintenanceBusy(true);
@@ -1899,6 +1901,34 @@ function SettingsCenter({
     }
   }
 
+  async function checkAndStageUpdate() {
+    setMaintenanceBusy(true);
+    setMaintenanceError("");
+    setMaintenanceNotice("");
+    try {
+      const staged = await stageUpdate(updateChannel);
+      setStagedUpdate(staged);
+      setMaintenanceNotice(`Reactor ${staged.version} 已完成签名、兼容性、大小和 SHA-256 校验，等待重启安装。`);
+    } catch (reason) {
+      setMaintenanceError(String(reason));
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  }
+
+  async function installUpdate() {
+    if (!stagedUpdate) return;
+    if (!window.confirm(`安装 Reactor ${stagedUpdate.version}？应用会退出，候选版本健康检查失败时自动恢复当前版本。`)) return;
+    setMaintenanceBusy(true);
+    setMaintenanceError("");
+    try {
+      await installStagedUpdate(stagedUpdate.transactionPath);
+    } catch (reason) {
+      setMaintenanceError(String(reason));
+      setMaintenanceBusy(false);
+    }
+  }
+
   return (
     <>
       <header className="topbar"><div><p className="eyebrow">SETTINGS</p><h1>设置与能力诊断</h1></div><span className="status-pill ready"><span className="status-dot" />本地优先</span></header>
@@ -1914,7 +1944,8 @@ function SettingsCenter({
         <section className="card"><div className="card-heading"><div className="heading-icon green"><ShieldCheck size={18} /></div><div><h2>发布加固与资源策略</h2><p>所有限制由 Reactor 核心强制，而不是仅作为界面提示。</p></div><button className="icon-button" onClick={() => void refreshMaintenance()} disabled={maintenanceBusy}><RefreshCw size={16} className={maintenanceBusy ? "spin" : ""} /></button></div>
           <div className="settings-list">
             <div><span>数据库兼容门禁</span><b className="ok-text">Schema v{maintenance?.schemaVersion ?? "—"}</b><small>升级使用事务；未来版本数据库会被只读拒绝，不会被旧版覆盖。</small></div>
-            <div><span>稳定更新通道</span><b className={maintenance?.update.productionKeyConfigured ? "ok-text" : "muted-text"}>v{maintenance?.update.currentVersion ?? "—"} · {maintenance?.update.defaultChannel ?? "stable"}</b><small>Manifest v{maintenance?.update.manifestSchemaVersion ?? "—"} · {maintenance?.update.signatureAlgorithm ?? "Ed25519"} 签名必需 · 分阶段安装 · 健康检查失败自动回滚。{maintenance?.update.productionKeyConfigured ? "当前构建已配置发布公钥。" : "当前为开发构建，正式发布公钥由 CI 注入；不会接受未签名更新。"}</small></div>
+            <div><span>应用更新</span><b className={maintenance?.update.productionKeyConfigured ? "ok-text" : "muted-text"}>v{maintenance?.update.currentVersion ?? "—"} · {updateChannel}</b><small>Manifest v{maintenance?.update.manifestSchemaVersion ?? "—"} · {maintenance?.update.signatureAlgorithm ?? "Ed25519"} 签名必需 · 分阶段安装 · 候选版本健康探针失败自动回滚 App 与数据库。{maintenance?.update.productionKeyConfigured ? "当前构建已配置发布公钥。" : "当前为开发构建，正式发布公钥由 CI 注入；不会接受未签名更新。"}</small><select value={updateChannel} onChange={(event) => { setUpdateChannel(event.target.value as "stable" | "beta"); setStagedUpdate(undefined); }} disabled={maintenanceBusy}><option value="stable">Stable 稳定通道</option><option value="beta">Beta 预览通道</option></select><button className="text-button" onClick={() => void checkAndStageUpdate()} disabled={maintenanceBusy}>{maintenanceBusy ? "正在检查…" : "检查并暂存更新"}</button>{stagedUpdate && <button className="text-button" onClick={() => void installUpdate()} disabled={maintenanceBusy}>重启安装 v{stagedUpdate.version}</button>}</div>
+            {maintenance?.lastUpdate && <div><span>最近更新事务</span><b className={maintenance.lastUpdate.phase === "healthy" ? "ok-text" : maintenance.lastUpdate.phase === "rolled_back" || maintenance.lastUpdate.phase === "quarantined" ? "muted-text" : ""}>v{maintenance.lastUpdate.version} · {maintenance.lastUpdate.phase}</b><small>{maintenance.lastUpdate.error ?? `创建于 ${formatDate(maintenance.lastUpdate.createdAt)}`}</small></div>}
             <div><span>稳定版兼容承诺</span><b className="ok-text">1.x</b><small>{maintenance?.update.compatibilityLine ?? "Flow v1、Result v1 与历史数据库在 1.x 内保持可读；破坏性变化只进入新的主版本。"}</small></div>
             <div><span>适配器信任策略</span><b className="ok-text">仅内置</b><small>契约 v{maintenance?.policy.pluginContractVersion ?? "—"} · 外部插件默认禁用 · {(maintenance?.policy.trustedBuiltInAdapters ?? []).join(" / ") || "读取中"}</small></div>
             <div><span>AI CLI 上限</span><b>{maintenance?.policy.aiCliTimeoutSeconds ?? "—"} 秒</b><small>stdout {formatBytes(maintenance?.policy.aiCliStdoutBytes)} · stderr {formatBytes(maintenance?.policy.aiCliStderrBytes)} · 超时终止整个进程组。</small></div>
