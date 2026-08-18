@@ -468,7 +468,7 @@ pub fn recover_orphaned_jobs(workspace: &Path) -> Result<Vec<Job>, RunnerError> 
     {
         let orphaned = job.worker_pid.is_none_or(|pid| !worker_is_alive(pid));
         if orphaned {
-            let issues = store.verify_artifacts(&job.id)?;
+            let issues = store.verify_artifacts_from(&job.id, workspace)?;
             let message = if issues.is_empty() {
                 "后台 Runner 意外退出；已保留并验证现有 artifact".to_owned()
             } else {
@@ -492,7 +492,7 @@ pub fn verify_job_artifacts(
     workspace: &Path,
     job_id: &str,
 ) -> Result<Vec<ArtifactIssue>, RunnerError> {
-    Ok(open_store(workspace)?.verify_artifacts(job_id)?)
+    Ok(open_store(workspace)?.verify_artifacts_from(job_id, workspace)?)
 }
 
 #[cfg(unix)]

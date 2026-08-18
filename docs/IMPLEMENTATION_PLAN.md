@@ -349,6 +349,8 @@ AI Provider    Maestro      Perfetto / xctrace
 
 验收：固定 xctrace fixtures 的解析回归通过；报告不会把模拟器与物理机或不同定义的内存混合比较。
 
+当前提交复验（2026-08-19）：iPhone 15 Pro / iOS 17.5 Simulator 上为 `com.reactor.bench.reactnative` 重新生成并真实试跑 iOS Flow，锁定哈希 `4a73eb567c96…`；Release Runner 任务 `25a02fdc…` 由 xctrace 26.0 取得 22 个 CPU 样本，artifact 完整性通过且测量窗口模型调用为 0。Simulator 不支持的帧、内存、能耗以及缺少 App-ready 专项证据的启动耗时继续返回空值并明确解释，未用占位数字冒充。
+
 ### M7：Tauri v2 桌面端
 
 当前已完成：2026-08-18 使用 Android Emulator 快速性能任务 `32e24fc1-16a2-4c75-be30-e33428bfdc48` 完成最终重连门禁。任务在非计分预热阶段关闭 UI 后，独立 Worker 继续运行并由系统接管；重开 Reactor 后自动识别同一 active job，恢复到正式测量阶段，继续接收事件并展示最终性能结果。
@@ -408,6 +410,8 @@ M8 已完成。Local Model 与 Cloud API 属于可选 Provider：无本地模型
 - 真实设备重复测试、原始迭代和离群点说明。
 
 验收：自动检查场景参数等价；每个框架完成预热 + 默认 10 次正式迭代；报告可从原始 artifact 完整重建。
+
+证据复核（2026-08-19）：Android Emulator 的 RN/Flutter/Lynx × startup/list/update/animation 共 12 个非 synthetic 结果仍能定位到各自原始 Flashlight、Perfetto、原生指标、Flow 与报告；当前 Release CLI 从仓库之外的工作目录逐项复算 12/12 artifact 均通过。复核同时修复了旧相对 artifact 路径错误依赖进程当前目录的问题；新记录统一索引绝对路径，旧记录按所属 workspace 解析。物理设备实验仍保持“未执行/后置”，不与这组模拟器结果混排。
 
 ### M10：跨平台发布与加固
 

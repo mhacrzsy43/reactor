@@ -576,12 +576,13 @@ impl Store {
         }
         let metadata = std::fs::metadata(path).map_err(to_sql_error)?;
         let sha256 = hash_file(path)?;
+        let indexed_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let artifact = Artifact {
             id: Uuid::new_v4().to_string(),
             job_id: job_id.to_owned(),
             created_at: Utc::now(),
             kind: kind.to_owned(),
-            path: path.display().to_string(),
+            path: indexed_path.display().to_string(),
             size_bytes: metadata.len(),
             sha256,
         };
@@ -601,8 +602,8 @@ impl Store {
                 artifact.sha256,
             ],
         )?;
-        self.artifact_by_path(job_id, path)?
-            .ok_or_else(|| StoreError::UnknownArtifact(path.display().to_string()))
+        self.artifact_by_path(job_id, &indexed_path)?
+            .ok_or_else(|| StoreError::UnknownArtifact(indexed_path.display().to_string()))
     }
 
     /// Lists artifact metadata for a job without reading artifact bodies.
@@ -628,17 +629,35 @@ impl Store {
     /// Returns an error only when the index cannot be read. Missing or changed files are returned
     /// as issues so callers can present all integrity failures together.
     pub fn verify_artifacts(&self, job_id: &str) -> Result<Vec<ArtifactIssue>, StoreError> {
+        self.verify_artifacts_from(job_id, Path::new("."))
+    }
+
+    /// Verifies indexed artifacts, resolving legacy relative paths against `base`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the artifact index cannot be read.
+    pub fn verify_artifacts_from(
+        &self,
+        job_id: &str,
+        base: &Path,
+    ) -> Result<Vec<ArtifactIssue>, StoreError> {
         let mut issues = Vec::new();
         for artifact in self.list_artifacts(job_id)? {
-            let path = Path::new(&artifact.path);
-            let reason = match std::fs::metadata(path) {
+            let stored_path = Path::new(&artifact.path);
+            let resolved_path = if stored_path.is_absolute() {
+                stored_path.to_path_buf()
+            } else {
+                base.join(stored_path)
+            };
+            let reason = match std::fs::metadata(&resolved_path) {
                 Err(error) => Some(format!("unreadable: {error}")),
                 Ok(metadata) if metadata.len() != artifact.size_bytes => Some(format!(
                     "size changed: expected {}, found {}",
                     artifact.size_bytes,
                     metadata.len()
                 )),
-                Ok(_) => match hash_file(path) {
+                Ok(_) => match hash_file(&resolved_path) {
                     Ok(hash) if hash == artifact.sha256 => None,
                     Ok(_) => Some("sha256 changed".to_owned()),
                     Err(error) => Some(format!("unreadable: {error}")),
@@ -1113,6 +1132,35 @@ mod tests {
         assert!(store.verify_artifacts(&job.id).unwrap().is_empty());
         std::fs::write(&artifact_path, b"changed").unwrap();
         assert_eq!(store.verify_artifacts(&job.id).unwrap().len(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn verifies_legacy_relative_artifact_from_workspace_not_process_directory() {
+        let directory = std::env::temp_dir().join(format!("reactor-relative-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(directory.join("results")).unwrap();
+        let store = Store::open(&directory.join("store.sqlite3")).unwrap();
+        let job = store
+            .create_job(&serde_json::json!({ "mode": "legacy" }))
+            .unwrap();
+        let artifact = directory.join("results/trace.json");
+        std::fs::write(&artifact, b"legacy").unwrap();
+        let registered = store
+            .register_artifact(&job.id, "trace", &artifact)
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE artifacts SET path='results/trace.json' WHERE id=?1",
+                [&registered.id],
+            )
+            .unwrap();
+        assert!(
+            store
+                .verify_artifacts_from(&job.id, &directory)
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
