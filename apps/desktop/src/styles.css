@@ -611,8 +611,16 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
 .diagnostic-topbar { margin-bottom: 18px; }
-.diagnostic-import, .diagnostic-workbench, .diagnostic-empty { max-width: 1390px; margin: 0 auto 18px; padding: 18px; }
-.diagnostic-files { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; }
+.diagnostic-import, .diagnostic-workbench, .diagnostic-empty, .diagnostic-frameworks { max-width: 1390px; margin: 0 auto 18px; padding: 18px; }
+.diagnostic-frameworks { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.diagnostic-frameworks > div:first-child b, .diagnostic-frameworks > div:first-child span { display: block; }
+.diagnostic-frameworks > div:first-child b { font-size: 11px; }
+.diagnostic-frameworks > div:first-child span { margin-top: 4px; color: var(--muted); font-size: 8px; }
+.diagnostic-frameworks > div:last-child { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 6px; }
+.diagnostic-frameworks button { min-height: 38px; padding: 0 11px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-soft); background: var(--surface-raised); cursor: pointer; font-size: 9px; }
+.diagnostic-frameworks button.active { border-color: color-mix(in srgb, var(--purple) 45%, var(--line)); color: var(--purple); background: color-mix(in srgb, var(--purple) 7%, var(--surface-raised)); }
+.diagnostic-frameworks button small { margin-left: auto; color: var(--muted); font-size: 7px; }
+.diagnostic-files { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; gap: 12px; }
 .diagnostic-file-arrow { color: var(--muted); }
 .diagnostic-file { min-height: 76px; padding: 12px; display: flex; align-items: center; gap: 12px; border: 1px dashed var(--line-strong); border-radius: 10px; background: var(--surface-raised); }
 .diagnostic-file.loaded { border-style: solid; border-color: color-mix(in srgb, var(--green) 30%, var(--line)); }
@@ -646,6 +654,37 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .diagnostic-tabs button.active { color: white; background: var(--purple-strong); }
 .diagnostic-tabs button b { min-width: 16px; padding: 2px 4px; border-radius: 8px; background: color-mix(in srgb, currentColor 12%, transparent); font: 7px DM Mono, monospace; }
 .diagnostic-panel { margin-top: 16px; }
+.diagnostic-empty.inline { min-height: 300px; margin: 16px 0 0; border: 1px dashed var(--line); background: var(--surface-raised); }
+.diagnostic-empty.inline .secondary-button { margin-top: 14px; }
+.diagnostic-overview-metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; }
+.diagnostic-overview-metrics button { min-height: 125px; padding: 13px; display: block; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--surface-raised); cursor: pointer; text-align: left; }
+.diagnostic-overview-metrics button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--purple) 38%, var(--line)); transform: translateY(-1px); }
+.diagnostic-overview-metrics button:disabled { cursor: default; opacity: .72; }
+.diagnostic-overview-metrics span { display: block; color: var(--muted); font-size: 8px; }
+.diagnostic-overview-metrics strong { display: inline-block; margin-top: 12px; font: 500 23px DM Mono, monospace; }
+.diagnostic-overview-metrics small { margin-left: 5px; color: var(--muted); font-size: 8px; }
+.diagnostic-overview-metrics i { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; color: var(--purple); font-size: 8px; font-style: normal; }
+.diagnostic-run-empty { min-height: 105px; padding: 14px; display: flex; align-items: center; gap: 12px; border: 1px dashed var(--line); border-radius: 9px; color: var(--muted); }
+.diagnostic-run-empty > div { flex: 1; }
+.diagnostic-run-empty b, .diagnostic-run-empty span { display: block; }
+.diagnostic-run-empty b { color: var(--text-soft); font-size: 10px; }
+.diagnostic-run-empty span { margin-top: 4px; font-size: 8px; }
+.rn-evidence-status { margin-top: 12px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.rn-evidence-status button { min-height: 64px; padding: 10px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--surface-raised); cursor: pointer; text-align: left; }
+.rn-evidence-status button > div { min-width: 0; flex: 1; }
+.rn-evidence-status b, .rn-evidence-status span { display: block; }
+.rn-evidence-status b { color: var(--text-soft); font-size: 9px; }
+.rn-evidence-status span { margin-top: 4px; overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.rn-evidence-status button.ready { border-color: color-mix(in srgb, var(--green) 30%, var(--line)); }
+.rn-evidence-status button.warning { border-color: color-mix(in srgb, var(--orange) 35%, var(--line)); }
+.diagnostic-overview-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 7px; }
+.framework-roadmap { margin-top: 12px; padding: 12px; display: grid; grid-template-columns: minmax(240px, 1.5fr) repeat(4, 1fr); align-items: center; gap: 8px; border: 1px dashed var(--line); border-radius: 9px; }
+.framework-roadmap > div b, .framework-roadmap > div span { display: block; }
+.framework-roadmap > div b { font-size: 9px; }
+.framework-roadmap > div span { margin-top: 4px; color: var(--muted); font-size: 8px; }
+.framework-roadmap > span { padding: 8px; border-radius: 6px; color: var(--text-soft); background: var(--surface-soft); font-size: 8px; }
+.framework-roadmap small { margin-top: 4px; display: block; color: var(--muted); font-size: 7px; }
+.source-panel > svg { flex: 0 0 auto; color: var(--purple); }
 .diagnostic-panel-heading { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .diagnostic-panel-heading h2 { margin: 0; font-size: 13px; }
 .diagnostic-panel-heading p { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
@@ -676,6 +715,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .commit-detail li { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-soft); font-size: 8px; }
 .commit-detail li span { font-family: Inter, sans-serif; }
 .commit-detail > small { grid-column: 1 / -1; color: var(--muted); font-size: 8px; }
+.commit-drill { grid-column: 1 / -1; width: fit-content; margin-top: 4px; }
 .component-flame { padding: 10px; overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; background: #0b0d12; }
 .flame-row { min-width: 620px; }
 .flame-row > div { min-width: 130px; height: 31px; padding: 5px 8px; overflow: hidden; border: 1px solid #8159df; border-radius: 4px; background: linear-gradient(90deg, #53349a, #7651ca); color: white; }
@@ -695,6 +735,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .finding-card p { margin: 6px 0; color: var(--text-soft); font-size: 9px; line-height: 1.55; }
 .finding-card code, .finding-card small { display: block; color: var(--muted); font: 8px DM Mono, monospace; overflow-wrap: anywhere; }
 .finding-card small { margin-top: 4px; }
+.finding-drill { margin-top: 9px; padding: 0; display: inline-flex; align-items: center; gap: 3px; border: 0; color: var(--purple); background: transparent; cursor: pointer; font-size: 8px; }
 .diagnostic-ok { min-height: 90px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--green); }
 .diagnostic-ok b, .diagnostic-ok span { display: block; }
 .diagnostic-ok b { font-size: 10px; }
@@ -738,6 +779,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .analysis-provider-fields { grid-template-columns: 1fr; }
   .analysis-provider-fields label:last-child:nth-child(3) { grid-column: auto; }
   .diagnostic-summary { grid-template-columns: repeat(3, 1fr); }
+  .diagnostic-overview-metrics { grid-template-columns: repeat(3, 1fr); }
+  .rn-evidence-status { grid-template-columns: repeat(2, 1fr); }
+  .framework-roadmap { grid-template-columns: repeat(2, 1fr); }
+  .framework-roadmap > div { grid-column: 1 / -1; }
   .diagnostic-table, .profile-diff-list { overflow-x: auto; }
   .diagnostic-table-head, .diagnostic-table-row { min-width: 850px; }
   .profile-diff-list > div { min-width: 760px; }
@@ -777,8 +822,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .privacy-preview { grid-template-columns: repeat(2, 1fr); }
   .flow-diff > div { grid-template-columns: 1fr; }
   .diagnostic-files { grid-template-columns: 1fr; }
+  .diagnostic-frameworks { align-items: stretch; flex-direction: column; }
+  .diagnostic-frameworks > div:last-child { grid-template-columns: 1fr; }
   .diagnostic-file-arrow { display: none; }
   .diagnostic-summary { grid-template-columns: repeat(2, 1fr); }
+  .diagnostic-overview-metrics, .rn-evidence-status, .framework-roadmap { grid-template-columns: 1fr; }
+  .diagnostic-overview-actions { align-items: stretch; flex-direction: column; }
   .privacy-actions { flex-direction: column; }
   .commit-timeline button { grid-template-columns: 30px 1fr 60px; }
   .commit-timeline small { grid-column: 2 / -1; }

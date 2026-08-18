@@ -823,7 +823,7 @@ function App() {
           <button className={`nav-item ${page === "devices" ? "active" : ""}`} onClick={() => navigateTo("devices")}><Smartphone size={18} />设备实验室<span className="nav-count">{environment?.devices.length ?? 0}</span></button>
           <button className={`nav-item ${page === "history" ? "active" : ""}`} onClick={() => navigateTo("history")}><Activity size={18} />运行记录</button>
           <button className={`nav-item ${page === "analysis" ? "active" : ""}`} onClick={() => navigateTo("analysis")}><CircleGauge size={18} />结果分析</button>
-          <button className={`nav-item ${page === "diagnostics" ? "active" : ""}`} onClick={() => navigateTo("diagnostics")}><Flame size={18} />组件诊断</button>
+          <button className={`nav-item ${page === "diagnostics" ? "active" : ""}`} onClick={() => navigateTo("diagnostics")}><Flame size={18} />性能诊断</button>
         </nav>
         <div className="sidebar-bottom">
           <button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => navigateTo("settings")}><Settings2 size={18} />设置</button>
@@ -894,7 +894,7 @@ function App() {
         ) : page === "analysis" ? (
           <AnalysisCenter />
         ) : page === "diagnostics" ? (
-          <DiagnosticCenter />
+          <DiagnosticCenter onNavigate={navigateTo} />
         ) : page === "settings" ? (
           <SettingsCenter
             environment={environment}

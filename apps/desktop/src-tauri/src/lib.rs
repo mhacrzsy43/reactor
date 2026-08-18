@@ -1176,6 +1176,20 @@ async fn perform_explorer_step(
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
+    let mut viewport_size = input.viewport_width.zip(input.viewport_height);
+    if input.platform == Platform::Android
+        && matches!(&input.step, Step::Swipe { .. })
+        && viewport_size.is_none()
+    {
+        // A WebView wheel callback can arrive while React is replacing the previous snapshot.
+        // Recover the authoritative device dimensions instead of turning a visible mirror into a
+        // failed recording. This capture stays outside every performance measurement window.
+        let screenshot = capture_android_screenshot(&root, &input.device_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let (width, height) = png_dimensions(&screenshot)?;
+        viewport_size = Some((f64::from(width), f64::from(height)));
+    }
     let mut prompt_values = std::collections::BTreeMap::new();
     if let Step::InputText {
         value: InputValue::PromptRef(reference),
@@ -1199,7 +1213,7 @@ async fn perform_explorer_step(
         &input.app_id,
         input.step,
         input.execution_point,
-        input.viewport_width.zip(input.viewport_height),
+        viewport_size,
         (!prompt_values.is_empty()).then_some(prompt_values),
     )
     .await

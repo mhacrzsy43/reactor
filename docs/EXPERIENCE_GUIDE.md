@@ -66,19 +66,21 @@ iOS Simulator 与 iOS 物理设备始终分组展示。
 
 AI 输出分成“已验证事实 / 可能原因 / 建议验证步骤”；未知证据引用会被拒绝，AI 无权改写规则 verdict。
 
-## RN 组件渲染诊断
+## 统一性能诊断与 RN 深度分析
 
-1. 打开 **组件诊断**。
-2. 导入 React DevTools Profiler JSON：
+1. 打开一级入口 **性能诊断**，在顶部选择 React Native、Flutter 或 Lynx。
+2. “性能总览”自动读取所选框架最近一次可信运行的帧、Jank、CPU、内存和启动指标；点击指标可进入对应的框架诊断路径。
+3. React Native 提供 Render、重复渲染、Hermes/JS CPU、时间线/火焰图、Profile Diff 和源码定位七个视图。
+4. 导入 React DevTools Profiler JSON：
    `tests/fixtures/react-profiler-regressed.json`。
-3. 可再导入基线：`tests/fixtures/react-profiler-baseline.json`。
-4. 查看组件榜单、Commit 时间线、火焰视图、重复渲染和 Profile Diff。
-5. 导入 `tests/fixtures/hermes-cpu-profile.json` 可查看 Hermes/Chrome CPU 热点。
-6. 要体验 Source Map，先导入 `tests/fixtures/hermes-bundle-profile.json`，再导入
+5. 可再导入基线：`tests/fixtures/react-profiler-baseline.json`；规则发现支持直接下钻到异常 Commit 和参与渲染的组件。
+6. 独立导入 `tests/fixtures/hermes-cpu-profile.json` 可同时保留 React Render 与 Hermes/Chrome CPU 热点证据。
+7. 要体验 Source Map，导入 `tests/fixtures/hermes-bundle-profile.json`，再导入
    `tests/fixtures/hermes-bundle.js.map`；位置会从 `index.bundle:1:1` 映射到
    `src/screens/CatalogScreen.tsx:1:1`。
 
 Profile、Source Map 和源码位置均在本机 Rust 核心中处理；诊断页不会调用 AI。
+Flutter/Lynx 当前共享黑盒性能总览，并明确展示专项采集接入边界，不会用 RN 组件语义生成占位结论。
 
 ## 发布加固、诊断与隐私擦除
 

@@ -377,7 +377,7 @@ AI Provider    Maestro      Perfetto / xctrace
 | M8.3 确定性回归规则 | ✅ 完成 | 帧、Jank、启动、CPU、内存、FPS 阈值比较；无 AI 也能判定并引用证据；注入回归测试通过 | 0 日 |
 | M8.4 结果分析中心 | ✅ 完成 | 自动推荐兼容基线、任务选择、兼容性提示、指标 diff、回归卡片、证据下钻已通过真实桌面验收 | 0 日 |
 | M8.5 AI 结果解释 | ✅ 完成 | 五种 Provider 已接入统一接口；事实/推测分区、引用校验、判定不可改写完成；Offline、真实 Codex CLI 与真实 Claude Code CLI 门禁通过 | 0 日 |
-| M8.6 RN 组件诊断 | ✅ 完成 | React Profiler/Hermes 导入、时间线、Commit 下钻、火焰视图、组件 Render/Commit 次数、Self Time 和 Source Map 已通过正式 Release 桌面验收 | 0 日 |
+| M8.6 统一性能诊断与 RN 深度分析 | ✅ 完成 | “性能诊断”一级入口、RN/Flutter/Lynx 框架切换、黑盒性能总览；RN 提供 Render、重复渲染、Hermes、时间线/火焰图、Profile Diff、Source Map，并支持指标/规则异常下钻 | 0 日 |
 | M8.7 重复渲染与 Profile Diff | ✅ 完成 | 无 AI 规则已定位无变化重复 Render、父组件级联、具体 Commit 与源码；构造基线/回归样例显示 3 个组件回归 | 0 日 |
 | M8.8 CI 与最终门禁 | ✅ 完成 | `analysis.json`/JUnit/HTML、退出码 0/2/3、全量测试、clippy、格式检查、Release/DMG 与诊断中心桌面门禁均已通过 | 0 日 |
 
