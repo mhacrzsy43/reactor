@@ -10,9 +10,9 @@ use std::{
 use chrono::Utc;
 use reactor_core::{aggregate_iterations, compile_maestro, mean, percentile, render_html_report};
 use reactor_protocol::{
-    AndroidNativeMetrics, DeviceMetadata, Flow, FlowLock, FlowTrialEvidence, FlowValidationError,
-    IosMetricAvailability, IosNativeMetrics, IterationMetrics, NormalizedResult, ResultSource,
-    Step, TrialMode, canonical_flow_hash,
+    AndroidNativeMetrics, Coordinate, DeviceMetadata, Flow, FlowLock, FlowTrialEvidence,
+    FlowValidationError, IosMetricAvailability, IosNativeMetrics, IterationMetrics,
+    NormalizedResult, ResultSource, Step, SwipeDirection, TrialMode, canonical_flow_hash,
 };
 use reactor_store::{ArtifactIssue, Job, JobEvent, JobState, Store};
 use regex::Regex;
@@ -725,6 +725,8 @@ pub async fn execute_explorer_step(
     device_id: &str,
     app_id: &str,
     step: Step,
+    execution_point: Option<Coordinate>,
+    viewport_size: Option<(f64, f64)>,
 ) -> Result<(), RunnerError> {
     if !matches!(
         &step,
@@ -735,6 +737,21 @@ pub async fn execute_explorer_step(
             output: "only tap, input_text, swipe, and pause are interactive recorder actions"
                 .to_owned(),
         });
+    }
+    if platform == reactor_protocol::Platform::Android
+        && matches!(
+            &step,
+            Step::Tap { .. } | Step::Swipe { .. } | Step::Pause { .. }
+        )
+    {
+        return execute_android_explorer_step(
+            workspace,
+            device_id,
+            &step,
+            execution_point,
+            viewport_size,
+        )
+        .await;
     }
     let flow = Flow {
         schema_version: 1,
@@ -766,6 +783,101 @@ pub async fn execute_explorer_step(
     };
     let _ = fs::remove_dir_all(&directory).await;
     result
+}
+
+async fn execute_android_explorer_step(
+    workspace: &Path,
+    device_id: &str,
+    step: &Step,
+    execution_point: Option<Coordinate>,
+    viewport_size: Option<(f64, f64)>,
+) -> Result<(), RunnerError> {
+    if let Step::Pause { duration_ms } = step {
+        tokio::time::sleep(Duration::from_millis(*duration_ms)).await;
+        return Ok(());
+    }
+    let adb = resolve_tools(workspace)
+        .adb
+        .ok_or(RunnerError::MissingTool("adb"))?;
+    let args = android_explorer_input_args(device_id, step, execution_point, viewport_size)?;
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    command_text(
+        &adb.to_string_lossy(),
+        &borrowed,
+        "Android Flow Explorer low-latency interaction",
+        Duration::from_secs(5),
+    )
+    .await?;
+    Ok(())
+}
+
+fn android_explorer_input_args(
+    device_id: &str,
+    step: &Step,
+    execution_point: Option<Coordinate>,
+    viewport_size: Option<(f64, f64)>,
+) -> Result<Vec<String>, RunnerError> {
+    let valid_dimension = |value: f64| value.is_finite() && (1.0..=20_000.0).contains(&value);
+    let rounded = |value: f64| format!("{:.0}", value.round());
+    let mut args = vec![
+        "-s".to_owned(),
+        device_id.to_owned(),
+        "shell".to_owned(),
+        "input".to_owned(),
+    ];
+    match step {
+        Step::Tap { .. } => {
+            let point = execution_point.filter(|point| {
+                point.x.is_finite()
+                    && point.y.is_finite()
+                    && point.x >= 0.0
+                    && point.y >= 0.0
+                    && point.x <= 20_000.0
+                    && point.y <= 20_000.0
+            });
+            let Some(point) = point else {
+                return Err(RunnerError::CommandFailed {
+                    command: "Android Flow Explorer tap".to_owned(),
+                    output: "a reviewed on-screen execution point is required".to_owned(),
+                });
+            };
+            args.extend(["tap".to_owned(), rounded(point.x), rounded(point.y)]);
+        }
+        Step::Swipe {
+            direction,
+            duration_ms,
+        } => {
+            let Some((width, height)) = viewport_size
+                .filter(|(width, height)| valid_dimension(*width) && valid_dimension(*height))
+            else {
+                return Err(RunnerError::CommandFailed {
+                    command: "Android Flow Explorer swipe".to_owned(),
+                    output: "a valid captured viewport is required".to_owned(),
+                });
+            };
+            let (start_x, start_y, end_x, end_y) = match direction {
+                SwipeDirection::Up => (width * 0.5, height * 0.75, width * 0.5, height * 0.25),
+                SwipeDirection::Down => (width * 0.5, height * 0.25, width * 0.5, height * 0.75),
+                SwipeDirection::Left => (width * 0.75, height * 0.5, width * 0.25, height * 0.5),
+                SwipeDirection::Right => (width * 0.25, height * 0.5, width * 0.75, height * 0.5),
+            };
+            args.extend([
+                "swipe".to_owned(),
+                rounded(start_x),
+                rounded(start_y),
+                rounded(end_x),
+                rounded(end_y),
+                duration_ms.to_string(),
+            ]);
+        }
+        _ => {
+            return Err(RunnerError::CommandFailed {
+                command: "Android Flow Explorer interaction".to_owned(),
+                output: "only tap, swipe, and pause use the low-latency input driver".to_owned(),
+            });
+        }
+    }
+    Ok(args)
 }
 
 fn validate_screenshot_output(
@@ -3058,6 +3170,61 @@ fn quote_shell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_bounded_android_explorer_input_commands() {
+        let tap = android_explorer_input_args(
+            "emulator-5554",
+            &Step::Tap {
+                target: reactor_protocol::Selector::default(),
+            },
+            Some(Coordinate { x: 719.6, y: 522.4 }),
+            Some((1440.0, 3120.0)),
+        )
+        .unwrap();
+        assert_eq!(
+            tap,
+            ["-s", "emulator-5554", "shell", "input", "tap", "720", "522"]
+        );
+
+        let swipe = android_explorer_input_args(
+            "emulator-5554",
+            &Step::Swipe {
+                direction: SwipeDirection::Up,
+                duration_ms: 500,
+            },
+            None,
+            Some((1440.0, 3120.0)),
+        )
+        .unwrap();
+        assert_eq!(
+            swipe,
+            [
+                "-s",
+                "emulator-5554",
+                "shell",
+                "input",
+                "swipe",
+                "720",
+                "2340",
+                "720",
+                "780",
+                "500",
+            ]
+        );
+
+        assert!(
+            android_explorer_input_args(
+                "emulator-5554",
+                &Step::Tap {
+                    target: reactor_protocol::Selector::default(),
+                },
+                None,
+                Some((1440.0, 3120.0)),
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn parses_versioned_perfetto_metric_fixture() {

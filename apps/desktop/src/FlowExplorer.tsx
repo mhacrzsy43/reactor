@@ -131,7 +131,10 @@ export function FlowExplorer({
     }
     if (interactionInFlight.current) return;
     const step: FlowStep = { action: "tap", target: candidate.selector };
-    await executeRecordedStep(step, `点击 ${elementName(element)}`);
+    await executeRecordedStep(step, `点击 ${elementName(element)}`, {
+      x: element.bounds.x + element.bounds.width / 2,
+      y: element.bounds.y + element.bounds.height / 2,
+    });
   }
 
   async function recordSwipe(direction: "up" | "down") {
@@ -139,7 +142,7 @@ export function FlowExplorer({
     await executeRecordedStep(step, direction === "up" ? "向上滚动" : "向下滚动");
   }
 
-  async function executeRecordedStep(step: FlowStep, label: string) {
+  async function executeRecordedStep(step: FlowStep, label: string, executionPoint?: { x: number; y: number }) {
     if (!selectedDevice || !appId.trim() || activeJobRunning || interactionInFlight.current) return;
     interactionInFlight.current = true;
     setLive(false);
@@ -153,11 +156,17 @@ export function FlowExplorer({
         deviceId: selectedDevice.id,
         appId: appId.trim(),
         step,
+        executionPoint,
+        viewportWidth: snapshot?.viewportWidth,
+        viewportHeight: snapshot?.viewportHeight,
       });
       setRecordedSteps((current) => [...current, step]);
       setSnapshot(next);
       setSelectedElementKey(undefined);
       setPoint(undefined);
+      if (next.platform === "android" && next.elements.length === 0) {
+        window.setTimeout(() => void capture(), 0);
+      }
     } catch (reason) {
       setError(`交互执行失败，步骤未加入 Flow：${String(reason)}`);
     } finally {

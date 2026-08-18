@@ -88,6 +88,12 @@ struct PerformExplorerStepInput {
     device_id: String,
     app_id: String,
     step: Step,
+    #[serde(default)]
+    execution_point: Option<reactor_protocol::Coordinate>,
+    #[serde(default)]
+    viewport_width: Option<f64>,
+    #[serde(default)]
+    viewport_height: Option<f64>,
 }
 
 const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
@@ -867,10 +873,38 @@ async fn perform_explorer_step(
         &input.device_id,
         &input.app_id,
         input.step,
+        input.execution_point,
+        input.viewport_width.zip(input.viewport_height),
     )
     .await
     .map_err(|error| error.to_string())?;
     ensure_inspector_capture_allowed(&root)?;
+    if input.platform == Platform::Android {
+        // Return the changed pixels immediately, then let the desktop refresh the expensive
+        // accessibility hierarchy in the background. This keeps the recorder responsive without
+        // weakening final Maestro replay and destination-proof gates.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let screenshot = capture_android_screenshot(&root, &input.device_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        ensure_inspector_capture_allowed(&root)?;
+        let (screenshot_width, screenshot_height) = png_dimensions(&screenshot)?;
+        return Ok(DeviceInspectorSnapshot {
+            platform: input.platform,
+            device_id: input.device_id,
+            screenshot_data_url: format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(screenshot)
+            ),
+            screenshot_width,
+            screenshot_height,
+            viewport_width: f64::from(screenshot_width),
+            viewport_height: f64::from(screenshot_height),
+            captured_at: Utc::now(),
+            elements: vec![],
+            warnings: vec!["设备动作已完成；Selector 索引正在后台刷新".to_owned()],
+        });
+    }
     let stable = wait_for_explorer_stability(&root, input.platform, &input.device_id).await;
     let mut snapshot = capture_device_inspector_for(CaptureDeviceInspectorInput {
         platform: input.platform,

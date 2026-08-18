@@ -8,6 +8,11 @@ export interface Selector {
   coordinate?: { x: number; y: number };
 }
 
+export interface Coordinate {
+  x: number;
+  y: number;
+}
+
 export type FlowStep =
   | { action: "reset_app_state" }
   | { action: "launch_app" }
