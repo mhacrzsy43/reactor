@@ -46,6 +46,8 @@ export function FlowExplorer({
   const [copiedStrategy, setCopiedStrategy] = useState("");
   const captureInFlight = useRef(false);
   const interactionInFlight = useRef(false);
+  const mirrorRef = useRef<HTMLDivElement>(null);
+  const lastWheelGestureAt = useRef(0);
 
   const capture = useCallback(async () => {
     if (!selectedDevice || activeJobRunning || captureInFlight.current) return;
@@ -111,7 +113,23 @@ export function FlowExplorer({
 
   async function recordTap(element: InspectorElement) {
     const candidate = element.candidates[0];
-    if (!selectedDevice || !candidate || !appId.trim() || activeJobRunning || interactionInFlight.current) return;
+    if (!selectedDevice) {
+      setError("尚未选择可操作的设备。");
+      return;
+    }
+    if (!candidate) {
+      setError("当前元素没有可执行的 Selector，步骤未加入 Flow。");
+      return;
+    }
+    if (!appId.trim()) {
+      setError("请先填写当前 App 包名 / Bundle ID，再执行并录制这个步骤。");
+      return;
+    }
+    if (activeJobRunning) {
+      setError("性能任务运行期间不能操作设备，请等待任务结束。");
+      return;
+    }
+    if (interactionInFlight.current) return;
     const step: FlowStep = { action: "tap", target: candidate.selector };
     await executeRecordedStep(step, `点击 ${elementName(element)}`);
   }
@@ -149,16 +167,35 @@ export function FlowExplorer({
     }
   }
 
-  function handleMirrorWheel(event: React.WheelEvent<HTMLDivElement>) {
+  const handleMirrorWheel = useCallback((event: WheelEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    event.stopImmediatePropagation();
     if (Math.abs(event.deltaY) < 8 || interactionInFlight.current) return;
+    const now = Date.now();
+    if (now - lastWheelGestureAt.current < 1_200) return;
+    lastWheelGestureAt.current = now;
     if (mode !== "record") {
       setError("镜像内滚动已被 Reactor 拦截；切换到录制/交互模式后会转换为设备滑动。");
       return;
     }
+    if (!appId.trim()) {
+      setError("请先填写当前 App 包名 / Bundle ID，再把滚动录制为设备滑动。");
+      return;
+    }
     void recordSwipe(event.deltaY > 0 ? "up" : "down");
-  }
+  }, [appId, mode]);
+
+  useEffect(() => {
+    const interceptMirrorWheel = (event: WheelEvent) => {
+      const mirror = mirrorRef.current;
+      if (mirror && event.target instanceof Node && mirror.contains(event.target)) handleMirrorWheel(event);
+    };
+    window.addEventListener("wheel", interceptMirrorWheel, { capture: true, passive: false });
+    return () => window.removeEventListener("wheel", interceptMirrorWheel, { capture: true });
+  }, [handleMirrorWheel, snapshot]);
+
+  useEffect(() => () => document.body.classList.remove("mirror-gesture-lock"), []);
 
   async function copySelector(candidate: InspectorSelectorCandidate) {
     try {
@@ -206,10 +243,8 @@ export function FlowExplorer({
         </div>
         <label className="recording-app-id"><span>当前 App 包名 / Bundle ID</span><input value={appId} onChange={(event) => onAppIdChange(event.target.value)} placeholder="com.example.app" /></label>
         <div className="recording-progress"><ListPlus size={17} /><div><b>{recordedSteps.length} 个已录制步骤</b><span>{mode === "record" ? "点击画面后 Reactor 使用最佳语义 Selector 真实执行，并等待下一页面稳定。" : "切换到录制/交互模式后才会操作设备。"}</span></div></div>
-        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} onClick={() => setRecordedSteps((steps) => steps.slice(0, -1))}><Undo2 size={15} />移除最后一步</button>
+        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => setRecordedSteps((steps) => steps.slice(0, -1))}><Undo2 size={15} />移除记录最后一步</button>
       </section>
-
-      {recordedSteps.length > 0 && <section className="recorded-step-strip" aria-label="已录制步骤">{recordedSteps.map((step, index) => <div key={`${step.action}-${index}`}><span>{index + 1}</span><b>{step.action === "tap" ? "点击" : step.action}</b><code>{step.action === "tap" ? selectorLabel(step.target) : ""}</code></div>)}</section>}
 
       {pendingDanger && <div className="explorer-guard danger"><AlertTriangle size={18} /><div><b>检测到潜在敏感操作：{elementName(pendingDanger)}</b><span>当前安全阶段不会执行或写入步骤；敏感操作确认凭证接通后才会开放“确认并继续”。</span></div><button className="secondary-button" onClick={() => setPendingDanger(undefined)}>取消</button></div>}
 
@@ -224,7 +259,14 @@ export function FlowExplorer({
             <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
             <div className="device-mirror-stage">
               {snapshot ? (
-                <div className={`device-mirror ${mode}`} onClick={inspectPoint} onWheel={handleMirrorWheel} title={mode === "record" ? "点击并录制；滚轮/触控板转换为设备滑动" : "点击审查；镜像内滚动不会滚动 Reactor"}>
+                <div
+                  ref={mirrorRef}
+                  className={`device-mirror ${mode}`}
+                  onClick={inspectPoint}
+                  onPointerEnter={() => document.body.classList.add("mirror-gesture-lock")}
+                  onPointerLeave={() => document.body.classList.remove("mirror-gesture-lock")}
+                  title={mode === "record" ? "点击并录制；滚轮/触控板转换为设备滑动" : "点击审查；镜像内滚动不会滚动 Reactor"}
+                >
                   <img src={snapshot.screenshotDataUrl} alt={`${selectedDevice?.name ?? selectedDevice?.id} 当前画面`} draggable={false} />
                   {selectedElement && <span className="element-highlight" style={highlightStyle(selectedElement, snapshot)}><span>{elementName(selectedElement)}</span></span>}
                   {point && <span className="inspection-point" style={{ left: `${(point.x / snapshot.viewportWidth) * 100}%`, top: `${(point.y / snapshot.viewportHeight) * 100}%` }} />}
@@ -239,6 +281,28 @@ export function FlowExplorer({
 
           <aside className="card selector-inspector-card">
             <div className="card-heading"><div className="heading-icon green"><Crosshair size={18} /></div><div><h2>Selector Inspector</h2><p>优先语义定位，坐标仅作显式降级。</p></div></div>
+            {mode === "record" && (
+              <section className="recorded-flow-panel" aria-label="当前录制 Flow">
+                <div className="recorded-flow-heading">
+                  <div><p className="eyebrow">RECORDED FLOW</p><h3>从本次录制开始的 Step Flow</h3></div>
+                  <span>{recordedSteps.length} steps</span>
+                </div>
+                {recordedSteps.length > 0 ? (
+                  <ol className="recorded-flow-list">
+                    {recordedSteps.map((step, index) => (
+                      <li key={`${step.action}-${index}`}>
+                        <span>{index + 1}</span>
+                        <div><b>{flowStepName(step)}</b><code>{flowStepDetail(step)}</code></div>
+                        {index === recordedSteps.length - 1 && <small>最新</small>}
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <div className="recorded-flow-empty"><ListPlus size={20} /><span>尚无步骤。点击、返回或滑动设备镜像后，会按执行顺序持续追加在这里。</span></div>
+                )}
+              </section>
+            )}
+            <div className="current-selector-heading"><b>当前 Selector</b><span>{selectedElement ? "待审查 / 待执行" : "尚未选择控件"}</span></div>
             {selectedElement ? (
               <>
                 <div className="element-summary">
@@ -249,7 +313,7 @@ export function FlowExplorer({
                   <div><span>层级</span><b>Depth {selectedElement.depth}</b></div>
                   <div><span>状态</span><b>{selectedElement.enabled ? "Enabled" : "Disabled"}</b></div>
                 </div>
-                <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning || !appId.trim()} onClick={() => { setMode("record"); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>
+                <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { setMode("record"); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>
                 <div className="selector-candidates">
                   <div className="selector-list-heading"><b>候选 Selector</b><span>按稳定性排序</span></div>
                   {selectedElement.candidates.map((candidate) => (
@@ -289,6 +353,22 @@ function isDangerousElement(element: InspectorElement): boolean {
 
 function selectorLabel(selector: InspectorSelectorCandidate["selector"]): string {
   return selector.accessibilityId ?? selector.semanticId ?? selector.text ?? (selector.coordinate ? `${Math.round(selector.coordinate.x)},${Math.round(selector.coordinate.y)}` : "未知 Selector");
+}
+
+function flowStepName(step: FlowStep): string {
+  if (step.action === "tap") return "点击";
+  if (step.action === "swipe") return "滑动";
+  if (step.action === "input_text") return "输入文本";
+  if (step.action === "pause") return "等待";
+  return step.action;
+}
+
+function flowStepDetail(step: FlowStep): string {
+  if (step.action === "tap") return selectorLabel(step.target);
+  if (step.action === "swipe") return `${step.direction.toUpperCase()} · ${step.duration_ms} ms`;
+  if (step.action === "input_text") return selectorLabel(step.target);
+  if (step.action === "pause") return `${step.duration_ms} ms`;
+  return "";
 }
 
 function formatBounds(element: InspectorElement): string {
