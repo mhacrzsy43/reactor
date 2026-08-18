@@ -1100,12 +1100,21 @@ fn flow_output_schema() -> Value {
                     }
                 }
             },
+            "inputValue": {
+                "anyOf": [
+                    { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    { "type": "object", "additionalProperties": false, "required": ["variableRef"], "properties": { "variableRef": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+                    { "type": "object", "additionalProperties": false, "required": ["secretRef"], "properties": { "secretRef": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+                    { "type": "object", "additionalProperties": false, "required": ["promptRef"], "properties": { "promptRef": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+                    { "type": "object", "additionalProperties": false, "required": ["totpRef"], "properties": { "totpRef": { "type": "string", "minLength": 1, "maxLength": 128 } } }
+                ]
+            },
             "step": {
                 "anyOf": [
                     { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "type": "string", "const": "reset_app_state" } } },
                     { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "type": "string", "const": "launch_app" } } },
                     { "type": "object", "additionalProperties": false, "required": ["action", "target"], "properties": { "action": { "type": "string", "const": "tap" }, "target": { "$ref": "#/$defs/selector" } } },
-                    { "type": "object", "additionalProperties": false, "required": ["action", "target", "text"], "properties": { "action": { "type": "string", "const": "input_text" }, "target": { "$ref": "#/$defs/selector" }, "text": { "type": "string" } } },
+                    { "type": "object", "additionalProperties": false, "required": ["action", "target", "value", "clearBefore"], "properties": { "action": { "type": "string", "const": "input_text" }, "target": { "$ref": "#/$defs/selector" }, "value": { "$ref": "#/$defs/inputValue" }, "clearBefore": { "type": "boolean" } } },
                     { "type": "object", "additionalProperties": false, "required": ["action", "direction", "duration_ms"], "properties": { "action": { "type": "string", "const": "swipe" }, "direction": { "type": "string", "enum": ["up", "down", "left", "right"] }, "duration_ms": { "type": "integer", "minimum": 0 } } },
                     { "type": "object", "additionalProperties": false, "required": ["action", "target", "timeout_ms"], "properties": { "action": { "type": "string", "const": "wait_for" }, "target": { "$ref": "#/$defs/selector" }, "timeout_ms": { "type": "integer", "minimum": 0 } } },
                     { "type": "object", "additionalProperties": false, "required": ["action", "target"], "properties": { "action": { "type": "string", "const": "assert_visible" }, "target": { "$ref": "#/$defs/selector" } } },

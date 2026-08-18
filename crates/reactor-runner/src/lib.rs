@@ -1,26 +1,33 @@
 #![allow(clippy::cast_precision_loss)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 
 use chrono::Utc;
-use reactor_core::{aggregate_iterations, compile_maestro, mean, percentile, render_html_report};
+use data_encoding::BASE32_NOPAD;
+use hmac::{Hmac, Mac};
+use reactor_core::{
+    CompiledInputBinding, aggregate_iterations, compile_maestro, mean, percentile,
+    render_html_report,
+};
 use reactor_protocol::{
     AndroidNativeMetrics, Coordinate, DeviceMetadata, Flow, FlowLock, FlowTrialEvidence,
-    FlowValidationError, IosMetricAvailability, IosNativeMetrics, IterationMetrics,
+    FlowValidationError, InputValue, IosMetricAvailability, IosNativeMetrics, IterationMetrics,
     NormalizedResult, ResultSource, Step, SwipeDirection, TrialMode, canonical_flow_hash,
 };
 use reactor_store::{ArtifactIssue, Job, JobEvent, JobState, Store};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha1::Sha1;
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, process::Command};
 use walkdir::WalkDir;
+use zeroize::Zeroizing;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
@@ -133,6 +140,225 @@ pub enum RunnerError {
     },
     #[error("invalid or unsupported xctrace output: {0}")]
     InvalidXctrace(String),
+    #[error("invalid Flow input reference: {0}")]
+    InvalidInputReference(String),
+    #[error("{path}: required {kind} value is unavailable")]
+    MissingInputValue { path: String, kind: &'static str },
+    #[error("{path}: promptRef requires an interactive value before replay")]
+    InteractiveInputRequired { path: String },
+    #[error("{path}: TOTP secret is not valid Base32")]
+    InvalidTotpSecret { path: String },
+    #[error("Flow secret store is unavailable: {0}")]
+    SecretStore(String),
+}
+
+const FLOW_SECRET_SERVICE: &str = "com.reactor.performance.flow-secret";
+const FLOW_SECRET_INDEX_ACCOUNT: &str = "__reactor_secret_index_v1__";
+
+/// Saves a named Flow secret in the OS credential store. The value is never returned by list or
+/// diagnostic APIs and is kept separate from AI provider credentials.
+///
+/// # Errors
+///
+/// Returns an error for an invalid reference or unavailable credential store.
+pub fn save_flow_secret(reference: &str, value: &str) -> Result<(), RunnerError> {
+    validate_input_reference(reference)?;
+    if value.is_empty() {
+        return Err(RunnerError::InvalidInputReference(
+            "secret value must not be empty".to_owned(),
+        ));
+    }
+    let mut references = load_flow_secret_index()?;
+    references.insert(reference.to_owned());
+    save_flow_secret_index(&references)?;
+    keyring::Entry::new(FLOW_SECRET_SERVICE, reference)
+        .map_err(|error| RunnerError::SecretStore(error.to_string()))?
+        .set_password(value)
+        .map_err(|error| RunnerError::SecretStore(error.to_string()))
+}
+
+/// Reports only whether a named Flow secret exists; it never exposes the stored value.
+///
+/// # Errors
+///
+/// Returns an error for an invalid reference or unavailable credential store.
+pub fn has_flow_secret(reference: &str) -> Result<bool, RunnerError> {
+    Ok(load_flow_secret(reference)?.is_some())
+}
+
+/// Deletes a named Flow secret. Missing entries are treated as success.
+///
+/// # Errors
+///
+/// Returns an error for an invalid reference or unavailable credential store.
+pub fn delete_flow_secret(reference: &str) -> Result<(), RunnerError> {
+    validate_input_reference(reference)?;
+    let entry = keyring::Entry::new(FLOW_SECRET_SERVICE, reference)
+        .map_err(|error| RunnerError::SecretStore(error.to_string()))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            let mut references = load_flow_secret_index()?;
+            references.remove(reference);
+            save_flow_secret_index(&references)
+        }
+        Err(error) => Err(RunnerError::SecretStore(error.to_string())),
+    }
+}
+
+/// Deletes every Flow secret registered by Reactor without exposing its value or reference list to
+/// the UI. Missing credentials are tolerated so a previously interrupted erase can be resumed.
+///
+/// # Errors
+///
+/// Returns an error when the OS credential store cannot be read or updated.
+pub fn delete_all_flow_secrets() -> Result<(), RunnerError> {
+    for reference in load_flow_secret_index()? {
+        let entry = keyring::Entry::new(FLOW_SECRET_SERVICE, &reference)
+            .map_err(|error| RunnerError::SecretStore(error.to_string()))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(RunnerError::SecretStore(error.to_string())),
+        }
+    }
+    let index = flow_secret_index_entry()?;
+    match index.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(RunnerError::SecretStore(error.to_string())),
+    }
+}
+
+fn flow_secret_index_entry() -> Result<keyring::Entry, RunnerError> {
+    keyring::Entry::new(FLOW_SECRET_SERVICE, FLOW_SECRET_INDEX_ACCOUNT)
+        .map_err(|error| RunnerError::SecretStore(error.to_string()))
+}
+
+fn load_flow_secret_index() -> Result<BTreeSet<String>, RunnerError> {
+    match flow_secret_index_entry()?.get_password() {
+        Ok(value) => serde_json::from_str(&value)
+            .map_err(|error| RunnerError::SecretStore(format!("invalid secret index: {error}"))),
+        Err(keyring::Error::NoEntry) => Ok(BTreeSet::new()),
+        Err(error) => Err(RunnerError::SecretStore(error.to_string())),
+    }
+}
+
+fn save_flow_secret_index(references: &BTreeSet<String>) -> Result<(), RunnerError> {
+    if references.is_empty() {
+        return match flow_secret_index_entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(RunnerError::SecretStore(error.to_string())),
+        };
+    }
+    let value = serde_json::to_string(references)?;
+    flow_secret_index_entry()?
+        .set_password(&value)
+        .map_err(|error| RunnerError::SecretStore(error.to_string()))
+}
+
+fn validate_input_reference(reference: &str) -> Result<(), RunnerError> {
+    if reference.is_empty()
+        || reference.len() > 128
+        || reference.trim() != reference
+        || !reference
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        return Err(RunnerError::InvalidInputReference(
+            "use 1-128 ASCII letters, numbers, dot, underscore, or hyphen".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn load_flow_secret(reference: &str) -> Result<Option<Zeroizing<String>>, RunnerError> {
+    validate_input_reference(reference)?;
+    let entry = keyring::Entry::new(FLOW_SECRET_SERVICE, reference)
+        .map_err(|error| RunnerError::SecretStore(error.to_string()))?;
+    match entry.get_password() {
+        Ok(value) => Ok(Some(Zeroizing::new(value))),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(RunnerError::SecretStore(error.to_string())),
+    }
+}
+
+fn resolve_input_environment(
+    bindings: &[CompiledInputBinding],
+    prompts: Option<&BTreeMap<String, Zeroizing<String>>>,
+) -> Result<Vec<(String, Zeroizing<String>)>, RunnerError> {
+    bindings
+        .iter()
+        .map(|binding| {
+            let resolved = match &binding.value {
+                InputValue::Literal(value) => Zeroizing::new(value.clone()),
+                InputValue::VariableRef(reference) => {
+                    validate_input_reference(&reference.variable_ref)?;
+                    Zeroizing::new(std::env::var(&reference.variable_ref).map_err(|_| {
+                        RunnerError::MissingInputValue {
+                            path: binding.path.clone(),
+                            kind: "variableRef",
+                        }
+                    })?)
+                }
+                InputValue::SecretRef(reference) => load_flow_secret(&reference.secret_ref)?
+                    .ok_or_else(|| RunnerError::MissingInputValue {
+                        path: binding.path.clone(),
+                        kind: "secretRef",
+                    })?,
+                InputValue::PromptRef(reference) => {
+                    let value = prompts
+                        .and_then(|values| values.get(&reference.prompt_ref))
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| RunnerError::InteractiveInputRequired {
+                            path: binding.path.clone(),
+                        })?;
+                    Zeroizing::new(value.to_string())
+                }
+                InputValue::TotpRef(reference) => {
+                    let secret = load_flow_secret(&reference.totp_ref)?.ok_or_else(|| {
+                        RunnerError::MissingInputValue {
+                            path: binding.path.clone(),
+                            kind: "totpRef",
+                        }
+                    })?;
+                    Zeroizing::new(generate_totp(&secret, &binding.path)?)
+                }
+            };
+            Ok((binding.environment_key.clone(), resolved))
+        })
+        .collect()
+}
+
+fn generate_totp(secret: &str, path: &str) -> Result<String, RunnerError> {
+    let normalized = secret
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != '-')
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    let bytes =
+        BASE32_NOPAD
+            .decode(normalized.as_bytes())
+            .map_err(|_| RunnerError::InvalidTotpSecret {
+                path: path.to_owned(),
+            })?;
+    let counter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 30;
+    generate_totp_at_counter(&bytes, counter).ok_or_else(|| RunnerError::InvalidTotpSecret {
+        path: path.to_owned(),
+    })
+}
+
+fn generate_totp_at_counter(secret: &[u8], counter: u64) -> Option<String> {
+    let mut mac = Hmac::<Sha1>::new_from_slice(secret).ok()?;
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = usize::from(digest[19] & 0x0f);
+    let binary = (u32::from(digest[offset] & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    Some(format!("{:06}", binary % 1_000_000))
 }
 
 struct PerfettoSession {
@@ -719,6 +945,7 @@ pub async fn capture_ios_screenshot(
 ///
 /// Returns an error when the step is not an interactive recorder action, validation fails, the
 /// managed automation runtime is unavailable, or the device command fails.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_explorer_step(
     workspace: &Path,
     platform: reactor_protocol::Platform,
@@ -727,6 +954,7 @@ pub async fn execute_explorer_step(
     step: Step,
     execution_point: Option<Coordinate>,
     viewport_size: Option<(f64, f64)>,
+    prompt_values: Option<BTreeMap<String, Zeroizing<String>>>,
 ) -> Result<(), RunnerError> {
     if !matches!(
         &step,
@@ -765,6 +993,8 @@ pub async fn execute_explorer_step(
         teardown: vec![],
     };
     let compiled = compile_maestro(&flow)?;
+    let input_environment =
+        resolve_input_environment(&compiled.input_bindings, prompt_values.as_ref())?;
     let tools = resolve_tools(workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;
@@ -777,9 +1007,19 @@ pub async fn execute_explorer_step(
     let result = match platform {
         reactor_protocol::Platform::Android => {
             let adb = tools.adb.ok_or(RunnerError::MissingTool("adb"))?;
-            run_maestro(&maestro, &java, &adb, &path, Some(device_id)).await
+            run_maestro_with_inputs(
+                &maestro,
+                &java,
+                &adb,
+                &path,
+                Some(device_id),
+                &input_environment,
+            )
+            .await
         }
-        reactor_protocol::Platform::Ios => run_maestro_ios(&maestro, &java, &path, device_id).await,
+        reactor_protocol::Platform::Ios => {
+            run_maestro_ios_with_inputs(&maestro, &java, &path, device_id, &input_environment).await
+        }
     };
     let _ = fs::remove_dir_all(&directory).await;
     result
@@ -1723,6 +1963,7 @@ async fn execute_android_job_inner(
         return Err(RunnerError::MissingAndroidTrial(request.device_id.clone()));
     }
     let compiled = compile_maestro(&lock.flow)?;
+    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
     let tools = resolve_tools(&request.workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let flashlight = tools
@@ -1763,23 +2004,33 @@ async fn execute_android_job_inner(
         None,
     )?;
     if !lock.flow.setup.is_empty() {
-        run_maestro(&maestro, &java, &adb, &setup_path, Some(&request.device_id)).await?;
+        run_maestro_with_inputs(
+            &maestro,
+            &java,
+            &adb,
+            &setup_path,
+            Some(&request.device_id),
+            &input_environment,
+        )
+        .await?;
     }
-    run_maestro(
+    run_maestro_with_inputs(
         &maestro,
         &java,
         &adb,
         &measured_path,
         Some(&request.device_id),
+        &input_environment,
     )
     .await?;
     if !lock.flow.teardown.is_empty() {
-        run_maestro(
+        run_maestro_with_inputs(
             &maestro,
             &java,
             &adb,
             &teardown_path,
             Some(&request.device_id),
+            &input_environment,
         )
         .await?;
     }
@@ -1833,6 +2084,7 @@ async fn execute_android_job_inner(
         &raw_path,
         &lock.flow.app_id,
         request,
+        &input_environment,
     )
     .await;
     let perfetto_result = stop_perfetto(&adb, &request.device_id, &perfetto, &perfetto_path).await;
@@ -2007,6 +2259,7 @@ async fn execute_ios_job_inner(
         return Err(RunnerError::MissingIosTrial(request.device_id.clone()));
     }
     let compiled = compile_maestro(&lock.flow)?;
+    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
     let tools = resolve_tools(&request.workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;
@@ -2039,11 +2292,32 @@ async fn execute_ios_job_inner(
         None,
     )?;
     if !lock.flow.setup.is_empty() {
-        run_maestro_ios(&maestro, &java, &setup_path, &request.device_id).await?;
+        run_maestro_ios_with_inputs(
+            &maestro,
+            &java,
+            &setup_path,
+            &request.device_id,
+            &input_environment,
+        )
+        .await?;
     }
-    run_maestro_ios(&maestro, &java, &measured_path, &request.device_id).await?;
+    run_maestro_ios_with_inputs(
+        &maestro,
+        &java,
+        &measured_path,
+        &request.device_id,
+        &input_environment,
+    )
+    .await?;
     if !lock.flow.teardown.is_empty() {
-        run_maestro_ios(&maestro, &java, &teardown_path, &request.device_id).await?;
+        run_maestro_ios_with_inputs(
+            &maestro,
+            &java,
+            &teardown_path,
+            &request.device_id,
+            &input_environment,
+        )
+        .await?;
     }
 
     transition_job(
@@ -2062,13 +2336,26 @@ async fn execute_ios_job_inner(
         &trace_path,
     )?;
     tokio::time::sleep(Duration::from_millis(1_500)).await;
-    let measured_result =
-        run_maestro_ios(&maestro, &java, &measured_path, &request.device_id).await;
+    let measured_result = run_maestro_ios_with_inputs(
+        &maestro,
+        &java,
+        &measured_path,
+        &request.device_id,
+        &input_environment,
+    )
+    .await;
     let trace_result = stop_xctrace(&mut xctrace, &trace_path).await;
     measured_result?;
     trace_result?;
     if !lock.flow.teardown.is_empty() {
-        run_maestro_ios(&maestro, &java, &teardown_path, &request.device_id).await?;
+        run_maestro_ios_with_inputs(
+            &maestro,
+            &java,
+            &teardown_path,
+            &request.device_id,
+            &input_environment,
+        )
+        .await?;
     }
 
     transition_job(
@@ -2492,6 +2779,7 @@ pub async fn trial_android(
 ) -> Result<FlowTrialEvidence, RunnerError> {
     let flow_hash = canonical_flow_hash(flow)?;
     let compiled = compile_maestro(flow)?;
+    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
     let tools = resolve_tools(workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;
@@ -2508,9 +2796,25 @@ pub async fn trial_android(
     fs::write(&teardown_path, compiled.teardown).await?;
 
     if !flow.setup.is_empty() {
-        run_maestro(&maestro, &java, &adb, &setup_path, Some(device_id)).await?;
+        run_maestro_with_inputs(
+            &maestro,
+            &java,
+            &adb,
+            &setup_path,
+            Some(device_id),
+            &input_environment,
+        )
+        .await?;
     }
-    let measured = run_maestro(&maestro, &java, &adb, &measured_path, Some(device_id)).await;
+    let measured = run_maestro_with_inputs(
+        &maestro,
+        &java,
+        &adb,
+        &measured_path,
+        Some(device_id),
+        &input_environment,
+    )
+    .await;
     measured?;
     if let Ok(tree) = capture_android_current_ui_tree(workspace, device_id).await {
         fs::write(artifact_dir.join("destination-ui-tree.xml"), tree).await?;
@@ -2518,7 +2822,15 @@ pub async fn trial_android(
     let teardown = if flow.teardown.is_empty() {
         Ok(())
     } else {
-        run_maestro(&maestro, &java, &adb, &teardown_path, Some(device_id)).await
+        run_maestro_with_inputs(
+            &maestro,
+            &java,
+            &adb,
+            &teardown_path,
+            Some(device_id),
+            &input_environment,
+        )
+        .await
     };
     teardown?;
 
@@ -2546,6 +2858,7 @@ pub async fn trial_ios_simulator(
 ) -> Result<FlowTrialEvidence, RunnerError> {
     let flow_hash = canonical_flow_hash(flow)?;
     let compiled = compile_maestro(flow)?;
+    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
     let tools = resolve_tools(workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;
@@ -2561,9 +2874,23 @@ pub async fn trial_ios_simulator(
     fs::write(&teardown_path, compiled.teardown).await?;
 
     if !flow.setup.is_empty() {
-        run_maestro_ios(&maestro, &java, &setup_path, simulator_id).await?;
+        run_maestro_ios_with_inputs(
+            &maestro,
+            &java,
+            &setup_path,
+            simulator_id,
+            &input_environment,
+        )
+        .await?;
     }
-    let measured = run_maestro_ios(&maestro, &java, &measured_path, simulator_id).await;
+    let measured = run_maestro_ios_with_inputs(
+        &maestro,
+        &java,
+        &measured_path,
+        simulator_id,
+        &input_environment,
+    )
+    .await;
     measured?;
     if let Ok(tree) = capture_ios_current_ui_tree(workspace, simulator_id).await {
         fs::write(artifact_dir.join("destination-ui-tree.csv"), tree).await?;
@@ -2571,7 +2898,14 @@ pub async fn trial_ios_simulator(
     let teardown = if flow.teardown.is_empty() {
         Ok(())
     } else {
-        run_maestro_ios(&maestro, &java, &teardown_path, simulator_id).await
+        run_maestro_ios_with_inputs(
+            &maestro,
+            &java,
+            &teardown_path,
+            simulator_id,
+            &input_environment,
+        )
+        .await
     };
     teardown?;
 
@@ -2820,12 +3154,13 @@ fn synthetic_result(
     }
 }
 
-async fn run_maestro(
+async fn run_maestro_with_inputs(
     maestro: &Path,
     java: &Path,
     adb: &Path,
     flow: &Path,
     device_id: Option<&str>,
+    input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
     let mut command = Command::new(maestro);
     command.args(["test", &flow.display().to_string(), "--no-ansi"]);
@@ -2833,14 +3168,22 @@ async fn run_maestro(
         command.args(["--udid", device_id]);
     }
     configure_environment(&mut command, java, adb, device_id);
-    run_command_with_timeout(command, "maestro", Duration::from_secs(120)).await
+    apply_input_environment(&mut command, input_environment);
+    run_command_with_timeout_redacted(
+        command,
+        "maestro",
+        Duration::from_secs(120),
+        input_environment,
+    )
+    .await
 }
 
-async fn run_maestro_ios(
+async fn run_maestro_ios_with_inputs(
     maestro: &Path,
     java: &Path,
     flow: &Path,
     simulator_id: &str,
+    input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
     let mut command = Command::new(maestro);
     command.args([
@@ -2851,7 +3194,23 @@ async fn run_maestro_ios(
         simulator_id,
     ]);
     configure_java_environment(&mut command, java);
-    run_command_with_timeout(command, "maestro-ios-simulator", Duration::from_secs(120)).await
+    apply_input_environment(&mut command, input_environment);
+    run_command_with_timeout_redacted(
+        command,
+        "maestro-ios-simulator",
+        Duration::from_secs(120),
+        input_environment,
+    )
+    .await
+}
+
+fn apply_input_environment(
+    command: &mut Command,
+    input_environment: &[(String, Zeroizing<String>)],
+) {
+    for (key, value) in input_environment {
+        command.env(key, value.as_str());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2866,6 +3225,7 @@ async fn run_flashlight(
     raw_path: &Path,
     app_id: &str,
     request: &AndroidRunRequest,
+    input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
     let maestro_executable = quote_shell(&maestro.display().to_string());
     let test_command = format!(
@@ -2908,7 +3268,14 @@ async fn run_flashlight(
         command.args(["--afterEachCommand", &after_each]);
     }
     configure_environment(&mut command, java, adb, Some(&request.device_id));
-    run_command_with_timeout(command, "flashlight", flashlight_timeout(request)).await
+    apply_input_environment(&mut command, input_environment);
+    run_command_with_timeout_redacted(
+        command,
+        "flashlight",
+        flashlight_timeout(request),
+        input_environment,
+    )
+    .await
 }
 
 fn flashlight_timeout(request: &AndroidRunRequest) -> Duration {
@@ -2961,9 +3328,18 @@ fn configure_java_environment(command: &mut Command, java: &Path) {
 }
 
 async fn run_command_with_timeout(
+    command: Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<(), RunnerError> {
+    run_command_with_timeout_redacted(command, label, timeout, &[]).await
+}
+
+async fn run_command_with_timeout_redacted(
     mut command: Command,
     label: &str,
     timeout: Duration,
+    input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
     #[cfg(unix)]
     command.as_std_mut().process_group(0);
@@ -2987,13 +3363,19 @@ async fn run_command_with_timeout(
     if output.status.success() {
         Ok(())
     } else {
+        let mut captured = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for (_, value) in input_environment {
+            if !value.is_empty() {
+                captured = captured.replace(value.as_str(), "[REDACTED_INPUT]");
+            }
+        }
         Err(RunnerError::CommandFailed {
             command: label.to_owned(),
-            output: format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ),
+            output: captured,
         })
     }
 }
@@ -3227,6 +3609,52 @@ mod tests {
     }
 
     #[test]
+    fn generates_rfc6238_six_digit_totp_without_exposing_the_seed() {
+        assert_eq!(
+            generate_totp_at_counter(b"12345678901234567890", 1).as_deref(),
+            Some("287082")
+        );
+    }
+
+    #[test]
+    fn resolves_prompt_inputs_only_from_explicit_interactive_values() {
+        let binding = CompiledInputBinding {
+            path: "setup[0]".to_owned(),
+            environment_key: "MAESTRO_REACTOR_INPUT_SETUP_0_".to_owned(),
+            value: InputValue::PromptRef(reactor_protocol::PromptInputReference {
+                prompt_ref: "login.otp".to_owned(),
+            }),
+        };
+        assert!(matches!(
+            resolve_input_environment(std::slice::from_ref(&binding), None),
+            Err(RunnerError::InteractiveInputRequired { .. })
+        ));
+        let prompts =
+            BTreeMap::from([("login.otp".to_owned(), Zeroizing::new("123456".to_owned()))]);
+        let resolved = resolve_input_environment(&[binding], Some(&prompts)).unwrap();
+        assert_eq!(resolved[0].0, "MAESTRO_REACTOR_INPUT_SETUP_0_");
+        assert_eq!(resolved[0].1.as_str(), "123456");
+    }
+
+    #[test]
+    fn missing_variable_input_fails_without_falling_back_to_plaintext() {
+        let binding = CompiledInputBinding {
+            path: "setup[0]".to_owned(),
+            environment_key: "MAESTRO_REACTOR_INPUT_SETUP_0_".to_owned(),
+            value: InputValue::VariableRef(reactor_protocol::VariableInputReference {
+                variable_ref: "REACTOR_TEST_VARIABLE_THAT_DOES_NOT_EXIST".to_owned(),
+            }),
+        };
+        assert!(matches!(
+            resolve_input_environment(&[binding], None),
+            Err(RunnerError::MissingInputValue {
+                kind: "variableRef",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn parses_versioned_perfetto_metric_fixture() {
         let fixture = include_str!("../../../tests/fixtures/perfetto-frame-metrics.csv");
         let metrics = parse_frame_metrics_csv(fixture).unwrap();
@@ -3384,6 +3812,31 @@ mod tests {
         .unwrap_err();
         assert!(matches!(&error, RunnerError::CommandFailed { .. }));
         assert!(error.to_string().contains("meminfo"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_failures_redact_resolved_flow_inputs() {
+        let secret = Zeroizing::new("reactor-private-fixture".to_owned());
+        let inputs = vec![("MAESTRO_REACTOR_INPUT_SETUP_0_".to_owned(), secret)];
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "printf '%s' \"$MAESTRO_REACTOR_INPUT_SETUP_0_\" >&2; exit 1",
+            ])
+            .env("MAESTRO_REACTOR_INPUT_SETUP_0_", inputs[0].1.as_str());
+        let error = run_command_with_timeout_redacted(
+            command,
+            "redaction-fixture",
+            Duration::from_secs(2),
+            &inputs,
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("[REDACTED_INPUT]"));
+        assert!(!message.contains("reactor-private-fixture"));
     }
 
     #[test]

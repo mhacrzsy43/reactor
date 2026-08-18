@@ -56,6 +56,7 @@ pub struct SelectorCandidate {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct InspectorElement {
     pub key: String,
     pub depth: u32,
@@ -65,6 +66,10 @@ pub struct InspectorElement {
     pub bounds: Bounds,
     pub enabled: bool,
     pub clickable: bool,
+    pub editable: bool,
+    pub password: bool,
+    pub focused: bool,
+    pub class_name: Option<String>,
     pub candidates: Vec<SelectorCandidate>,
 }
 
@@ -77,6 +82,7 @@ pub enum InspectorError {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 struct RawElement {
     key: String,
     depth: u32,
@@ -86,6 +92,10 @@ struct RawElement {
     bounds: Bounds,
     enabled: bool,
     clickable: bool,
+    editable: bool,
+    password: bool,
+    focused: bool,
+    class_name: Option<String>,
 }
 
 /// Parses a platform accessibility hierarchy and attaches deterministic selector candidates.
@@ -113,7 +123,7 @@ pub fn hit_test(elements: &[InspectorElement], x: f64, y: f64) -> Option<&Inspec
     matching
         .iter()
         .copied()
-        .filter(|element| element.clickable && element.enabled)
+        .filter(|element| (element.clickable || element.editable) && element.enabled)
         .min_by(|left, right| left.bounds.area().total_cmp(&right.bounds.area()))
         .or_else(|| {
             matching
@@ -186,6 +196,13 @@ fn android_node(
         bounds,
         enabled: bool_attribute(&attributes, "enabled", true),
         clickable: bool_attribute(&attributes, "clickable", false),
+        editable: bool_attribute(&attributes, "editable", false)
+            || attributes
+                .get("class")
+                .is_some_and(|value| value.contains("EditText")),
+        password: bool_attribute(&attributes, "password", false),
+        focused: bool_attribute(&attributes, "focused", false),
+        class_name: non_empty(attributes.get("class")),
     }))
 }
 
@@ -220,6 +237,20 @@ fn parse_ios(hierarchy: &str) -> Result<Vec<RawElement>, InspectorError> {
             bounds,
             enabled: bool_attribute(&attributes, "enabled", true),
             clickable: true,
+            editable: bool_attribute(&attributes, "editable", false)
+                || attributes
+                    .get("class")
+                    .or_else(|| attributes.get("type"))
+                    .is_some_and(|value| {
+                        value.contains("TextField") || value.contains("SecureTextField")
+                    }),
+            password: bool_attribute(&attributes, "password", false)
+                || attributes
+                    .get("class")
+                    .or_else(|| attributes.get("type"))
+                    .is_some_and(|value| value.contains("SecureTextField")),
+            focused: bool_attribute(&attributes, "focused", false),
+            class_name: non_empty(attributes.get("class").or_else(|| attributes.get("type"))),
         });
     }
     Ok(output)
@@ -278,7 +309,7 @@ fn score_elements(raw: Vec<RawElement>) -> Vec<InspectorElement> {
             .flatten()
         {
             *text_counts.entry(text.clone()).or_default() += 1;
-            if element.clickable && element.enabled {
+            if (element.clickable || element.editable) && element.enabled {
                 *clickable_text_counts.entry(text.clone()).or_default() += 1;
             }
         }
@@ -300,6 +331,10 @@ fn score_elements(raw: Vec<RawElement>) -> Vec<InspectorElement> {
                 bounds: element.bounds,
                 enabled: element.enabled,
                 clickable: element.clickable,
+                editable: element.editable,
+                password: element.password,
+                focused: element.focused,
+                class_name: element.class_name,
                 candidates,
             }
         })
@@ -340,7 +375,8 @@ fn selector_candidates(
         .as_ref()
         .or(element.accessibility_text.as_ref())
     {
-        let unique_interactive = element.clickable && clickable_text_counts.get(text) == Some(&1);
+        let unique_interactive =
+            (element.clickable || element.editable) && clickable_text_counts.get(text) == Some(&1);
         let unique = unique_interactive || text_counts.get(text) == Some(&1);
         candidates.push(SelectorCandidate {
             strategy: "text".to_owned(),
@@ -440,5 +476,17 @@ mod tests {
         assert_eq!(hit.candidates[0].score, 82);
         assert_eq!(hit.candidates[0].stability, SelectorStability::Stable);
         assert!(hit.candidates[0].reason.contains("可交互"));
+    }
+
+    #[test]
+    fn android_edit_text_is_inspectable_even_when_not_clickable() {
+        let hierarchy = r#"<hierarchy><node text="" resource-id="com.demo:id/password" class="android.widget.EditText" password="true" focused="true" clickable="false" enabled="true" bounds="[20,40][300,100]" /></hierarchy>"#;
+        let elements = inspect_hierarchy(Platform::Android, hierarchy).unwrap();
+        let input = hit_test(&elements, 80.0, 70.0).unwrap();
+        assert!(input.editable);
+        assert!(input.password);
+        assert!(input.focused);
+        assert_eq!(input.class_name.as_deref(), Some("android.widget.EditText"));
+        assert_eq!(input.candidates[0].strategy, "id");
     }
 }

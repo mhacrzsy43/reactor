@@ -304,6 +304,14 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .element-state { justify-self: start; padding: 4px 7px; border-radius: 999px; color: var(--muted); background: var(--surface-soft); font-size: 8px; }
 .element-state.clickable { color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
 .inspector-execute-button { width: 100%; margin-top: 10px; }
+.input-step-editor { margin-top: 12px; padding: 12px; display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--green) 30%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--green) 4%, var(--surface-raised)); }
+.input-step-editor > label { display: grid; gap: 6px; }
+.input-step-editor > label > span { color: var(--muted); font-size: 8px; }
+.input-step-editor select, .input-step-editor input { width: 100%; }
+.input-step-editor > p { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.55; }
+.input-step-editor .input-clear-option { display: flex; align-items: center; gap: 8px; }
+.input-step-editor .input-clear-option input { width: auto; margin: 0; }
+.input-step-editor .input-clear-option span { color: var(--text); }
 .recorded-flow-panel { margin-bottom: 18px; padding: 13px; border: 1px solid color-mix(in srgb, var(--purple) 34%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--purple) 5%, var(--surface-raised)); }
 .recorded-flow-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .recorded-flow-heading .eyebrow { margin: 0 0 4px; font-size: 7px; }

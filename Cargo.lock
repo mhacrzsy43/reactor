@@ -3392,6 +3392,7 @@ dependencies = [
  "tauri-build",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -3424,17 +3425,22 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "data-encoding",
  "fs2",
+ "hmac",
+ "keyring",
  "reactor-core",
  "reactor-protocol",
  "reactor-store",
  "regex",
  "serde",
  "serde_json",
+ "sha1",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
  "walkdir",
+ "zeroize",
 ]
 
 [[package]]

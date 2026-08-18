@@ -8,6 +8,8 @@ const MAX_EXPANDED_STEPS: usize = 1_000;
 const MAX_REPEAT_COUNT: u32 = 100;
 const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_GESTURE_MS: u64 = 60_000;
+const MAX_INPUT_LITERAL_CHARS: usize = 4_096;
+const MAX_INPUT_REFERENCE_CHARS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,7 +45,10 @@ pub enum Step {
     },
     InputText {
         target: Selector,
-        text: String,
+        #[serde(alias = "text")]
+        value: InputValue,
+        #[serde(default = "default_true")]
+        clear_before: bool,
     },
     Swipe {
         direction: SwipeDirection,
@@ -63,6 +68,60 @@ pub enum Step {
         times: u32,
         steps: Vec<Self>,
     },
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// A Flow-owned input value. Plain strings remain valid for backwards compatibility and represent
+/// non-sensitive literals. All sensitive or runtime-dependent values are stored only as named
+/// references and resolved immediately before execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InputValue {
+    Literal(String),
+    VariableRef(VariableInputReference),
+    SecretRef(SecretInputReference),
+    PromptRef(PromptInputReference),
+    TotpRef(TotpInputReference),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VariableInputReference {
+    pub variable_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SecretInputReference {
+    pub secret_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptInputReference {
+    pub prompt_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TotpInputReference {
+    pub totp_ref: String,
+}
+
+impl InputValue {
+    #[must_use]
+    pub fn reference(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::Literal(_) => None,
+            Self::VariableRef(value) => Some(("variableRef", &value.variable_ref)),
+            Self::SecretRef(value) => Some(("secretRef", &value.secret_ref)),
+            Self::PromptRef(value) => Some(("promptRef", &value.prompt_ref)),
+            Self::TotpRef(value) => Some(("totpRef", &value.totp_ref)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,7 +260,12 @@ impl FlowLock {
     pub fn verify(&self) -> Result<(), FlowValidationError> {
         validate_flow(&self.flow)?;
         let actual = canonical_flow_hash(&self.flow)?;
-        if actual != self.flow_hash {
+        let legacy_matches = if actual == self.flow_hash {
+            false
+        } else {
+            legacy_flow_hash(&self.flow)?.as_deref() == Some(self.flow_hash.as_str())
+        };
+        if actual != self.flow_hash && !legacy_matches {
             return Err(FlowValidationError::LockHashMismatch);
         }
         if let Some(evidence) = &self.trial {
@@ -277,6 +341,14 @@ pub enum FlowValidationError {
     InvalidRepeat { path: String },
     #[error("{path}: duration exceeds the limit")]
     DurationTooLong { path: String },
+    #[error("{path}: input value must not be empty")]
+    EmptyInputValue { path: String },
+    #[error("{path}: {kind} must contain a non-empty reference name")]
+    EmptyInputReference { path: String, kind: &'static str },
+    #[error("{path}: input value exceeds its maximum length")]
+    InputValueTooLong { path: String },
+    #[error("{path}: sensitive input target cannot store a literal value in Flow")]
+    SensitiveInputLiteral { path: String },
     #[error("expanded Flow has more than {MAX_EXPANDED_STEPS} steps")]
     TooManySteps,
     #[error("Flow lock hash does not match its canonical Flow")]
@@ -507,9 +579,15 @@ fn validate_steps(
             Step::ResetAppState if measured => {
                 return Err(FlowValidationError::ResetInsideMeasuredWindow { path });
             }
-            Step::Tap { target } | Step::InputText { target, .. } => {
+            Step::Tap { target } => {
                 validate_selector(target, &path, report)?;
                 validate_safe_action_target(target, &path)?;
+            }
+            Step::InputText { target, value, .. } => {
+                validate_selector(target, &path, report)?;
+                validate_safe_action_target(target, &path)?;
+                validate_input_value(value, &path)?;
+                validate_sensitive_input_value(target, value, &path)?;
             }
             Step::AssertVisible { target } => validate_selector(target, &path, report)?,
             Step::WaitFor { target, timeout_ms } => {
@@ -545,6 +623,66 @@ fn validate_steps(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_sensitive_input_value(
+    target: &Selector,
+    value: &InputValue,
+    path: &str,
+) -> Result<(), FlowValidationError> {
+    if !matches!(value, InputValue::Literal(_)) {
+        return Ok(());
+    }
+    let identity = [
+        target.semantic_id.as_deref(),
+        target.accessibility_id.as_deref(),
+        target.text.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_lowercase();
+    if [
+        "password", "passwd", "passcode", "secret", "token", "密码", "口令",
+    ]
+    .iter()
+    .any(|keyword| identity.contains(keyword))
+    {
+        return Err(FlowValidationError::SensitiveInputLiteral {
+            path: path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_input_value(value: &InputValue, path: &str) -> Result<(), FlowValidationError> {
+    if let InputValue::Literal(value) = value {
+        if value.is_empty() {
+            return Err(FlowValidationError::EmptyInputValue {
+                path: path.to_owned(),
+            });
+        }
+        if value.chars().count() > MAX_INPUT_LITERAL_CHARS {
+            return Err(FlowValidationError::InputValueTooLong {
+                path: path.to_owned(),
+            });
+        }
+        return Ok(());
+    }
+    let (kind, reference) = value.reference().expect("reference variant checked above");
+    if reference.trim().is_empty() {
+        return Err(FlowValidationError::EmptyInputReference {
+            path: path.to_owned(),
+            kind,
+        });
+    }
+    if reference.chars().count() > MAX_INPUT_REFERENCE_CHARS {
+        return Err(FlowValidationError::InputValueTooLong {
+            path: path.to_owned(),
+        });
     }
     Ok(())
 }
@@ -623,6 +761,117 @@ pub fn canonical_flow_hash(flow: &Flow) -> Result<String, FlowValidationError> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyFlow<'a> {
+    schema_version: u32,
+    id: &'a str,
+    name: &'a str,
+    app_id: &'a str,
+    platform: Platform,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent: Option<&'a str>,
+    setup: Vec<LegacyStep<'a>>,
+    measured: Vec<LegacyStep<'a>>,
+    teardown: Vec<LegacyStep<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum LegacyStep<'a> {
+    ResetAppState,
+    LaunchApp,
+    Tap {
+        target: &'a Selector,
+    },
+    InputText {
+        target: &'a Selector,
+        text: &'a str,
+    },
+    Swipe {
+        direction: SwipeDirection,
+        duration_ms: u64,
+    },
+    WaitFor {
+        target: &'a Selector,
+        timeout_ms: u64,
+    },
+    AssertVisible {
+        target: &'a Selector,
+    },
+    Pause {
+        duration_ms: u64,
+    },
+    Repeat {
+        times: u32,
+        steps: Vec<LegacyStep<'a>>,
+    },
+}
+
+fn legacy_steps(steps: &[Step]) -> Option<Vec<LegacyStep<'_>>> {
+    steps
+        .iter()
+        .map(|step| {
+            Some(match step {
+                Step::ResetAppState => LegacyStep::ResetAppState,
+                Step::LaunchApp => LegacyStep::LaunchApp,
+                Step::Tap { target } => LegacyStep::Tap { target },
+                Step::InputText {
+                    target,
+                    value: InputValue::Literal(text),
+                    clear_before: true,
+                } => LegacyStep::InputText { target, text },
+                Step::InputText { .. } => return None,
+                Step::Swipe {
+                    direction,
+                    duration_ms,
+                } => LegacyStep::Swipe {
+                    direction: *direction,
+                    duration_ms: *duration_ms,
+                },
+                Step::WaitFor { target, timeout_ms } => LegacyStep::WaitFor {
+                    target,
+                    timeout_ms: *timeout_ms,
+                },
+                Step::AssertVisible { target } => LegacyStep::AssertVisible { target },
+                Step::Pause { duration_ms } => LegacyStep::Pause {
+                    duration_ms: *duration_ms,
+                },
+                Step::Repeat { times, steps } => LegacyStep::Repeat {
+                    times: *times,
+                    steps: legacy_steps(steps)?,
+                },
+            })
+        })
+        .collect()
+}
+
+fn legacy_flow_hash(flow: &Flow) -> Result<Option<String>, FlowValidationError> {
+    let Some(setup) = legacy_steps(&flow.setup) else {
+        return Ok(None);
+    };
+    let Some(measured) = legacy_steps(&flow.measured) else {
+        return Ok(None);
+    };
+    let Some(teardown) = legacy_steps(&flow.teardown) else {
+        return Ok(None);
+    };
+    let legacy = LegacyFlow {
+        schema_version: flow.schema_version,
+        id: &flow.id,
+        name: &flow.name,
+        app_id: &flow.app_id,
+        platform: flow.platform,
+        intent: flow.intent.as_deref(),
+        setup,
+        measured,
+        teardown,
+    };
+    Ok(Some(hex::encode(Sha256::digest(serde_json::to_vec(
+        &legacy,
+    )?))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +906,24 @@ mod tests {
             canonical_flow_hash(&flow).unwrap(),
             canonical_flow_hash(&flow).unwrap()
         );
+    }
+
+    #[test]
+    fn verifies_legacy_input_lock_after_text_field_migration() {
+        let legacy_json = r#"{"schemaVersion":1,"id":"legacy-input","name":"Legacy input","appId":"com.reactor.demo","platform":"android","setup":[],"measured":[{"action":"input_text","target":{"text":"Search"},"text":"hello"}],"teardown":[]}"#;
+        let flow: Flow = serde_json::from_str(legacy_json).unwrap();
+        let legacy_hash = hex::encode(Sha256::digest(legacy_json.as_bytes()));
+        assert_ne!(canonical_flow_hash(&flow).unwrap(), legacy_hash);
+        let lock = FlowLock {
+            schema_version: 1,
+            flow_hash: legacy_hash,
+            locked_at: Utc::now(),
+            compiler_version: "0.1.0".to_owned(),
+            generation: None,
+            trial: None,
+            flow,
+        };
+        assert!(lock.verify().is_ok());
     }
 
     #[test]
@@ -811,6 +1078,83 @@ mod tests {
         assert!(matches!(
             validate_flow(&flow),
             Err(FlowValidationError::SensitiveActionTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn input_values_keep_legacy_literals_and_serialize_references_without_secrets() {
+        let legacy: Step = serde_json::from_value(serde_json::json!({
+            "action": "input_text",
+            "target": { "text": "Search" },
+            "text": "visible test value"
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            Step::InputText {
+                value: InputValue::Literal(ref value),
+                ..
+            } if value == "visible test value"
+        ));
+
+        let referenced = Step::InputText {
+            target: Selector {
+                accessibility_id: Some("password".to_owned()),
+                ..Selector::default()
+            },
+            value: InputValue::SecretRef(SecretInputReference {
+                secret_ref: "test-account.password".to_owned(),
+            }),
+            clear_before: true,
+        };
+        let json = serde_json::to_string(&referenced).unwrap();
+        assert!(json.contains("\"value\":{\"secretRef\":\"test-account.password\"}"));
+        assert!(!json.contains("password-value"));
+    }
+
+    #[test]
+    fn rejects_empty_or_oversized_input_references() {
+        let mut flow = valid_flow();
+        flow.measured = vec![Step::InputText {
+            target: Selector {
+                accessibility_id: Some("username".to_owned()),
+                ..Selector::default()
+            },
+            value: InputValue::VariableRef(VariableInputReference {
+                variable_ref: "  ".to_owned(),
+            }),
+            clear_before: true,
+        }];
+        assert!(matches!(
+            validate_flow(&flow),
+            Err(FlowValidationError::EmptyInputReference { .. })
+        ));
+
+        if let Step::InputText { value, .. } = &mut flow.measured[0] {
+            *value = InputValue::SecretRef(SecretInputReference {
+                secret_ref: "x".repeat(MAX_INPUT_REFERENCE_CHARS + 1),
+            });
+        }
+        assert!(matches!(
+            validate_flow(&flow),
+            Err(FlowValidationError::InputValueTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_literal_password_values_in_flow() {
+        let mut flow = valid_flow();
+        flow.measured = vec![Step::InputText {
+            target: Selector {
+                accessibility_id: Some("login-password".to_owned()),
+                ..Selector::default()
+            },
+            value: InputValue::Literal("must-not-be-stored".to_owned()),
+            clear_before: true,
+        }];
+        assert!(matches!(
+            validate_flow(&flow),
+            Err(FlowValidationError::SensitiveInputLiteral { .. })
         ));
     }
 

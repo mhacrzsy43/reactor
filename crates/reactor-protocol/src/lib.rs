@@ -5,8 +5,10 @@ mod result;
 
 pub use flow::{
     Coordinate, Flow, FlowLock, FlowTrialEvidence, FlowValidationError, FlowValidationReport,
-    FlowWarning, GenerationProvenance, Platform, Selector, Step, SwipeDirection, TrialMode,
-    canonical_flow_hash, navigation_destination_marker, requires_navigation_intent, validate_flow,
+    FlowWarning, GenerationProvenance, InputValue, Platform, PromptInputReference,
+    SecretInputReference, Selector, Step, SwipeDirection, TotpInputReference, TrialMode,
+    VariableInputReference, canonical_flow_hash, navigation_destination_marker,
+    requires_navigation_intent, validate_flow,
 };
 pub use result::{
     AndroidNativeMetrics, DeviceMetadata, IosMetricAvailability, IosNativeMetrics,

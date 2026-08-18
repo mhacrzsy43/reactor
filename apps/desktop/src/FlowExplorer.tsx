@@ -1,7 +1,7 @@
 import { AlertTriangle, Check, Copy, Crosshair, ListPlus, MousePointer2, Pause, Play, RefreshCw, ScanSearch, ShieldCheck, Smartphone, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captureDeviceInspector, performExplorerStep } from "./api";
-import type { Device, DeviceInspectorSnapshot, FlowStep, InspectorElement, InspectorSelectorCandidate } from "./types";
+import { captureDeviceInspector, getFlowSecretStatus, performExplorerStep, saveFlowSecret } from "./api";
+import type { Device, DeviceInspectorSnapshot, FlowStep, InputValue, InspectorElement, InspectorSelectorCandidate } from "./types";
 
 interface FlowExplorerProps {
   devices: Device[];
@@ -44,6 +44,13 @@ export function FlowExplorer({
   const [pendingDanger, setPendingDanger] = useState<InspectorElement>();
   const [error, setError] = useState("");
   const [copiedStrategy, setCopiedStrategy] = useState("");
+  const [inputKind, setInputKind] = useState<"literal" | "variableRef" | "secretRef" | "promptRef" | "totpRef">("literal");
+  const [inputValue, setInputValue] = useState("");
+  const [inputReference, setInputReference] = useState("");
+  const [secretValue, setSecretValue] = useState("");
+  const [clearBeforeInput, setClearBeforeInput] = useState(true);
+  const [inputBusy, setInputBusy] = useState(false);
+  const [secretStored, setSecretStored] = useState(false);
   const captureInFlight = useRef(false);
   const interactionInFlight = useRef(false);
   const mirrorRef = useRef<HTMLDivElement>(null);
@@ -89,6 +96,15 @@ export function FlowExplorer({
 
   const selectedElement = snapshot?.elements.find((element) => element.key === selectedElementKey);
 
+  useEffect(() => {
+    if (!selectedElement?.editable) return;
+    setInputKind(selectedElement.password ? "secretRef" : "literal");
+    setInputValue("");
+    setInputReference(selectedElement.password ? "test-account.password" : "");
+    setSecretValue("");
+    setSecretStored(false);
+  }, [selectedElement?.key, selectedElement?.editable, selectedElement?.password]);
+
   function inspectPoint(event: React.MouseEvent<HTMLDivElement>) {
     if (!snapshot) return;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -99,6 +115,10 @@ export function FlowExplorer({
     setSelectedElementKey(hit?.key);
     setError("");
     if (mode === "record" && hit) {
+      if (hit.editable) {
+        setError("已选中输入框；请在右侧选择普通文本、变量、Secret、验证码或 TOTP 后执行。");
+        return;
+      }
       if (!hit.clickable) {
         setError("此位置只有结构元素，Reactor 不会自动执行脆弱坐标；请审查后显式选择坐标降级。");
         return;
@@ -142,7 +162,66 @@ export function FlowExplorer({
     await executeRecordedStep(step, direction === "up" ? "向上滚动" : "向下滚动");
   }
 
-  async function executeRecordedStep(step: FlowStep, label: string, executionPoint?: { x: number; y: number }) {
+  async function recordInput(element: InspectorElement) {
+    const candidate = element.candidates[0];
+    if (!candidate) {
+      setError("当前输入框没有可执行的 Selector。");
+      return;
+    }
+    setInputBusy(true);
+    setError("");
+    try {
+      let value: InputValue;
+      let runtimeInput: string | undefined;
+      if (inputKind === "literal") {
+        if (element.password) throw new Error("密码输入框不能把明文写入 Flow，请选择系统 Secret、变量或交互输入");
+        if (!inputValue) throw new Error("普通测试文本不能为空");
+        value = inputValue;
+      } else {
+        const reference = inputReference.trim();
+        if (!reference) throw new Error("引用名称不能为空");
+        if (inputKind === "variableRef") value = { variableRef: reference };
+        else if (inputKind === "promptRef") {
+          if (!inputValue) throw new Error("本次交互验证码不能为空");
+          value = { promptRef: reference };
+          runtimeInput = inputValue;
+        } else {
+          if (secretValue) {
+            await saveFlowSecret(reference, secretValue);
+            setSecretValue("");
+            setSecretStored(true);
+          } else {
+            const status = await getFlowSecretStatus(reference);
+            if (!status.stored) throw new Error("该引用尚未保存到系统凭据库");
+            setSecretStored(true);
+          }
+          value = inputKind === "secretRef" ? { secretRef: reference } : { totpRef: reference };
+        }
+      }
+      const step: FlowStep = {
+        action: "input_text",
+        target: candidate.selector,
+        value,
+        clearBefore: clearBeforeInput,
+      };
+      await executeRecordedStep(
+        step,
+        `输入 ${inputValueLabel(value)}`,
+        {
+          x: element.bounds.x + element.bounds.width / 2,
+          y: element.bounds.y + element.bounds.height / 2,
+        },
+        runtimeInput,
+      );
+      if (inputKind === "literal" || inputKind === "promptRef") setInputValue("");
+    } catch (reason) {
+      setError(`输入步骤未执行：${String(reason)}`);
+    } finally {
+      setInputBusy(false);
+    }
+  }
+
+  async function executeRecordedStep(step: FlowStep, label: string, executionPoint?: { x: number; y: number }, runtimeInput?: string) {
     if (!selectedDevice || !appId.trim() || activeJobRunning || interactionInFlight.current) return;
     interactionInFlight.current = true;
     setLive(false);
@@ -159,6 +238,7 @@ export function FlowExplorer({
         executionPoint,
         viewportWidth: snapshot?.viewportWidth,
         viewportHeight: snapshot?.viewportHeight,
+        runtimeInput,
       });
       setRecordedSteps((current) => [...current, step]);
       setSnapshot(next);
@@ -315,14 +395,25 @@ export function FlowExplorer({
             {selectedElement ? (
               <>
                 <div className="element-summary">
-                  <span className={`element-state ${selectedElement.clickable ? "clickable" : ""}`}>{selectedElement.clickable ? "可交互" : "结构元素"}</span>
+                  <span className={`element-state ${selectedElement.clickable || selectedElement.editable ? "clickable" : ""}`}>{selectedElement.editable ? selectedElement.password ? "密码输入" : "可输入" : selectedElement.clickable ? "可交互" : "结构元素"}</span>
                   <h3>{elementName(selectedElement)}</h3>
                   <code>{selectedElement.resourceId ?? selectedElement.key}</code>
                   <div><span>位置</span><b>{formatBounds(selectedElement)}</b></div>
                   <div><span>层级</span><b>Depth {selectedElement.depth}</b></div>
-                  <div><span>状态</span><b>{selectedElement.enabled ? "Enabled" : "Disabled"}</b></div>
+                  <div><span>状态</span><b>{selectedElement.enabled ? "Enabled" : "Disabled"}{selectedElement.focused ? " · Focused" : ""}</b></div>
+                  <div><span>类型</span><b>{selectedElement.className ?? "未知"}</b></div>
                 </div>
-                <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { setMode("record"); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>
+                {selectedElement.editable ? (
+                  <section className="input-step-editor">
+                    <label><span>输入值类型</span><select value={inputKind} onChange={(event) => { setInputKind(event.target.value as typeof inputKind); setSecretStored(false); }}><option value="literal">普通测试文本</option><option value="variableRef">环境变量引用</option><option value="secretRef">系统 Secret 引用</option><option value="promptRef">交互验证码</option><option value="totpRef">TOTP 引用</option></select></label>
+                    {inputKind !== "literal" && <label><span>引用名称（写入 Flow）</span><input value={inputReference} onChange={(event) => { setInputReference(event.target.value); setSecretStored(false); }} placeholder={inputKind === "variableRef" ? "TEST_USERNAME" : inputKind === "promptRef" ? "login.sms-code" : inputKind === "totpRef" ? "test-account.totp" : "test-account.password"} /></label>}
+                    {(inputKind === "literal" || inputKind === "promptRef") && <label><span>{inputKind === "literal" ? "测试文本" : "仅本次试跑值（不写入 Flow）"}</span><input value={inputValue} onChange={(event) => setInputValue(event.target.value)} type={selectedElement.password ? "password" : "text"} autoComplete="off" /></label>}
+                    {(inputKind === "secretRef" || inputKind === "totpRef") && <label><span>{inputKind === "totpRef" ? "Base32 密钥（仅保存到系统凭据库）" : "Secret（仅保存到系统凭据库）"}</span><input value={secretValue} onChange={(event) => { setSecretValue(event.target.value); setSecretStored(false); }} type="password" autoComplete="off" placeholder={secretStored ? "已保存；留空继续使用" : "输入后执行时保存"} /></label>}
+                    <label className="input-clear-option"><input type="checkbox" checked={clearBeforeInput} onChange={(event) => setClearBeforeInput(event.target.checked)} /><span>输入前清空原内容</span></label>
+                    <p>Flow 只保存引用名称；Secret、TOTP 密钥和交互验证码不会进入 JSON、YAML 预览或日志。</p>
+                    <button className="primary-button inspector-execute-button" disabled={inputBusy || interacting || activeJobRunning} onClick={() => { setMode("record"); void recordInput(selectedElement); }}><Play size={15} />{inputBusy ? "正在安全输入" : "在设备上输入并继续"}</button>
+                  </section>
+                ) : <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { setMode("record"); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>}
                 <div className="selector-candidates">
                   <div className="selector-list-heading"><b>候选 Selector</b><span>按稳定性排序</span></div>
                   {selectedElement.candidates.map((candidate) => (
@@ -346,13 +437,21 @@ export function FlowExplorer({
 
 function hitTest(elements: InspectorElement[], x: number, y: number): InspectorElement | undefined {
   const matching = elements.filter((element) => element.bounds.width > 0 && element.bounds.height > 0 && x >= element.bounds.x && y >= element.bounds.y && x <= element.bounds.x + element.bounds.width && y <= element.bounds.y + element.bounds.height);
-  const interactive = matching.filter((element) => element.clickable && element.enabled);
+  const interactive = matching.filter((element) => (element.clickable || element.editable) && element.enabled);
   return (interactive.length > 0 ? interactive : matching)
     .sort((left, right) => left.bounds.width * left.bounds.height - right.bounds.width * right.bounds.height)[0];
 }
 
 function elementName(element: InspectorElement): string {
   return element.text ?? element.accessibilityText ?? element.resourceId?.split("/").pop() ?? "未命名元素";
+}
+
+function inputValueLabel(value: InputValue): string {
+  if (typeof value === "string") return "普通测试文本";
+  if ("variableRef" in value) return `变量 ${value.variableRef}`;
+  if ("secretRef" in value) return `Secret ${value.secretRef}`;
+  if ("promptRef" in value) return `验证码 ${value.promptRef}`;
+  return `TOTP ${value.totpRef}`;
 }
 
 function isDangerousElement(element: InspectorElement): boolean {
@@ -375,7 +474,7 @@ function flowStepName(step: FlowStep): string {
 function flowStepDetail(step: FlowStep): string {
   if (step.action === "tap") return selectorLabel(step.target);
   if (step.action === "swipe") return `${step.direction.toUpperCase()} · ${step.duration_ms} ms`;
-  if (step.action === "input_text") return selectorLabel(step.target);
+  if (step.action === "input_text") return `${selectorLabel(step.target)} · ${inputValueLabel(step.value)}`;
   if (step.action === "pause") return `${step.duration_ms} ms`;
   return "";
 }

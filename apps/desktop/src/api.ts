@@ -151,9 +151,25 @@ export async function performExplorerStep(input: {
   executionPoint?: { x: number; y: number };
   viewportWidth?: number;
   viewportHeight?: number;
+  runtimeInput?: string;
 }): Promise<DeviceInspectorSnapshot> {
   if (!inTauri) throw new Error("设备交互录制请在 Reactor 桌面应用中使用");
   return invoke("perform_explorer_step", { input });
+}
+
+export async function saveFlowSecret(reference: string, value: string): Promise<{ reference: string; stored: boolean }> {
+  if (!inTauri) throw new Error("Flow Secret 仅保存在 Reactor 桌面应用的系统凭据库中");
+  return invoke("save_flow_secret_value", { input: { reference, value } });
+}
+
+export async function getFlowSecretStatus(reference: string): Promise<{ reference: string; stored: boolean }> {
+  if (!inTauri) return { reference, stored: false };
+  return invoke("get_flow_secret_status", { input: { reference } });
+}
+
+export async function deleteFlowSecret(reference: string): Promise<{ reference: string; stored: boolean }> {
+  if (!inTauri) throw new Error("Flow Secret 仅保存在 Reactor 桌面应用的系统凭据库中");
+  return invoke("delete_flow_secret_value", { input: { reference } });
 }
 
 export async function doctorCliProviders(input: {
@@ -178,6 +194,7 @@ export async function compileFlowPreview(flow: Flow): Promise<CompiledFlow> {
     setup: `# Maestro YAML preview is available in Reactor.app\n# Flow: ${flow.id}\n`,
     measured: `# ${flow.measured.length} measured steps\n`,
     teardown: `# ${flow.teardown.length} teardown steps\n`,
+    inputBindings: [],
   };
 }
 

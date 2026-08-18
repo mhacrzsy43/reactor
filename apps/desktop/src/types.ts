@@ -17,12 +17,19 @@ export type FlowStep =
   | { action: "reset_app_state" }
   | { action: "launch_app" }
   | { action: "tap"; target: Selector }
-  | { action: "input_text"; target: Selector; text: string }
+  | { action: "input_text"; target: Selector; value: InputValue; clearBefore: boolean }
   | { action: "swipe"; direction: "up" | "down" | "left" | "right"; duration_ms: number }
   | { action: "wait_for"; target: Selector; timeout_ms: number }
   | { action: "assert_visible"; target: Selector }
   | { action: "pause"; duration_ms: number }
   | { action: "repeat"; times: number; steps: FlowStep[] };
+
+export type InputValue =
+  | string
+  | { variableRef: string }
+  | { secretRef: string }
+  | { promptRef: string }
+  | { totpRef: string };
 
 export interface Flow {
   schemaVersion: number;
@@ -48,6 +55,7 @@ export interface CompiledFlow {
   setup: string;
   measured: string;
   teardown: string;
+  inputBindings: Array<{ path: string; environmentKey: string; value: InputValue }>;
 }
 
 export interface FlowLock {
@@ -167,6 +175,10 @@ export interface InspectorElement {
   bounds: InspectorBounds;
   enabled: boolean;
   clickable: boolean;
+  editable: boolean;
+  password: boolean;
+  focused: boolean;
+  className?: string;
   candidates: InspectorSelectorCandidate[];
 }
 

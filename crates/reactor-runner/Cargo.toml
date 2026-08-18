@@ -12,17 +12,30 @@ path = "src/main.rs"
 [dependencies]
 chrono.workspace = true
 clap.workspace = true
+data-encoding.workspace = true
 fs2.workspace = true
+hmac.workspace = true
 reactor-core = { path = "../reactor-core" }
 reactor-protocol = { path = "../reactor-protocol" }
 reactor-store = { path = "../reactor-store" }
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
 
 [lints]
 workspace = true

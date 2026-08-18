@@ -28,22 +28,23 @@ use reactor_analysis::{
 use reactor_core::{CompiledFlow, compile_maestro};
 use reactor_inspector::{InspectorElement, inspect_hierarchy};
 use reactor_protocol::{
-    Flow, FlowLock, FlowTrialEvidence, GenerationProvenance, Platform, Selector, Step,
+    Flow, FlowLock, FlowTrialEvidence, GenerationProvenance, InputValue, Platform, Selector, Step,
     canonical_flow_hash, navigation_destination_marker, requires_navigation_intent,
 };
 use reactor_runner::{
     AndroidRunRequest, DiscoveredDevice, DoctorReport, IosRunRequest, TrialFailureEvidence,
     capture_android_current_ui_tree, capture_android_screenshot, capture_android_trial_failure,
     capture_android_ui_tree, capture_ios_current_ui_tree, capture_ios_screenshot,
-    capture_ios_trial_failure, capture_ios_ui_tree, discover_android_devices,
-    discover_ios_simulators, doctor, enqueue_android, enqueue_demo, enqueue_ios,
-    execute_android_job, execute_demo_job, execute_explorer_step, execute_ios_job,
-    recover_orphaned_jobs, trial_android, trial_ios_simulator,
+    capture_ios_trial_failure, capture_ios_ui_tree, delete_all_flow_secrets, delete_flow_secret,
+    discover_android_devices, discover_ios_simulators, doctor, enqueue_android, enqueue_demo,
+    enqueue_ios, execute_android_job, execute_demo_job, execute_explorer_step, execute_ios_job,
+    has_flow_secret, recover_orphaned_jobs, save_flow_secret, trial_android, trial_ios_simulator,
 };
 use reactor_store::{Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
 use serde::{Deserialize, Serialize};
 use tauri::Manager as _;
+use zeroize::Zeroizing;
 
 // Tauri embeds the current production frontend into release and direct Cargo builds.
 
@@ -94,6 +95,23 @@ struct PerformExplorerStepInput {
     viewport_width: Option<f64>,
     #[serde(default)]
     viewport_height: Option<f64>,
+    #[serde(default)]
+    runtime_input: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowSecretInput {
+    reference: String,
+    #[serde(default)]
+    value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowSecretStatus {
+    reference: String,
+    stored: bool,
 }
 
 const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
@@ -572,6 +590,7 @@ fn erase_all_local_data(root: &Path) -> Result<PrivacyEraseResult, String> {
     SystemCredentialStore
         .delete("openai-compatible")
         .map_err(|error| error.to_string())?;
+    delete_all_flow_secrets().map_err(|error| error.to_string())?;
     let targets = [
         root.join("results"),
         root.join(".reactor/runtime"),
@@ -867,6 +886,22 @@ async fn perform_explorer_step(
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
+    let mut prompt_values = std::collections::BTreeMap::new();
+    if let Step::InputText {
+        value: InputValue::PromptRef(reference),
+        ..
+    } = &input.step
+    {
+        let value = input
+            .runtime_input
+            .ok_or_else(|| format!("promptRef {} 需要本次交互输入值", reference.prompt_ref))?;
+        if value.is_empty() {
+            return Err("交互输入值不能为空".to_owned());
+        }
+        prompt_values.insert(reference.prompt_ref.clone(), Zeroizing::new(value));
+    } else if input.runtime_input.is_some() {
+        return Err("runtimeInput 只允许用于 promptRef，避免绕过 Flow 引用策略".to_owned());
+    }
     execute_explorer_step(
         &root,
         input.platform,
@@ -875,6 +910,7 @@ async fn perform_explorer_step(
         input.step,
         input.execution_point,
         input.viewport_width.zip(input.viewport_height),
+        (!prompt_values.is_empty()).then_some(prompt_values),
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -1050,6 +1086,37 @@ async fn doctor_local_model(input: LocalModelDoctorInput) -> LocalModelStatus {
 #[allow(clippy::needless_pass_by_value)]
 fn compile_flow_preview(flow: Flow) -> Result<CompiledFlow, String> {
     compile_maestro(&flow).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_flow_secret_value(input: FlowSecretInput) -> Result<FlowSecretStatus, String> {
+    let value = input
+        .value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Secret 值不能为空".to_owned())?;
+    save_flow_secret(&input.reference, &value).map_err(|error| error.to_string())?;
+    Ok(FlowSecretStatus {
+        reference: input.reference,
+        stored: true,
+    })
+}
+
+#[tauri::command]
+fn get_flow_secret_status(input: FlowSecretInput) -> Result<FlowSecretStatus, String> {
+    let stored = has_flow_secret(&input.reference).map_err(|error| error.to_string())?;
+    Ok(FlowSecretStatus {
+        reference: input.reference,
+        stored,
+    })
+}
+
+#[tauri::command]
+fn delete_flow_secret_value(input: FlowSecretInput) -> Result<FlowSecretStatus, String> {
+    delete_flow_secret(&input.reference).map_err(|error| error.to_string())?;
+    Ok(FlowSecretStatus {
+        reference: input.reference,
+        stored: false,
+    })
 }
 
 fn resolve_api_key(
@@ -1939,6 +2006,9 @@ pub fn run() {
             doctor_cli_providers,
             doctor_local_model,
             compile_flow_preview,
+            save_flow_secret_value,
+            get_flow_secret_status,
+            delete_flow_secret_value,
             trial_generated_flow,
             repair_flow,
             confirm_flow,

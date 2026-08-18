@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use reactor_protocol::{Flow, Selector, Step, SwipeDirection, validate_flow};
+use reactor_protocol::{Flow, InputValue, Selector, Step, SwipeDirection, validate_flow};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -10,6 +10,15 @@ pub struct CompiledFlow {
     pub setup: String,
     pub measured: String,
     pub teardown: String,
+    pub input_bindings: Vec<CompiledInputBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompiledInputBinding {
+    pub path: String,
+    pub environment_key: String,
+    pub value: InputValue,
 }
 
 #[derive(Debug, Error)]
@@ -27,17 +36,28 @@ pub enum CompileError {
 /// Returns an error when the Flow is invalid or uses a selector Maestro cannot represent safely.
 pub fn compile_maestro(flow: &Flow) -> Result<CompiledFlow, CompileError> {
     validate_flow(flow)?;
+    let (setup, mut input_bindings) = compile_section(&flow.app_id, &flow.setup, "setup")?;
+    let (measured, measured_bindings) = compile_section(&flow.app_id, &flow.measured, "measured")?;
+    let (teardown, teardown_bindings) = compile_section(&flow.app_id, &flow.teardown, "teardown")?;
+    input_bindings.extend(measured_bindings);
+    input_bindings.extend(teardown_bindings);
     Ok(CompiledFlow {
-        setup: compile_section(&flow.app_id, &flow.setup, "setup")?,
-        measured: compile_section(&flow.app_id, &flow.measured, "measured")?,
-        teardown: compile_section(&flow.app_id, &flow.teardown, "teardown")?,
+        setup,
+        measured,
+        teardown,
+        input_bindings,
     })
 }
 
-fn compile_section(app_id: &str, steps: &[Step], prefix: &str) -> Result<String, CompileError> {
+fn compile_section(
+    app_id: &str,
+    steps: &[Step],
+    prefix: &str,
+) -> Result<(String, Vec<CompiledInputBinding>), CompileError> {
     let mut output = format!("appId: {}\n---\n", quote(app_id));
-    compile_steps(steps, prefix, 0, &mut output)?;
-    Ok(output)
+    let mut input_bindings = Vec::new();
+    compile_steps(steps, prefix, 0, &mut output, &mut input_bindings)?;
+    Ok((output, input_bindings))
 }
 
 fn compile_steps(
@@ -45,6 +65,7 @@ fn compile_steps(
     prefix: &str,
     indent: usize,
     output: &mut String,
+    input_bindings: &mut Vec<CompiledInputBinding>,
 ) -> Result<(), CompileError> {
     let pad = " ".repeat(indent);
     for (index, step) in steps.iter().enumerate() {
@@ -55,9 +76,27 @@ fn compile_steps(
             Step::Tap { target } => {
                 writeln!(output, "{pad}- tapOn: {}", selector(target, &path)?).unwrap();
             }
-            Step::InputText { target, text } => {
+            Step::InputText {
+                target,
+                value,
+                clear_before,
+            } => {
                 writeln!(output, "{pad}- tapOn: {}", selector(target, &path)?).unwrap();
-                writeln!(output, "{pad}- inputText: {}", quote(text)).unwrap();
+                if *clear_before {
+                    writeln!(output, "{pad}- eraseText").unwrap();
+                }
+                let input = if let InputValue::Literal(value) = value {
+                    value.clone()
+                } else {
+                    let environment_key = input_environment_key(&path);
+                    input_bindings.push(CompiledInputBinding {
+                        path: path.clone(),
+                        environment_key: environment_key.clone(),
+                        value: value.clone(),
+                    });
+                    format!("${{{environment_key}}}")
+                };
+                writeln!(output, "{pad}- inputText: {}", quote(&input)).unwrap();
             }
             Step::Swipe {
                 direction,
@@ -95,11 +134,31 @@ fn compile_steps(
                     "{pad}- repeat:\n{pad}    times: {times}\n{pad}    commands:\n"
                 )
                 .unwrap();
-                compile_steps(steps, &format!("{path}.steps"), indent + 6, output)?;
+                compile_steps(
+                    steps,
+                    &format!("{path}.steps"),
+                    indent + 6,
+                    output,
+                    input_bindings,
+                )?;
             }
         }
     }
     Ok(())
+}
+
+fn input_environment_key(path: &str) -> String {
+    let path = path
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("MAESTRO_REACTOR_INPUT_{path}")
 }
 
 fn selector(selector: &Selector, path: &str) -> Result<String, CompileError> {
@@ -130,7 +189,7 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use reactor_protocol::{Platform, Selector};
+    use reactor_protocol::{InputValue, Platform, SecretInputReference, Selector};
 
     use super::*;
 
@@ -180,5 +239,41 @@ mod tests {
         };
         let output = compile_maestro(&flow).unwrap();
         assert!(output.measured.contains("tapOn: { point: \"720,522\" }"));
+    }
+
+    #[test]
+    fn referenced_input_compiles_to_environment_placeholder_without_plaintext() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "login".to_owned(),
+            name: "Login".to_owned(),
+            app_id: "com.reactor.demo".to_owned(),
+            platform: Platform::Android,
+            intent: None,
+            setup: vec![Step::InputText {
+                target: Selector {
+                    accessibility_id: Some("password".to_owned()),
+                    ..Selector::default()
+                },
+                value: InputValue::SecretRef(SecretInputReference {
+                    secret_ref: "test-account.password".to_owned(),
+                }),
+                clear_before: true,
+            }],
+            measured: vec![Step::LaunchApp],
+            teardown: vec![],
+        };
+        let output = compile_maestro(&flow).unwrap();
+        assert!(
+            output
+                .setup
+                .contains("inputText: \"${MAESTRO_REACTOR_INPUT_SETUP_0_}\"")
+        );
+        assert!(!output.setup.contains("test-account.password"));
+        assert_eq!(output.input_bindings.len(), 1);
+        assert_eq!(
+            output.input_bindings[0].environment_key,
+            "MAESTRO_REACTOR_INPUT_SETUP_0_"
+        );
     }
 }
