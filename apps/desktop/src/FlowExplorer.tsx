@@ -1,7 +1,7 @@
-import { AlertTriangle, Check, Copy, Crosshair, ListPlus, MousePointer2, Pause, Play, RefreshCw, ScanSearch, ShieldCheck, Smartphone, Undo2 } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Braces, Check, Code2, Copy, Crosshair, ListPlus, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captureDeviceInspector, getFlowSecretStatus, performExplorerStep, saveFlowSecret } from "./api";
-import type { Device, DeviceInspectorSnapshot, FlowStep, InputValue, InspectorElement, InspectorSelectorCandidate } from "./types";
+import { captureDeviceInspector, compileFlowPreview, getFlowSecretStatus, performExplorerStep, replayRecordedFlow, saveFlowSecret } from "./api";
+import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowStep, InputValue, InspectorElement, InspectorSelectorCandidate } from "./types";
 
 interface FlowExplorerProps {
   devices: Device[];
@@ -41,6 +41,16 @@ export function FlowExplorer({
   const [live, setLive] = useState(false);
   const [mode, setMode] = useState<"inspect" | "record">("inspect");
   const [recordedSteps, setRecordedSteps] = useState<FlowStep[]>([]);
+  const [measurementStart, setMeasurementStart] = useState<number>();
+  const [teardownStart, setTeardownStart] = useState(0);
+  const [flowView, setFlowView] = useState<"steps" | "json" | "yaml">("steps");
+  const [jsonDraft, setJsonDraft] = useState("");
+  const [jsonDirty, setJsonDirty] = useState(false);
+  const [compiledFlow, setCompiledFlow] = useState<CompiledFlow>();
+  const [editorError, setEditorError] = useState("");
+  const [editorUndo, setEditorUndo] = useState<{ steps: FlowStep[]; measurementStart?: number; teardownStart: number }>();
+  const [replaying, setReplaying] = useState(false);
+  const [promptValues, setPromptValues] = useState<Record<string, string>>({});
   const [pendingDanger, setPendingDanger] = useState<InspectorElement>();
   const [error, setError] = useState("");
   const [copiedStrategy, setCopiedStrategy] = useState("");
@@ -55,6 +65,48 @@ export function FlowExplorer({
   const interactionInFlight = useRef(false);
   const mirrorRef = useRef<HTMLDivElement>(null);
   const lastWheelGestureAt = useRef(0);
+  const teardownStartRef = useRef(0);
+
+  useEffect(() => {
+    teardownStartRef.current = teardownStart;
+  }, [teardownStart]);
+
+  const explorerFlow = useMemo<Flow>(() => {
+    const setupEnd = measurementStart ?? teardownStart;
+    return {
+      schemaVersion: 1,
+      id: "interactive-recording",
+      name: "Interactive recording",
+      appId: appId.trim(),
+      platform: selectedDevice?.platform === "ios" ? "ios" : "android",
+      setup: recordedSteps.slice(0, setupEnd),
+      measured: measurementStart === undefined ? [] : recordedSteps.slice(measurementStart, teardownStart),
+      teardown: recordedSteps.slice(teardownStart),
+    };
+  }, [appId, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
+
+  const promptReferences = useMemo(() => collectPromptReferences(explorerFlow), [explorerFlow]);
+
+  useEffect(() => {
+    if (!jsonDirty) setJsonDraft(JSON.stringify(explorerFlow, null, 2));
+    if (explorerFlow.measured.length === 0 || !explorerFlow.appId) {
+      setCompiledFlow(undefined);
+      return;
+    }
+    let cancelled = false;
+    void compileFlowPreview(explorerFlow).then((compiled) => {
+      if (!cancelled) {
+        setCompiledFlow(compiled);
+        setEditorError("");
+      }
+    }).catch((reason) => {
+      if (!cancelled) {
+        setCompiledFlow(undefined);
+        setEditorError(`Flow 校验失败：${String(reason)}`);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [explorerFlow, jsonDirty]);
 
   const capture = useCallback(async () => {
     if (!selectedDevice || activeJobRunning || captureInFlight.current) return;
@@ -157,6 +209,18 @@ export function FlowExplorer({
     });
   }
 
+  function beginRecording() {
+    setMode("record");
+    setLive(false);
+    if (recordedSteps.length === 0) {
+      const initial: FlowStep = { action: "launch_app" };
+      setRecordedSteps([initial]);
+      teardownStartRef.current = 1;
+      setTeardownStart(1);
+      setJsonDirty(false);
+    }
+  }
+
   async function recordSwipe(direction: "up" | "down") {
     const step: FlowStep = { action: "swipe", direction, duration_ms: 500 };
     await executeRecordedStep(step, direction === "up" ? "向上滚动" : "向下滚动");
@@ -240,7 +304,13 @@ export function FlowExplorer({
         viewportHeight: snapshot?.viewportHeight,
         runtimeInput,
       });
-      setRecordedSteps((current) => [...current, step]);
+      setRecordedSteps((current) => {
+        const insertAt = Math.min(teardownStartRef.current, current.length);
+        const next = [...current.slice(0, insertAt), step, ...current.slice(insertAt)];
+        teardownStartRef.current = insertAt + 1;
+        setTeardownStart(insertAt + 1);
+        return next;
+      });
       setSnapshot(next);
       setSelectedElementKey(undefined);
       setPoint(undefined);
@@ -253,6 +323,128 @@ export function FlowExplorer({
       setInteracting(false);
       setInteractingLabel("");
       interactionInFlight.current = false;
+    }
+  }
+
+  function rememberEditorState() {
+    setEditorUndo({ steps: recordedSteps, measurementStart, teardownStart });
+  }
+
+  function removeRecordedStep(index: number) {
+    rememberEditorState();
+    setRecordedSteps((steps) => steps.filter((_, stepIndex) => stepIndex !== index));
+    if (measurementStart !== undefined && index < measurementStart) {
+      setMeasurementStart(Math.max(0, measurementStart - 1));
+    }
+    if (index < teardownStart) setTeardownStart(Math.max(0, teardownStart - 1));
+  }
+
+  function moveRecordedStep(index: number, direction: -1 | 1) {
+    const destination = index + direction;
+    if (destination < 0 || destination >= recordedSteps.length) return;
+    const section = stepSection(index, measurementStart, teardownStart);
+    if (stepSection(destination, measurementStart, teardownStart) !== section) {
+      setEditorError("跨 setup / measured / teardown 移动请使用 JSON 编辑，避免意外改变测量边界。");
+      return;
+    }
+    rememberEditorState();
+    setRecordedSteps((steps) => {
+      const next = [...steps];
+      [next[index], next[destination]] = [next[destination], next[index]];
+      return next;
+    });
+  }
+
+  function undoEditorChange() {
+    if (!editorUndo) return;
+    setRecordedSteps(editorUndo.steps);
+    setMeasurementStart(editorUndo.measurementStart);
+    setTeardownStart(editorUndo.teardownStart);
+    setEditorUndo(undefined);
+    setJsonDirty(false);
+    setEditorError("");
+  }
+
+  async function applyJsonDraft() {
+    try {
+      const parsed = JSON.parse(jsonDraft) as Flow;
+      if (parsed.appId !== appId.trim()) throw new Error("JSON appId 必须与当前目标 App 一致");
+      if (parsed.platform !== explorerFlow.platform) throw new Error("JSON platform 必须与当前设备平台一致");
+      const compiled = await compileFlowPreview(parsed);
+      rememberEditorState();
+      setRecordedSteps([...parsed.setup, ...parsed.measured, ...parsed.teardown]);
+      setMeasurementStart(parsed.setup.length);
+      setTeardownStart(parsed.setup.length + parsed.measured.length);
+      setCompiledFlow(compiled);
+      setJsonDirty(false);
+      setEditorError("");
+    } catch (reason) {
+      setEditorError(`无法应用 JSON：${cleanError(reason)}`);
+    }
+  }
+
+  async function replayWholeFlow() {
+    if (!selectedDevice || !compiledFlow) return;
+    const missingPrompt = promptReferences.find((reference) => !promptValues[reference]);
+    if (missingPrompt) {
+      setEditorError(`整体回放前请输入本次验证码：${missingPrompt}`);
+      return;
+    }
+    setReplaying(true);
+    setLive(false);
+    setEditorError("");
+    try {
+      const next = await replayRecordedFlow({
+        platform: explorerFlow.platform,
+        deviceId: selectedDevice.id,
+        flow: explorerFlow,
+        promptValues,
+      });
+      setSnapshot(next);
+      setPromptValues({});
+      setSelectedElementKey(undefined);
+    } catch (reason) {
+      setEditorError(`整体回放失败：${cleanError(reason)}`);
+    } finally {
+      setReplaying(false);
+    }
+  }
+
+  async function replayOneStep(step: FlowStep) {
+    if (!selectedDevice || activeJobRunning || replaying) return;
+    const promptReference = step.action === "input_text" && typeof step.value !== "string" && "promptRef" in step.value ? step.value.promptRef : undefined;
+    const runtimeInput = promptReference ? promptValues[promptReference] : undefined;
+    if (promptReference && !runtimeInput) {
+      setEditorError(`逐步回放前请输入本次验证码：${promptReference}`);
+      return;
+    }
+    setReplaying(true);
+    setEditorError("");
+    try {
+      const next = await performExplorerStep({
+        platform: explorerFlow.platform,
+        deviceId: selectedDevice.id,
+        appId: appId.trim(),
+        step,
+        runtimeInput,
+      });
+      setSnapshot(next);
+      if (promptReference) setPromptValues((values) => ({ ...values, [promptReference]: "" }));
+    } catch (reason) {
+      setEditorError(`逐步回放失败：${cleanError(reason)}`);
+    } finally {
+      setReplaying(false);
+    }
+  }
+
+  async function copyFlowSource() {
+    const source = flowView === "yaml" && compiledFlow ? maestroPreview(compiledFlow) : flowView === "json" ? jsonDraft : JSON.stringify(recordedSteps, null, 2);
+    try {
+      await navigator.clipboard.writeText(source);
+      setCopiedStrategy("flow-source");
+      window.setTimeout(() => setCopiedStrategy(""), 1_500);
+    } catch (reason) {
+      setEditorError(`复制失败：${cleanError(reason)}`);
     }
   }
 
@@ -328,11 +520,11 @@ export function FlowExplorer({
       <section className="recording-console card">
         <div className="recording-mode" role="group" aria-label="Flow Explorer 模式">
           <button className={mode === "inspect" ? "active" : ""} onClick={() => { setMode("inspect"); setPendingDanger(undefined); }}>审查模式<span>只看 Selector</span></button>
-          <button className={mode === "record" ? "active" : ""} onClick={() => { setMode("record"); setLive(false); }}>录制/交互模式<span>点击后进入下一页</span></button>
+          <button className={mode === "record" ? "active" : ""} onClick={beginRecording}>录制/交互模式<span>从启动 App 开始录制</span></button>
         </div>
         <label className="recording-app-id"><span>当前 App 包名 / Bundle ID</span><input value={appId} onChange={(event) => onAppIdChange(event.target.value)} placeholder="com.example.app" /></label>
         <div className="recording-progress"><ListPlus size={17} /><div><b>{recordedSteps.length} 个已录制步骤</b><span>{mode === "record" ? "点击画面后 Reactor 使用最佳语义 Selector 真实执行，并等待下一页面稳定。" : "切换到录制/交互模式后才会操作设备。"}</span></div></div>
-        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => setRecordedSteps((steps) => steps.slice(0, -1))}><Undo2 size={15} />移除记录最后一步</button>
+        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => removeRecordedStep(recordedSteps.length - 1)}><Undo2 size={15} />移除记录最后一步</button>
       </section>
 
       {pendingDanger && <div className="explorer-guard danger"><AlertTriangle size={18} /><div><b>检测到潜在敏感操作：{elementName(pendingDanger)}</b><span>当前安全阶段不会执行或写入步骤；敏感操作确认凭证接通后才会开放“确认并继续”。</span></div><button className="secondary-button" onClick={() => setPendingDanger(undefined)}>取消</button></div>}
@@ -376,19 +568,30 @@ export function FlowExplorer({
                   <div><p className="eyebrow">RECORDED FLOW</p><h3>从本次录制开始的 Step Flow</h3></div>
                   <span>{recordedSteps.length} steps</span>
                 </div>
-                {recordedSteps.length > 0 ? (
+                <div className="flow-editor-tabs" role="tablist">
+                  <button className={flowView === "steps" ? "active" : ""} onClick={() => setFlowView("steps")}><ListPlus size={13} />步骤</button>
+                  <button className={flowView === "json" ? "active" : ""} onClick={() => setFlowView("json")}><Braces size={13} />完整 Flow JSON</button>
+                  <button className={flowView === "yaml" ? "active" : ""} onClick={() => setFlowView("yaml")}><Code2 size={13} />Maestro YAML</button>
+                </div>
+                <label className="measurement-boundary"><span>测量窗口</span><select value={measurementStart ?? ""} onChange={(event) => { rememberEditorState(); setMeasurementStart(event.target.value === "" ? undefined : Number(event.target.value)); setJsonDirty(false); }}><option value="">尚未指定（全部属于 setup）</option>{recordedSteps.map((_, index) => <option value={index} key={index}>从步骤 {index + 1} 开始 measured</option>)}</select></label>
+                {flowView === "steps" && (recordedSteps.length > 0 ? (
                   <ol className="recorded-flow-list">
                     {recordedSteps.map((step, index) => (
                       <li key={`${step.action}-${index}`}>
                         <span>{index + 1}</span>
-                        <div><b>{flowStepName(step)}</b><code>{flowStepDetail(step)}</code></div>
-                        {index === recordedSteps.length - 1 && <small>最新</small>}
+                        <div><b>{flowStepName(step)} <small>{stepSection(index, measurementStart, teardownStart)}</small></b><code>{flowStepDetail(step)}</code></div>
+                        <div className="recorded-step-actions"><button title="逐步回放" disabled={replaying} onClick={() => void replayOneStep(step)}><Play size={12} /></button><button title="上移" onClick={() => moveRecordedStep(index, -1)}><ArrowUp size={12} /></button><button title="下移" onClick={() => moveRecordedStep(index, 1)}><ArrowDown size={12} /></button><button title="删除" onClick={() => removeRecordedStep(index)}><Trash2 size={12} /></button></div>
                       </li>
                     ))}
                   </ol>
                 ) : (
                   <div className="recorded-flow-empty"><ListPlus size={20} /><span>尚无步骤。点击、返回或滑动设备镜像后，会按执行顺序持续追加在这里。</span></div>
-                )}
+                ))}
+                {flowView === "json" && <div className="flow-source-editor"><textarea value={jsonDraft} spellCheck={false} onChange={(event) => { setJsonDraft(event.target.value); setJsonDirty(true); }} /><div><button className="secondary-button" disabled={!jsonDirty} onClick={() => { setJsonDraft(JSON.stringify(explorerFlow, null, 2)); setJsonDirty(false); setEditorError(""); }}><RotateCcw size={13} />放弃编辑</button><button className="primary-button" disabled={!jsonDirty} onClick={() => void applyJsonDraft()}><Check size={13} />校验并应用</button></div></div>}
+                {flowView === "yaml" && <pre className="flow-yaml-preview">{compiledFlow ? maestroPreview(compiledFlow) : "请先指定至少一个 measured 步骤；Rust 校验通过后才会生成实际 Maestro YAML。"}</pre>}
+                {promptReferences.length > 0 && <div className="replay-prompts"><b>本次回放输入（不写入 Flow）</b>{promptReferences.map((reference) => <label key={reference}><span>{reference}</span><input type="password" autoComplete="off" value={promptValues[reference] ?? ""} onChange={(event) => setPromptValues((values) => ({ ...values, [reference]: event.target.value }))} /></label>)}</div>}
+                {editorError && <div className="flow-editor-error">{editorError}</div>}
+                <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={!compiledFlow || replaying || activeJobRunning} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? "整体回放中" : "整体回放"}</button></div>
               </section>
             )}
             <div className="current-selector-heading"><b>当前 Selector</b><span>{selectedElement ? "待审查 / 待执行" : "尚未选择控件"}</span></div>
@@ -411,9 +614,9 @@ export function FlowExplorer({
                     {(inputKind === "secretRef" || inputKind === "totpRef") && <label><span>{inputKind === "totpRef" ? "Base32 密钥（仅保存到系统凭据库）" : "Secret（仅保存到系统凭据库）"}</span><input value={secretValue} onChange={(event) => { setSecretValue(event.target.value); setSecretStored(false); }} type="password" autoComplete="off" placeholder={secretStored ? "已保存；留空继续使用" : "输入后执行时保存"} /></label>}
                     <label className="input-clear-option"><input type="checkbox" checked={clearBeforeInput} onChange={(event) => setClearBeforeInput(event.target.checked)} /><span>输入前清空原内容</span></label>
                     <p>Flow 只保存引用名称；Secret、TOTP 密钥和交互验证码不会进入 JSON、YAML 预览或日志。</p>
-                    <button className="primary-button inspector-execute-button" disabled={inputBusy || interacting || activeJobRunning} onClick={() => { setMode("record"); void recordInput(selectedElement); }}><Play size={15} />{inputBusy ? "正在安全输入" : "在设备上输入并继续"}</button>
+                    <button className="primary-button inspector-execute-button" disabled={inputBusy || interacting || activeJobRunning} onClick={() => { beginRecording(); void recordInput(selectedElement); }}><Play size={15} />{inputBusy ? "正在安全输入" : "在设备上输入并继续"}</button>
                   </section>
-                ) : <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { setMode("record"); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>}
+                ) : <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { beginRecording(); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>}
                 <div className="selector-candidates">
                   <div className="selector-list-heading"><b>候选 Selector</b><span>按稳定性排序</span></div>
                   {selectedElement.candidates.map((candidate) => (
@@ -477,6 +680,34 @@ function flowStepDetail(step: FlowStep): string {
   if (step.action === "input_text") return `${selectorLabel(step.target)} · ${inputValueLabel(step.value)}`;
   if (step.action === "pause") return `${step.duration_ms} ms`;
   return "";
+}
+
+function stepSection(index: number, measurementStart: number | undefined, teardownStart: number): "setup" | "measured" | "teardown" {
+  if (index >= teardownStart) return "teardown";
+  if (measurementStart !== undefined && index >= measurementStart) return "measured";
+  return "setup";
+}
+
+function collectPromptReferences(flow: Flow): string[] {
+  const references = new Set<string>();
+  const visit = (steps: FlowStep[]) => {
+    for (const step of steps) {
+      if (step.action === "input_text" && typeof step.value !== "string" && "promptRef" in step.value) references.add(step.value.promptRef);
+      if (step.action === "repeat") visit(step.steps);
+    }
+  };
+  visit(flow.setup);
+  visit(flow.measured);
+  visit(flow.teardown);
+  return [...references].sort();
+}
+
+function maestroPreview(compiled: CompiledFlow): string {
+  return ["# setup.yaml", compiled.setup.trimEnd(), "", "# measured.yaml", compiled.measured.trimEnd(), "", "# teardown.yaml", compiled.teardown.trimEnd()].join("\n");
+}
+
+function cleanError(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason).replace(/^Error:\s*/, "");
 }
 
 function formatBounds(element: InspectorElement): string {

@@ -18,7 +18,7 @@
 | M7 | ✅ 完成 | 历史中心、平台分组、任务详情、事件分页、虚拟列表、2Hz 轮询、10 万事件门禁和 Flow 草稿恢复均已完成；正式任务运行中关闭 UI 后 Worker 继续，重开自动恢复同一任务、进度、事件与最终结果的桌面门禁已通过 |
 | M8 | ✅ 完成 | 结果分析、确定性回归、RN 组件诊断、Profile Diff、CI 输出与 Release 已完成；Offline、Codex CLI、Claude Code CLI 的 Flow 生成与结果解释真实门禁通过，Local Model/Cloud 为可选配置 |
 | M8.9 | ✅ 完成 | 导航 Flow 必须验证最后一次导航；目标标记不能复用入口或只用坐标；试跑后比较起始/目标 UI 树，只有目标页独有标记成立才允许锁定。Android 任务 `75db50f2…` 已通过完整门禁 |
-| M8.10 | 🟡 进行中（必做） | M8.10A 与 M8.10B-1/B-2 已完成：镜像/Selector、低延迟点击返回滑动、完整 Step Flow，以及 literal/variableRef/secretRef/promptRef/totpRef 安全输入已通过 Android Emulator 门禁；下一步为 B-3 Flow 编辑/重排/JSON/YAML/回放 |
+| M8.10 | 🟡 进行中（必做） | M8.10A/B 已完成：镜像/Selector、低延迟录制、安全输入、步骤编辑重排、完整 JSON、实际 YAML、逐步与整体回放均通过 Android Emulator 门禁；下一步为 M8.10C AI 安全状态图探索 |
 | M9 | ✅ 完成 | Android Emulator 正式实验 12/12 完成；统一结果与 HTML 报告已生成，模拟器实验集与物理设备结果严格隔离 |
 | M10 | 🟡 进行中 | macOS `.app`/DMG、隔离工作区启动、任务/历史/报告、数据库升级安全、诊断/隐私和资源策略已验收；自动更新通道与稳定版升级承诺待补 |
 
@@ -112,6 +112,8 @@ M8.10B 录制可见性门禁：录制模式右侧持续展示从本次录制开�
 M8.10B 交互延迟门禁：Android 逐步探索不得为每个点击/返回/滑动重新启动 Maestro/JVM。录制阶段使用当前镜像已审查坐标通过受管 ADB 低延迟执行，同时在 Flow 中保留稳定语义 Selector；动作成功后先返回新截图和追加步骤，再后台刷新较慢的无障碍树。Maestro 继续负责整体回放、目标页语义证明和锁定前最终验证。
 
 M8.10B 安全输入门禁：Flow 输入值已升级为 `literal | variableRef | secretRef | promptRef | totpRef`，旧 `text: string` Flow 与旧锁哈希保持兼容；引用值编译为 `MAESTRO_REACTOR_INPUT_*` 环境占位，Secret/TOTP 密钥保存在独立系统凭据项并由可擦除索引管理，命令失败输出会按解析值脱敏。密码目标拒绝 literal 明文；缺变量、缺 Secret、缺交互值或无效 Base32 均明确失败。RFC6238、旧锁、Inspector EditText、变量/Prompt 缺值和日志脱敏均有自动测试。Android Emulator 使用 `com.android.settings` 的真实 EditText 完成 `promptRef settings.search.once` 试跑：本次值只进入 Maestro 子进程环境，设备显示 Wi‑Fi 搜索结果，Step Flow 只保留 Selector、引用类型和引用名；runtime 未残留临时 YAML 或本次输入值。
+
+M8.10B 编辑与回放门禁：录制工作台提供步骤 / 完整 Flow JSON / Rust 编译后的 Maestro YAML 三视图，支持复制、删除、同 section 重排、一步撤销、JSON 插入或修改 Selector，以及显式选择 setup/measured 边界；跨 section 误拖会被拒绝。新录制默认加入可见的 `launch_app` 起点，避免从未知页面回放。逐步回放不重复写入 Flow；整体回放把 setup/measured/teardown 交给同一 Maestro 进程，Prompt 值必须本次重新输入。Android Emulator 实测 `launch_app → tap List scenario → measured swipe UP`：JSON 经 Rust 校验后生成三段实际 YAML，整体回放成功返回列表并完成滑动，刷新 UI 树为 65 个元素。第一次缺少启动起点的失败被明确显示且未冒充通过，随后据此补齐起点约束。
 
 ### 2.3 实验设计助手
 

@@ -317,6 +317,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .recorded-flow-heading .eyebrow { margin: 0 0 4px; font-size: 7px; }
 .recorded-flow-heading h3 { margin: 0; font-size: 12px; }
 .recorded-flow-heading > span { padding: 4px 7px; border-radius: 999px; color: var(--purple); background: color-mix(in srgb, var(--purple) 12%, transparent); font: 8px DM Mono, monospace; white-space: nowrap; }
+.flow-editor-tabs { margin-top: 11px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.flow-editor-tabs button { min-height: 30px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: transparent; font-size: 7px; }
+.flow-editor-tabs button.active { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 45%, var(--line)); background: color-mix(in srgb, var(--purple) 10%, transparent); }
+.measurement-boundary { margin-top: 9px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
+.measurement-boundary > span { color: var(--muted); font-size: 7px; }
+.measurement-boundary select { min-width: 0; height: 30px; font-size: 8px; }
 .recorded-flow-list { max-height: 280px; margin: 12px 0 0; padding: 0; display: grid; gap: 7px; overflow-y: auto; list-style: none; }
 .recorded-flow-list li { padding: 9px; display: grid; grid-template-columns: 25px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); }
 .recorded-flow-list li > span { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 7px; color: var(--purple); background: color-mix(in srgb, var(--purple) 12%, transparent); font: 8px DM Mono, monospace; }
@@ -324,8 +330,22 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .recorded-flow-list b { font-size: 9px; }
 .recorded-flow-list code { margin-top: 3px; overflow: hidden; color: var(--muted); font: 8px DM Mono, monospace; white-space: nowrap; text-overflow: ellipsis; }
 .recorded-flow-list small { color: var(--green); font-size: 7px; }
+.recorded-flow-list b small { margin-left: 5px; color: var(--purple); font: 6px DM Mono, monospace; text-transform: uppercase; }
+.recorded-step-actions { display: flex; gap: 3px; }
+.recorded-step-actions button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: transparent; }
+.recorded-step-actions button:hover { color: var(--text); border-color: var(--line-strong); }
 .recorded-flow-empty { min-height: 72px; margin-top: 10px; padding: 12px; display: flex; align-items: center; gap: 10px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--purple); }
 .recorded-flow-empty span { color: var(--muted); font-size: 8px; line-height: 1.5; }
+.flow-source-editor { margin-top: 10px; display: grid; gap: 8px; }
+.flow-source-editor textarea { min-height: 260px; resize: vertical; font: 8px/1.55 DM Mono, monospace; }
+.flow-source-editor > div, .flow-editor-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.flow-yaml-preview { max-height: 320px; margin: 10px 0 0; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--surface-raised); font: 8px/1.55 DM Mono, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.replay-prompts { margin-top: 10px; padding: 9px; display: grid; gap: 7px; border: 1px solid var(--line); border-radius: 8px; }
+.replay-prompts > b { font-size: 8px; }
+.replay-prompts label { display: grid; gap: 4px; }
+.replay-prompts span { color: var(--muted); font: 7px DM Mono, monospace; }
+.flow-editor-error { margin-top: 9px; padding: 8px; border-radius: 7px; color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); font-size: 8px; line-height: 1.5; }
+.flow-editor-actions { margin-top: 10px; justify-content: space-between; }
 .current-selector-heading { margin: 4px 0 9px; display: flex; align-items: center; justify-content: space-between; }
 .current-selector-heading b { font-size: 11px; }
 .current-selector-heading span { color: var(--muted); font-size: 8px; }

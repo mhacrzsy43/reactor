@@ -38,7 +38,8 @@ use reactor_runner::{
     capture_ios_trial_failure, capture_ios_ui_tree, delete_all_flow_secrets, delete_flow_secret,
     discover_android_devices, discover_ios_simulators, doctor, enqueue_android, enqueue_demo,
     enqueue_ios, execute_android_job, execute_demo_job, execute_explorer_step, execute_ios_job,
-    has_flow_secret, recover_orphaned_jobs, save_flow_secret, trial_android, trial_ios_simulator,
+    has_flow_secret, recover_orphaned_jobs, replay_explorer_flow, save_flow_secret, trial_android,
+    trial_ios_simulator,
 };
 use reactor_store::{Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
@@ -82,7 +83,7 @@ struct DeviceInspectorSnapshot {
     warnings: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PerformExplorerStepInput {
     platform: Platform,
@@ -99,7 +100,7 @@ struct PerformExplorerStepInput {
     runtime_input: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FlowSecretInput {
     reference: String,
@@ -112,6 +113,16 @@ struct FlowSecretInput {
 struct FlowSecretStatus {
     reference: String,
     stored: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayExplorerFlowInput {
+    platform: Platform,
+    device_id: String,
+    flow: Flow,
+    #[serde(default)]
+    prompt_values: std::collections::BTreeMap<String, String>,
 }
 
 const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
@@ -953,6 +964,33 @@ async fn perform_explorer_step(
             .push("页面在 4 秒内未形成连续一致的 UI 树；请检查动画、键盘或动态内容".to_owned());
     }
     Ok(snapshot)
+}
+
+#[tauri::command]
+async fn replay_recorded_flow(
+    input: ReplayExplorerFlowInput,
+) -> Result<DeviceInspectorSnapshot, String> {
+    let root = workspace();
+    ensure_inspector_capture_allowed(&root)?;
+    let prompt_values = input
+        .prompt_values
+        .into_iter()
+        .map(|(reference, value)| (reference, Zeroizing::new(value)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    replay_explorer_flow(
+        &root,
+        input.platform,
+        &input.device_id,
+        &input.flow,
+        (!prompt_values.is_empty()).then_some(prompt_values),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    capture_device_inspector_for(CaptureDeviceInspectorInput {
+        platform: input.platform,
+        device_id: input.device_id,
+    })
+    .await
 }
 
 async fn wait_for_explorer_stability(root: &Path, platform: Platform, device_id: &str) -> bool {
@@ -2006,6 +2044,7 @@ pub fn run() {
             doctor_cli_providers,
             doctor_local_model,
             compile_flow_preview,
+            replay_recorded_flow,
             save_flow_secret_value,
             get_flow_secret_status,
             delete_flow_secret_value,

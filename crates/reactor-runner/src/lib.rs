@@ -1025,6 +1025,71 @@ pub async fn execute_explorer_step(
     result
 }
 
+/// Replays a complete edited Flow outside the measurement window with one Maestro process. The
+/// three Flow sections remain separate YAML documents but are passed to the same invocation in
+/// setup → measured → teardown order.
+///
+/// # Errors
+///
+/// Returns an error when the Flow is invalid, an input reference is unresolved, or Maestro fails.
+pub async fn replay_explorer_flow(
+    workspace: &Path,
+    platform: reactor_protocol::Platform,
+    device_id: &str,
+    flow: &Flow,
+    prompt_values: Option<BTreeMap<String, Zeroizing<String>>>,
+) -> Result<(), RunnerError> {
+    let compiled = compile_maestro(flow)?;
+    let input_environment =
+        resolve_input_environment(&compiled.input_bindings, prompt_values.as_ref())?;
+    let tools = resolve_tools(workspace);
+    let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
+    let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;
+    let directory = workspace
+        .join(".reactor/runtime")
+        .join(format!("explorer-replay-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&directory).await?;
+    let sections = [
+        ("setup.yaml", &flow.setup, compiled.setup),
+        ("measured.yaml", &flow.measured, compiled.measured),
+        ("teardown.yaml", &flow.teardown, compiled.teardown),
+    ];
+    let mut paths = Vec::new();
+    for (name, steps, yaml) in sections {
+        if !steps.is_empty() {
+            let path = directory.join(name);
+            fs::write(&path, yaml).await?;
+            paths.push(path);
+        }
+    }
+    let result = match platform {
+        reactor_protocol::Platform::Android => {
+            let adb = tools.adb.ok_or(RunnerError::MissingTool("adb"))?;
+            run_maestro_paths_with_inputs(
+                &maestro,
+                &java,
+                &adb,
+                &paths,
+                Some(device_id),
+                &input_environment,
+            )
+            .await
+        }
+        reactor_protocol::Platform::Ios => {
+            run_maestro_ios_paths_with_inputs(
+                &maestro,
+                &java,
+                &paths,
+                device_id,
+                &input_environment,
+            )
+            .await
+        }
+    };
+    let _ = fs::remove_dir_all(&directory).await;
+    result
+}
+
 async fn execute_android_explorer_step(
     workspace: &Path,
     device_id: &str,
@@ -3162,8 +3227,20 @@ async fn run_maestro_with_inputs(
     device_id: Option<&str>,
     input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
+    let flows = [flow.to_path_buf()];
+    run_maestro_paths_with_inputs(maestro, java, adb, &flows, device_id, input_environment).await
+}
+
+async fn run_maestro_paths_with_inputs(
+    maestro: &Path,
+    java: &Path,
+    adb: &Path,
+    flows: &[PathBuf],
+    device_id: Option<&str>,
+    input_environment: &[(String, Zeroizing<String>)],
+) -> Result<(), RunnerError> {
     let mut command = Command::new(maestro);
-    command.args(["test", &flow.display().to_string(), "--no-ansi"]);
+    command.arg("test").args(flows).arg("--no-ansi");
     if let Some(device_id) = device_id {
         command.args(["--udid", device_id]);
     }
@@ -3185,14 +3262,22 @@ async fn run_maestro_ios_with_inputs(
     simulator_id: &str,
     input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
+    let flows = [flow.to_path_buf()];
+    run_maestro_ios_paths_with_inputs(maestro, java, &flows, simulator_id, input_environment).await
+}
+
+async fn run_maestro_ios_paths_with_inputs(
+    maestro: &Path,
+    java: &Path,
+    flows: &[PathBuf],
+    simulator_id: &str,
+    input_environment: &[(String, Zeroizing<String>)],
+) -> Result<(), RunnerError> {
     let mut command = Command::new(maestro);
-    command.args([
-        "test",
-        &flow.display().to_string(),
-        "--no-ansi",
-        "--udid",
-        simulator_id,
-    ]);
+    command
+        .arg("test")
+        .args(flows)
+        .args(["--no-ansi", "--udid", simulator_id]);
     configure_java_environment(&mut command, java);
     apply_input_environment(&mut command, input_environment);
     run_command_with_timeout_redacted(

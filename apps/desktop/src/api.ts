@@ -157,6 +157,16 @@ export async function performExplorerStep(input: {
   return invoke("perform_explorer_step", { input });
 }
 
+export async function replayRecordedFlow(input: {
+  platform: Platform;
+  deviceId: string;
+  flow: Flow;
+  promptValues?: Record<string, string>;
+}): Promise<DeviceInspectorSnapshot> {
+  if (!inTauri) throw new Error("完整 Flow 回放请在 Reactor 桌面应用中使用");
+  return invoke("replay_recorded_flow", { input });
+}
+
 export async function saveFlowSecret(reference: string, value: string): Promise<{ reference: string; stored: boolean }> {
   if (!inTauri) throw new Error("Flow Secret 仅保存在 Reactor 桌面应用的系统凭据库中");
   return invoke("save_flow_secret_value", { input: { reference, value } });
