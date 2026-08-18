@@ -3386,6 +3386,7 @@ dependencies = [
  "reactor-runner",
  "reactor-store",
  "reactor-toolchain",
+ "ring",
  "serde",
  "serde_json",
  "tauri",

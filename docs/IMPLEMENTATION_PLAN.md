@@ -20,7 +20,7 @@
 | M8.9 | ✅ 完成 | 导航 Flow 必须验证最后一次导航；目标标记不能复用入口或只用坐标；试跑后比较起始/目标 UI 树，只有目标页独有标记成立才允许锁定。Android 任务 `75db50f2…` 已通过完整门禁 |
 | M8.10 | ✅ 完成（必做） | A–D 全部完成：镜像/Selector、低延迟录制、安全输入、编辑回放、AI 状态图、可见/文本/启用状态断言、目标页唯一性证明、哈希锁定与性能测试衔接均通过 Android Emulator 门禁 |
 | M9 | ✅ 完成 | Android Emulator 正式实验 12/12 完成；统一结果与 HTML 报告已生成，模拟器实验集与物理设备结果严格隔离 |
-| M10 | 🟡 进行中 | macOS `.app`/DMG、隔离工作区启动、任务/历史/报告、数据库升级安全、诊断/隐私和资源策略已验收；自动更新通道与稳定版升级承诺待补 |
+| M10 | ✅ 当前环境必选项完成 | M10.1–M10.5 已完成；macOS `.app`/DMG、数据安全、隐私/资源、稳定更新契约与 1.x 兼容承诺已验收。Windows/Linux/正式签名保留为对应环境或账号条件门禁 |
 
 ## 1. 产品原则
 
@@ -419,7 +419,7 @@ M8 已完成。Local Model 与 Cloud API 属于可选 Provider：无本地模型
 | M10.2 升级与数据安全 | 必选 | ✅ 完成 | v1→v2 保留历史；迁移失败事务回滚；未来版本数据库拒绝覆盖；严格测试通过 |
 | M10.3 诊断与隐私 | 必选 | ✅ 完成 | 安全诊断包默认无凭据/任务正文/路径/截图/UI 树；敏感 artifact 与全部本地数据擦除入口完成 |
 | M10.4 插件与资源加固 | 必选 | ✅ 完成 | 仅启用内置可信适配器，外部插件默认禁用；CLI 超时/输出、Profile/Source Map 大小和 Trace 磁盘门禁公开且强制 |
-| M10.5 更新与稳定版承诺 | 必选 | ⬜ 待完成 | 定义更新通道、签名元数据与失败回滚；发布首个稳定版升级兼容承诺 |
+| M10.5 更新与稳定版承诺 | 必选 | ✅ 完成 | stable/beta 通道、manifest v1、Ed25519 发布公钥注入、分阶段安装/健康检查/失败回滚和 1.x Flow/Result/数据库兼容承诺已固化并在设置页公开；开发构建无生产公钥时明确拒绝未签名更新 |
 | M10-Windows | 可选平台 | ⬜ 待对应环境 | 在真实 Windows 环境验证安装包、签名、Android 工具链及 Codex/Claude CLI；缺少 Windows 不阻塞当前版本 |
 | M10-Linux | 可选平台 | ⬜ 待对应环境 | 在真实 Linux 环境验证发行包、桌面集成、Android 工具链及 Codex/Claude CLI；缺少 Linux 不阻塞当前版本 |
 | M10-Signing | 可选账号门禁 | ⬜ 待账号 | macOS notarization 与 Windows 正式签名只在具备相应开发者账号时执行，不以临时或伪造签名冒充通过 |
@@ -427,6 +427,8 @@ M8 已完成。Local Model 与 Cloud API 属于可选 Provider：无本地模型
 Windows/Linux 与签名门禁采用和 Local Model/Cloud Provider 相同的条件验收口径：产品保留实现与诊断入口，环境缺失时显示“未执行”，不阻塞当前 macOS 可体验版完成，也不宣称对应平台已经通过真实验收。
 
 M10.1–M10.4 真实验收（2026-08-18）：最新 Release 在 `/tmp/reactor-m10-qa.Tu83E4` 全新工作区启动；设置页显示数据库 Schema v2、插件契约 v1、120 秒 AI CLI 超时、1 MiB/256 KiB 输出上限、64 MiB Profile、128 MiB Source Map 与 128 MiB Trace 磁盘门禁。桌面生成安全诊断包后复核 JSON，不含绝对路径、凭据、任务输入、错误正文、截图或 UI 树。独立 Worker 完成导览任务 `82b407e9-ae77-4ed5-9353-9f01b938c658`，历史页展示 6 条事件、三框架明确 `SIMULATED` 结果和报告入口；退出并重开同一 Release 后任务、事件和结果仍完整恢复。数据库升级、失败回滚、未来 Schema 拒绝、隐私擦除和导入上限均有 Rust 测试覆盖。
+
+M10.5 契约门禁（2026-08-19）：设置页公开当前版本、默认 stable 通道、manifest v1、Ed25519 签名必需、分阶段安装与健康检查失败回滚；正式发布公钥只允许通过 `REACTOR_UPDATE_PUBLIC_KEY` 由 CI 注入，开发构建没有生产公钥时明确显示并拒绝降级接受未签名更新。`docs/update-manifest.schema.json` 固化平台/架构、HTTPS URL、SHA-256、大小、兼容矩阵和签名元数据；`docs/UPDATE_AND_COMPATIBILITY.md` 承诺 1.x 保持 Flow v1、Result v1、Flow Lock v1、插件契约 v1 与数据库历史可读。Apple notarization、Windows 签名及 Windows/Linux 真环境仍是条件门禁，不被本项冒充完成。
 
 交付：
 

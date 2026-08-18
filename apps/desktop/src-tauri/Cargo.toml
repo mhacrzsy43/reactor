@@ -24,6 +24,7 @@ reactor-protocol = { path = "../../../crates/reactor-protocol" }
 reactor-runner = { path = "../../../crates/reactor-runner" }
 reactor-store = { path = "../../../crates/reactor-store" }
 reactor-toolchain = { path = "../../../crates/reactor-toolchain" }
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }

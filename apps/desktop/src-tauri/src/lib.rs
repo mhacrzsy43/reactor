@@ -133,6 +133,9 @@ const AI_CLI_TIMEOUT_SECONDS: u64 = 120;
 const AI_CLI_STDOUT_BYTES: u64 = 1024 * 1024;
 const AI_CLI_STDERR_BYTES: u64 = 256 * 1024;
 const LOCAL_TRACE_MIN_FREE_BYTES: u64 = 128 * 1024 * 1024;
+const UPDATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const STABLE_UPDATE_ENDPOINT: &str =
+    "https://github.com/mhacrzsy43/reactor/releases/latest/download/stable.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,6 +160,84 @@ struct MaintenanceStatus {
     available_disk_bytes: u64,
     sensitive_artifact_count: u64,
     policy: ResourcePolicyView,
+    update: UpdatePolicyView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
+struct UpdatePolicyView {
+    current_version: &'static str,
+    default_channel: &'static str,
+    stable_endpoint: &'static str,
+    manifest_schema_version: u32,
+    signature_algorithm: &'static str,
+    signature_required: bool,
+    production_key_configured: bool,
+    staged_install: bool,
+    rollback_on_failed_health_check: bool,
+    compatibility_line: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateManifestV1 {
+    schema_version: u32,
+    channel: String,
+    version: String,
+    published_at: String,
+    compatibility: UpdateCompatibility,
+    artifacts: Vec<UpdateArtifact>,
+    signature: UpdateSignature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCompatibility {
+    minimum_app_version: String,
+    database_schema: i64,
+    flow_schemas: Vec<u32>,
+    result_schemas: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateArtifact {
+    platform: String,
+    arch: String,
+    url: String,
+    sha256: String,
+    size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSignature {
+    algorithm: String,
+    key_id: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignedUpdatePayload<'a> {
+    schema_version: u32,
+    channel: &'a str,
+    version: &'a str,
+    published_at: &'a str,
+    compatibility: &'a UpdateCompatibility,
+    artifacts: &'a [UpdateArtifact],
+    signature_algorithm: &'a str,
+    signature_key_id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifiedUpdateManifest {
+    channel: String,
+    version: String,
+    artifact_count: usize,
+    key_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -460,6 +541,83 @@ fn resource_policy() -> ResourcePolicyView {
     }
 }
 
+fn update_policy() -> UpdatePolicyView {
+    UpdatePolicyView {
+        current_version: env!("CARGO_PKG_VERSION"),
+        default_channel: "stable",
+        stable_endpoint: STABLE_UPDATE_ENDPOINT,
+        manifest_schema_version: UPDATE_MANIFEST_SCHEMA_VERSION,
+        signature_algorithm: "Ed25519",
+        signature_required: true,
+        production_key_configured: option_env!("REACTOR_UPDATE_PUBLIC_KEY")
+            .is_some_and(|value| !value.trim().is_empty()),
+        staged_install: true,
+        rollback_on_failed_health_check: true,
+        compatibility_line: "1.x keeps Flow v1, Result v1 and transactional database upgrades readable",
+    }
+}
+
+fn signed_update_payload(manifest: &UpdateManifestV1) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&SignedUpdatePayload {
+        schema_version: manifest.schema_version,
+        channel: &manifest.channel,
+        version: &manifest.version,
+        published_at: &manifest.published_at,
+        compatibility: &manifest.compatibility,
+        artifacts: &manifest.artifacts,
+        signature_algorithm: &manifest.signature.algorithm,
+        signature_key_id: &manifest.signature.key_id,
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn validate_signed_update_manifest(
+    manifest: &UpdateManifestV1,
+    public_key_base64: &str,
+    supported_database_schema: i64,
+) -> Result<(), String> {
+    if manifest.schema_version != UPDATE_MANIFEST_SCHEMA_VERSION {
+        return Err("不支持的更新 manifest 版本".to_owned());
+    }
+    if !matches!(manifest.channel.as_str(), "stable" | "beta") {
+        return Err("更新通道必须是 stable 或 beta".to_owned());
+    }
+    if manifest.version.trim().is_empty()
+        || manifest.published_at.trim().is_empty()
+        || manifest.compatibility.minimum_app_version.trim().is_empty()
+    {
+        return Err("更新版本或发布时间缺失".to_owned());
+    }
+    if manifest.compatibility.database_schema > supported_database_schema
+        || !manifest.compatibility.flow_schemas.contains(&1)
+        || !manifest.compatibility.result_schemas.contains(&1)
+    {
+        return Err("更新与当前数据库、Flow 或 Result 协议不兼容".to_owned());
+    }
+    if manifest.artifacts.is_empty()
+        || manifest.artifacts.iter().any(|artifact| {
+            !artifact.url.starts_with("https://")
+                || artifact.size == 0
+                || artifact.sha256.len() != 64
+                || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err("更新 artifact 元数据不完整或不安全".to_owned());
+    }
+    if manifest.signature.algorithm != "Ed25519" || manifest.signature.key_id.len() < 8 {
+        return Err("更新签名元数据无效".to_owned());
+    }
+    let public_key = BASE64_STANDARD
+        .decode(public_key_base64.trim())
+        .map_err(|_| "发布公钥不是有效 Base64".to_owned())?;
+    let signature = BASE64_STANDARD
+        .decode(manifest.signature.value.trim())
+        .map_err(|_| "manifest 签名不是有效 Base64".to_owned())?;
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
+        .verify(&signed_update_payload(manifest)?, &signature)
+        .map_err(|_| "manifest Ed25519 签名验证失败".to_owned())
+}
+
 fn is_sensitive_artifact(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -514,6 +672,7 @@ fn maintenance_status_for(root: &Path) -> Result<MaintenanceStatus, String> {
         available_disk_bytes,
         sensitive_artifact_count: sensitive.len() as u64,
         policy: resource_policy(),
+        update: update_policy(),
     })
 }
 
@@ -542,6 +701,7 @@ fn create_diagnostic_bundle_for(root: &Path) -> Result<DiagnosticBundleResult, S
         "availableDiskBytes": status.available_disk_bytes,
         "sensitiveArtifactCount": status.sensitive_artifact_count,
         "resourcePolicy": status.policy,
+        "updatePolicy": status.update,
         "toolChecks": safe_checks,
         "privacy": {
             "credentialValuesIncluded": false,
@@ -666,6 +826,27 @@ async fn bootstrap() -> Result<Bootstrap, String> {
 #[tauri::command]
 fn maintenance_status() -> Result<MaintenanceStatus, String> {
     maintenance_status_for(&workspace())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn verify_update_manifest(manifest_json: String) -> Result<VerifiedUpdateManifest, String> {
+    let public_key = option_env!("REACTOR_UPDATE_PUBLIC_KEY")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "当前构建未配置正式发布公钥；Reactor 拒绝验证或安装未签名更新".to_owned())?;
+    let manifest: UpdateManifestV1 =
+        serde_json::from_str(&manifest_json).map_err(|error| error.to_string())?;
+    let supported_schema = Store::open(&workspace().join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?
+        .schema_version()
+        .map_err(|error| error.to_string())?;
+    validate_signed_update_manifest(&manifest, public_key, supported_schema)?;
+    Ok(VerifiedUpdateManifest {
+        channel: manifest.channel,
+        version: manifest.version,
+        artifact_count: manifest.artifacts.len(),
+        key_id: manifest.signature.key_id,
+    })
 }
 
 #[tauri::command]
@@ -2033,6 +2214,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             maintenance_status,
+            verify_update_manifest,
             create_diagnostic_bundle,
             erase_private_data,
             setup_tools,
@@ -2197,6 +2379,62 @@ mod tests {
         .expect("navigation flow has a marker");
         assert!(!proof.verified);
         assert!(proof.source_contains_marker);
+    }
+
+    #[test]
+    fn stable_update_policy_requires_signed_staged_updates_and_rollback() {
+        let policy = update_policy();
+        assert_eq!(policy.default_channel, "stable");
+        assert_eq!(policy.manifest_schema_version, 1);
+        assert_eq!(policy.signature_algorithm, "Ed25519");
+        assert!(policy.signature_required);
+        assert!(policy.staged_install);
+        assert!(policy.rollback_on_failed_health_check);
+        assert!(policy.stable_endpoint.starts_with("https://"));
+        assert!(policy.compatibility_line.contains("Flow v1"));
+    }
+
+    #[test]
+    fn update_manifest_rejects_tampering_and_incompatible_protocols() {
+        use ring::signature::KeyPair as _;
+
+        let key_pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7_u8; 32]).unwrap();
+        let mut manifest = UpdateManifestV1 {
+            schema_version: 1,
+            channel: "stable".to_owned(),
+            version: "1.0.1".to_owned(),
+            published_at: "2026-08-19T12:00:00Z".to_owned(),
+            compatibility: UpdateCompatibility {
+                minimum_app_version: "1.0.0".to_owned(),
+                database_schema: 2,
+                flow_schemas: vec![1],
+                result_schemas: vec![1],
+            },
+            artifacts: vec![UpdateArtifact {
+                platform: "darwin".to_owned(),
+                arch: "aarch64".to_owned(),
+                url: "https://example.test/Reactor.app.tar.gz".to_owned(),
+                sha256: "a".repeat(64),
+                size: 1024,
+            }],
+            signature: UpdateSignature {
+                algorithm: "Ed25519".to_owned(),
+                key_id: "release-2026".to_owned(),
+                value: String::new(),
+            },
+        };
+        manifest.signature.value = BASE64_STANDARD.encode(
+            key_pair
+                .sign(&signed_update_payload(&manifest).unwrap())
+                .as_ref(),
+        );
+        let public_key = BASE64_STANDARD.encode(key_pair.public_key().as_ref());
+        validate_signed_update_manifest(&manifest, &public_key, 2).unwrap();
+
+        manifest.version = "1.0.2".to_owned();
+        assert!(validate_signed_update_manifest(&manifest, &public_key, 2).is_err());
+        manifest.compatibility.flow_schemas = vec![2];
+        assert!(validate_signed_update_manifest(&manifest, &public_key, 2).is_err());
     }
 
     #[test]

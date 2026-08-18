@@ -72,6 +72,18 @@ export interface MaintenanceStatus {
   availableDiskBytes: number;
   sensitiveArtifactCount: number;
   policy: ResourcePolicyView;
+  update: {
+    currentVersion: string;
+    defaultChannel: "stable" | "beta";
+    stableEndpoint: string;
+    manifestSchemaVersion: number;
+    signatureAlgorithm: string;
+    signatureRequired: boolean;
+    productionKeyConfigured: boolean;
+    stagedInstall: boolean;
+    rollbackOnFailedHealthCheck: boolean;
+    compatibilityLine: string;
+  };
 }
 
 export interface DiagnosticBundleResult {
@@ -331,6 +343,18 @@ export async function getMaintenanceStatus(): Promise<MaintenanceStatus> {
         maxProfileJsonBytes: 67_108_864,
         maxSourceMapBytes: 134_217_728,
         localTraceMinFreeBytes: 134_217_728,
+      },
+      update: {
+        currentVersion: "0.1.0",
+        defaultChannel: "stable",
+        stableEndpoint: "https://github.com/mhacrzsy43/reactor/releases/latest/download/stable.json",
+        manifestSchemaVersion: 1,
+        signatureAlgorithm: "Ed25519",
+        signatureRequired: true,
+        productionKeyConfigured: false,
+        stagedInstall: true,
+        rollbackOnFailedHealthCheck: true,
+        compatibilityLine: "1.x keeps Flow v1, Result v1 and transactional database upgrades readable",
       },
     };
   }
