@@ -434,6 +434,8 @@ M10.1–M10.4 真实验收（2026-08-18）：最新 Release 在 `/tmp/reactor-m1
 
 M10.5 执行门禁（2026-08-19）：设置页可显式选择 Stable/Beta，开发构建没有生产公钥时拒绝下载或安装。正式链路先验证 Ed25519 manifest、协议兼容、平台/架构和版本，再以有界流式下载校验大小/SHA-256；安全解包限制为 2 GiB/10 万文件并拒绝链接与越界路径。候选 App 复制到当前安装同卷，Helper 等待桌面退出后备份 App 与 SQLite/WAL/SHM、原子切换，并由候选二进制检查精确版本、数据库/历史和受管工具声明；失败恢复旧 App/数据库，最近事务状态回显在设置页。更新单元/故障测试 16 项、全仓测试、严格 clippy、前端生产构建、真实候选健康探针正反门禁与临时 Ed25519 manifest 生成均通过。`.github/workflows/release.yml` 强制公私钥匹配后才构建和签名，Beta prerelease 不污染 Stable latest。Apple notarization、Windows 签名及 Windows/Linux 真环境仍是条件门禁，不被本项冒充完成。
 
+最终 macOS 可体验版复验（2026-08-19）：全仓 Release 测试与严格 clippy 通过；最新 `Reactor.app` 和 `Reactor_0.1.0_aarch64.dmg` 已重新生成。整个 App 使用 identity `-` 做 ad-hoc codesign，源码目录 App 与只读挂载 DMG 内的 App 均通过 `codesign --verify --deep --strict`，DMG 自身校验有效，SHA-256 为 `c5a9f0a3f390812a21288a85f81312fe22bf08c0a109353d3c72bb7bda90d664`。打包 App 的候选版本健康探针通过；桌面实测可切换 Stable/Beta，开发构建点击检查时明确拒绝无发布公钥的下载/安装。ad-hoc 不冒充 Developer ID/notarization，后两项继续标记待账号。
+
 交付：
 
 - macOS/Windows/Linux 安装包；macOS 签名与 notarization，Windows 签名。
