@@ -12,8 +12,8 @@ import {
   Timer,
   Upload,
 } from "lucide-react";
-import { useEffect, useState } from "react";
-import type { ChangeEvent } from "react";
+import { Component, useEffect, useState } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import { analyzeProfileJson, diffProfileReports, getJobSnapshot, listJobs } from "./api";
 import type {
   ComponentProfileStat,
@@ -27,8 +27,39 @@ import type {
 type DiagnosticView = "overview" | "render" | "findings" | "hermes" | "timeline" | "diff" | "source";
 type DiagnosticFramework = "react-native" | "flutter" | "lynx";
 
-export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history" | "analysis") => void }) {
-  const [framework, setFramework] = useState<DiagnosticFramework>("react-native");
+interface DiagnosticFlowContext {
+  flowHash: string;
+  name: string;
+  appId: string;
+  framework: DiagnosticFramework;
+}
+
+interface DiagnosticCenterProps {
+  activeFlow?: DiagnosticFlowContext;
+  onNavigate?: (page: "flow" | "history" | "analysis") => void;
+}
+
+export function DiagnosticCenter(props: DiagnosticCenterProps) {
+  return <DiagnosticErrorBoundary><DiagnosticCenterContent {...props} /></DiagnosticErrorBoundary>;
+}
+
+class DiagnosticErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <div className="diagnostic-empty card"><AlertTriangle size={26} /><h2>性能诊断页面遇到异常</h2><p>Reactor 已阻止整页黑屏。请重试；若仍失败，可在设置中生成本地诊断包。</p><button className="secondary-button" onClick={() => this.setState({ failed: false })}><RefreshCw size={14} />重新加载诊断页</button></div>;
+    }
+    return this.props.children;
+  }
+}
+
+function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterProps) {
+  const [framework, setFramework] = useState<DiagnosticFramework>(activeFlow?.framework ?? "react-native");
   const [currentName, setCurrentName] = useState("");
   const [hermesName, setHermesName] = useState("");
   const [baselineName, setBaselineName] = useState("");
@@ -45,7 +76,13 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
   const [selectedCommit, setSelectedCommit] = useState<ProfileCommit>();
   const [loading, setLoading] = useState<"current" | "hermes" | "baseline" | "source-map" | "runs" | undefined>("runs");
   const [latestRuns, setLatestRuns] = useState<Partial<Record<DiagnosticFramework, NormalizedResult>>>({});
+  const [recentRuns, setRecentRuns] = useState<NormalizedResult[]>([]);
+  const [profileFlowHash, setProfileFlowHash] = useState("");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (activeFlow) setFramework(activeFlow.framework);
+  }, [activeFlow?.flowHash, activeFlow?.framework]);
 
   useEffect(() => {
     if (!baseline || !current) {
@@ -69,7 +106,10 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
           if (key && !next[key] && !result.source.synthetic) next[key] = result;
         }
       }
-      if (!cancelled) setLatestRuns(next);
+      if (!cancelled) {
+        setLatestRuns(next);
+        setRecentRuns(snapshots.flatMap((snapshot) => snapshot?.results ?? []).filter((result) => !result.source.synthetic));
+      }
     }).catch((reason) => {
       if (!cancelled) setError(`读取最近性能结果失败：${String(reason)}`);
     }).finally(() => {
@@ -90,6 +130,7 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
         setCurrentJson(json);
         setCurrent(report);
         setCurrentName(file.name);
+        setProfileFlowHash(activeFlow?.flowHash ?? selectedResult?.flowHash ?? "");
         setSelectedCommit(undefined);
         setView("overview");
       } else if (kind === "hermes") {
@@ -97,6 +138,7 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
         setHermesJson(json);
         setHermes(report);
         setHermesName(file.name);
+        setProfileFlowHash(activeFlow?.flowHash ?? selectedResult?.flowHash ?? "");
         setView("hermes");
       } else {
         if (report.profileType !== "react_profiler") throw new Error("Profile Diff 基线需要 React DevTools Profiler JSON");
@@ -159,6 +201,10 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
     setView(target);
   }
 
+  const selectedResult = activeFlow
+    ? recentRuns.find((result) => result.flowHash === activeFlow.flowHash && normalizeFramework(result.framework) === framework)
+    : latestRuns[framework];
+
   return (
     <>
       <header className="topbar diagnostic-topbar">
@@ -172,6 +218,19 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
       </header>
 
       {error && <div className="error-banner">{error}</div>}
+
+      <section className={`diagnostic-flow-context card ${activeFlow ? selectedResult ? "linked" : "pending" : "unbound"}`}>
+        <div>
+          <span>{activeFlow ? "当前锁定 Flow" : "尚未锁定当前 Flow"}</span>
+          <b>{activeFlow?.name ?? "性能诊断暂时展示各框架最近一次可信运行"}</b>
+          <small>{activeFlow ? `${activeFlow.appId} · ${activeFlow.flowHash.slice(0, 12)}…` : "锁定 Flow 后，Reactor 会按 Flow Hash 自动关联采集结果。"}</small>
+        </div>
+        <div>
+          <strong>{activeFlow ? selectedResult ? "已关联同 Flow Run" : "尚未按此 Flow 采集" : "最近可信 Run"}</strong>
+          {selectedResult && <code>{selectedResult.runId.slice(0, 12)}… · {selectedResult.platform}</code>}
+          {onNavigate && <button className="secondary-button" onClick={() => onNavigate(activeFlow && selectedResult ? "history" : "flow")}>{activeFlow && selectedResult ? "查看原始运行" : activeFlow ? "返回 Flow 开始采集" : "前往 Flow Studio"}</button>}
+        </div>
+      </section>
 
       <section className="diagnostic-frameworks card" aria-label="框架选择">
         <div><b>选择框架</b><span>黑盒性能统一呈现，框架专项证据按能力接入</span></div>
@@ -195,7 +254,7 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
             </button>
           ))}
         </div>
-        {view === "overview" && <PerformanceOverview framework={framework} result={latestRuns[framework]} current={current} hermes={hermes} loading={loading === "runs"} onDrill={drill} onNavigate={onNavigate} />}
+        {view === "overview" && <PerformanceOverview framework={framework} result={selectedResult} current={current} hermes={hermes} loading={loading === "runs"} onDrill={drill} onNavigate={onNavigate} />}
         {framework !== "react-native" && view !== "overview" && <FrameworkPending framework={framework} onOverview={() => setView("overview")} />}
         {framework === "react-native" && view === "render" && (current ? <ComponentTable components={current.components} selectedCommit={selectedCommit} /> : <EvidenceEmpty title="尚未采集 React Render Profile" detail="从 React Native DevTools 的 Profiler 导出 JSON，导入后可查看每个组件的 Render/Commit 次数与耗时。" />)}
         {framework === "react-native" && view === "findings" && (current ? <Findings report={current} onDrill={(commitId) => drill(commitId ? "timeline" : "render", commitId)} /> : <EvidenceEmpty title="重复渲染需要 React Profile 证据" detail="导入后 Reactor 会识别无变化 Render、父组件级联，并给出组件和 Commit 引用。" />)}
@@ -210,9 +269,9 @@ export function DiagnosticCenter({ onNavigate }: { onNavigate?: (page: "history"
           <div className="heading-icon purple"><Braces size={19} /></div>
           <div>
             <h2>采集或导入 RN 诊断证据</h2>
-            <p>普通 Benchmark 不会自动产生组件证据；请从 RN DevTools/Hermes 导出后导入</p>
+            <p>{activeFlow ? `导入后绑定当前 Flow ${activeFlow.flowHash.slice(0, 12)}…；黑盒 Run 已按同一 Hash 自动关联` : "请先锁定 Flow；React DevTools/Hermes Profile 导入后会绑定该 Flow"}</p>
           </div>
-          <span className="schema-badge">PROFILE v1</span>
+          <span className="schema-badge">{profileFlowHash ? `FLOW ${profileFlowHash.slice(0, 8)}` : "PROFILE v1"}</span>
         </div>
         <div className="diagnostic-files">
           <ProfileFilePicker
@@ -304,15 +363,15 @@ function PerformanceOverview({
   hermes?: DiagnosticProfileReport;
   loading: boolean;
   onDrill: (target: DiagnosticView) => void;
-  onNavigate?: (page: "history" | "analysis") => void;
+  onNavigate?: (page: "flow" | "history" | "analysis") => void;
 }) {
-  const frameP95 = result?.androidNative?.frameTimeP95Ms ?? result?.iosNative?.frameTimeP95Ms;
-  const cpu = result?.summary.cpuMeanPct ?? result?.iosNative?.cpuMeanPct;
-  const memory = result?.androidNative?.memoryPssMb ?? result?.iosNative?.memoryPeakMb ?? result?.summary.ramPeakMb;
-  const startup = result?.androidNative?.startupTimeMs ?? result?.iosNative?.startupTimeMs;
+  const frameP95 = firstFiniteMetric(result?.androidNative?.frameTimeP95Ms, result?.iosNative?.frameTimeP95Ms);
+  const cpu = firstFiniteMetric(result?.summary.cpuMeanPct, result?.iosNative?.cpuMeanPct);
+  const memory = firstFiniteMetric(result?.androidNative?.memoryPssMb, result?.iosNative?.memoryPeakMb, result?.summary.ramPeakMb);
+  const startup = firstFiniteMetric(result?.androidNative?.startupTimeMs, result?.iosNative?.startupTimeMs);
   const metrics: Array<[string, number | undefined, string, DiagnosticView, string]> = [
     ["P95 帧耗时", frameP95, "ms", "timeline", "下钻 Commit 时间线"],
-    ["Jank", result?.androidNative?.jankFramePct, "%", "timeline", "下钻渲染时间线"],
+    ["Jank", firstFiniteMetric(result?.androidNative?.jankFramePct), "%", "timeline", "下钻渲染时间线"],
     ["CPU", cpu, "%", "hermes", "下钻 JS CPU 热点"],
     ["内存峰值", memory, "MB", "render", "检查组件渲染路径"],
     ["冷启动", startup, "ms", "render", "检查首次挂载组件"],
@@ -375,6 +434,10 @@ function normalizeFramework(value: string): DiagnosticFramework | undefined {
 
 function frameworkLabel(framework: DiagnosticFramework) {
   return framework === "react-native" ? "React Native" : framework === "flutter" ? "Flutter" : "Lynx";
+}
+
+function firstFiniteMetric(...values: unknown[]): number | undefined {
+  return values.find((value): value is number => typeof value === "number" && Number.isFinite(value));
 }
 
 function ComponentTable({

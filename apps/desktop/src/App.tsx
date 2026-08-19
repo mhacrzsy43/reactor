@@ -985,7 +985,15 @@ function App() {
         ) : page === "analysis" ? (
           <AnalysisCenter />
         ) : page === "diagnostics" ? (
-          <DiagnosticCenter onNavigate={navigateTo} />
+          <DiagnosticCenter
+            activeFlow={flowLock ? {
+              flowHash: flowLock.flowHash,
+              name: flowLock.flow.name,
+              appId: flowLock.flow.appId,
+              framework,
+            } : undefined}
+            onNavigate={navigateTo}
+          />
         ) : page === "settings" ? (
           <SettingsCenter
             environment={environment}

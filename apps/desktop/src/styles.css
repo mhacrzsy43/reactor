@@ -675,7 +675,17 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
 .diagnostic-topbar { margin-bottom: 18px; }
-.diagnostic-import, .diagnostic-workbench, .diagnostic-empty, .diagnostic-frameworks { max-width: 1390px; margin: 0 auto 18px; padding: 18px; }
+.diagnostic-import, .diagnostic-workbench, .diagnostic-empty, .diagnostic-frameworks, .diagnostic-flow-context { max-width: 1390px; margin: 0 auto 18px; padding: 18px; }
+.diagnostic-flow-context { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-color: color-mix(in srgb, var(--purple) 24%, var(--line)); }
+.diagnostic-flow-context.linked { border-color: color-mix(in srgb, var(--green) 32%, var(--line)); }
+.diagnostic-flow-context.pending { border-color: color-mix(in srgb, var(--orange) 34%, var(--line)); }
+.diagnostic-flow-context > div { min-width: 0; }
+.diagnostic-flow-context > div:last-child { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.diagnostic-flow-context span, .diagnostic-flow-context b, .diagnostic-flow-context small { display: block; }
+.diagnostic-flow-context span { color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: .07em; }
+.diagnostic-flow-context b { margin-top: 5px; overflow: hidden; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
+.diagnostic-flow-context small, .diagnostic-flow-context code { margin-top: 4px; color: var(--muted); font: 8px DM Mono, monospace; }
+.diagnostic-flow-context strong { color: var(--text-soft); font-size: 9px; white-space: nowrap; }
 .diagnostic-frameworks { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .diagnostic-frameworks > div:first-child b, .diagnostic-frameworks > div:first-child span { display: block; }
 .diagnostic-frameworks > div:first-child b { font-size: 11px; }
@@ -890,6 +900,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .diagnostic-files { grid-template-columns: 1fr; }
   .diagnostic-frameworks { align-items: stretch; flex-direction: column; }
   .diagnostic-frameworks > div:last-child { grid-template-columns: 1fr; }
+  .diagnostic-flow-context { align-items: stretch; flex-direction: column; }
+  .diagnostic-flow-context > div:last-child { align-items: flex-start; justify-content: flex-start; flex-wrap: wrap; }
   .diagnostic-file-arrow { display: none; }
   .diagnostic-summary { grid-template-columns: repeat(2, 1fr); }
   .diagnostic-overview-metrics, .rn-evidence-status, .framework-roadmap { grid-template-columns: 1fr; }
