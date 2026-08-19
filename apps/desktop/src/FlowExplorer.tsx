@@ -90,6 +90,7 @@ export function FlowExplorer({
   const [editorUndo, setEditorUndo] = useState<{ steps: FlowStep[]; measurementStart?: number; teardownStart: number }>();
   const [replaying, setReplaying] = useState(false);
   const [replayKind, setReplayKind] = useState<"step" | "whole">();
+  const [activeReplayStep, setActiveReplayStep] = useState<number>();
   const [promptValues, setPromptValues] = useState<Record<string, string>>({});
   const [graphNodes, setGraphNodes] = useState<ExplorerGraphNode[]>([]);
   const [graphTransitions, setGraphTransitions] = useState<ExplorerGraphTransition[]>([]);
@@ -122,6 +123,13 @@ export function FlowExplorer({
   const teardownStartRef = useRef(0);
   const currentGraphStateRef = useRef<string | undefined>(undefined);
   const editorErrorRef = useRef<HTMLDivElement>(null);
+  const replayStepRefs = useRef<Array<HTMLLIElement | null>>([]);
+
+  useEffect(() => {
+    if (activeReplayStep !== undefined) {
+      replayStepRefs.current[activeReplayStep]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [activeReplayStep]);
 
   useEffect(() => {
     snapshotRef.current = snapshot;
@@ -591,6 +599,7 @@ export function FlowExplorer({
       return;
     }
     setReplayKind("whole");
+    setActiveReplayStep(0);
     setReplaying(true);
     setLive(false);
     setSelectedElementKey(undefined);
@@ -603,6 +612,8 @@ export function FlowExplorer({
         deviceId: selectedDevice.id,
         flow: draftReplayFlow,
         promptValues,
+      }, (completedStepIndex) => {
+        setActiveReplayStep(Math.min(completedStepIndex + 1, recordedSteps.length - 1));
       });
       setSnapshot(next);
       observeSnapshot(next);
@@ -614,10 +625,11 @@ export function FlowExplorer({
     } finally {
       setReplaying(false);
       setReplayKind(undefined);
+      setActiveReplayStep(undefined);
     }
   }
 
-  async function replayOneStep(step: FlowStep) {
+  async function replayOneStep(step: FlowStep, stepIndex: number) {
     if (!selectedDevice || activeJobRunning || replaying) return;
     const promptReference = step.action === "input_text" && typeof step.value !== "string" && "promptRef" in step.value ? step.value.promptRef : undefined;
     const runtimeInput = promptReference ? promptValues[promptReference] : undefined;
@@ -644,6 +656,7 @@ export function FlowExplorer({
       executionPoint = { x: hitElement.bounds.x + hitElement.bounds.width / 2, y: hitElement.bounds.y + hitElement.bounds.height / 2 };
     }
     setReplayKind("step");
+    setActiveReplayStep(stepIndex);
     setReplaying(true);
     setEditorError("");
     try {
@@ -669,6 +682,7 @@ export function FlowExplorer({
     } finally {
       setReplaying(false);
       setReplayKind(undefined);
+      setActiveReplayStep(undefined);
     }
   }
 
@@ -965,10 +979,10 @@ export function FlowExplorer({
                 {flowView === "steps" && (recordedSteps.length > 0 ? (
                   <ol className="recorded-flow-list">
                     {recordedSteps.map((step, index) => (
-                      <li key={`${step.action}-${index}`}>
+                      <li ref={(node) => { replayStepRefs.current[index] = node; }} className={activeReplayStep === index ? "replay-active" : undefined} aria-current={activeReplayStep === index ? "step" : undefined} key={`${step.action}-${index}`}>
                         <span>{index + 1}</span>
                         <div><b>{flowStepName(step)} <small>{stepSection(index, measurementStart, teardownStart)}</small></b><code>{flowStepDetail(step)}</code></div>
-                        <div className="recorded-step-actions"><button title={step.action === "reset_app_state" ? "清除应用数据属于破坏性操作，只能通过整体回放执行" : "逐步回放"} disabled={replaying || step.action === "reset_app_state"} onClick={() => void replayOneStep(step)}><Play size={12} /></button><button title="上移" onClick={() => moveRecordedStep(index, -1)}><ArrowUp size={12} /></button><button title="下移" onClick={() => moveRecordedStep(index, 1)}><ArrowDown size={12} /></button><button title="删除" onClick={() => removeRecordedStep(index)}><Trash2 size={12} /></button></div>
+                        <div className="recorded-step-actions"><button title={step.action === "reset_app_state" ? "清除应用数据属于破坏性操作，只能通过整体回放执行" : "逐步回放"} disabled={replaying || step.action === "reset_app_state"} onClick={() => void replayOneStep(step, index)}><Play size={12} /></button><button title="上移" onClick={() => moveRecordedStep(index, -1)}><ArrowUp size={12} /></button><button title="下移" onClick={() => moveRecordedStep(index, 1)}><ArrowDown size={12} /></button><button title="删除" onClick={() => removeRecordedStep(index)}><Trash2 size={12} /></button></div>
                       </li>
                     ))}
                   </ol>

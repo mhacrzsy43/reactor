@@ -38,13 +38,14 @@ use reactor_runner::{
     capture_ios_trial_failure, capture_ios_ui_tree, delete_all_flow_secrets, delete_flow_secret,
     discover_android_devices, discover_ios_simulators, doctor, enqueue_android, enqueue_demo,
     enqueue_ios, execute_android_job, execute_demo_job, execute_explorer_step, execute_ios_job,
-    has_flow_secret, recover_orphaned_jobs, replay_explorer_flow, save_flow_secret, trial_android,
-    trial_ios_simulator,
+    has_flow_secret, recover_orphaned_jobs, replay_explorer_flow_with_progress, save_flow_secret,
+    trial_android, trial_ios_simulator,
 };
 use reactor_store::{Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
 use serde::{Deserialize, Serialize};
 use tauri::Manager as _;
+use tauri::ipc::Channel;
 use zeroize::Zeroizing;
 
 mod updater;
@@ -136,6 +137,12 @@ struct ReplayExplorerFlowInput {
     flow: Flow,
     #[serde(default)]
     prompt_values: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayProgress {
+    completed_step_index: usize,
 }
 
 const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
@@ -1299,6 +1306,7 @@ async fn perform_explorer_step(
 #[tauri::command]
 async fn replay_recorded_flow(
     input: ReplayExplorerFlowInput,
+    on_progress: Channel<ReplayProgress>,
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
@@ -1307,15 +1315,27 @@ async fn replay_recorded_flow(
         .into_iter()
         .map(|(reference, value)| (reference, Zeroizing::new(value)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    replay_explorer_flow(
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress_forwarder = tokio::spawn(async move {
+        while let Some(completed_step_index) = progress_rx.recv().await {
+            let _ = on_progress.send(ReplayProgress {
+                completed_step_index,
+            });
+        }
+    });
+    let replay_result = replay_explorer_flow_with_progress(
         &root,
         input.platform,
         &input.device_id,
         &input.flow,
         (!prompt_values.is_empty()).then_some(prompt_values),
+        Some(progress_tx),
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await;
+    progress_forwarder
+        .await
+        .map_err(|error| error.to_string())?;
+    replay_result.map_err(|error| error.to_string())?;
     capture_device_inspector_for(CaptureDeviceInspectorInput {
         platform: input.platform,
         device_id: input.device_id,

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   Bootstrap,
   AnalysisExplanation,
@@ -198,9 +198,11 @@ export async function replayRecordedFlow(input: {
   deviceId: string;
   flow: Flow;
   promptValues?: Record<string, string>;
-}): Promise<DeviceInspectorSnapshot> {
+}, onProgress?: (completedStepIndex: number) => void): Promise<DeviceInspectorSnapshot> {
   if (!inTauri) throw new Error("完整 Flow 回放请在 Reactor 桌面应用中使用");
-  return invoke("replay_recorded_flow", { input });
+  const channel = new Channel<{ completedStepIndex: number }>();
+  channel.onmessage = (message) => onProgress?.(message.completedStepIndex);
+  return invoke("replay_recorded_flow", { input, onProgress: channel });
 }
 
 export async function saveFlowSecret(reference: string, value: string): Promise<{ reference: string; stored: boolean }> {

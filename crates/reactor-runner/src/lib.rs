@@ -25,7 +25,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha1::Sha1;
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt, process::Command};
+use tokio::{
+    fs,
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::Command,
+};
 use walkdir::WalkDir;
 use zeroize::Zeroizing;
 
@@ -1100,6 +1104,25 @@ pub async fn replay_explorer_flow(
     flow: &Flow,
     prompt_values: Option<BTreeMap<String, Zeroizing<String>>>,
 ) -> Result<(), RunnerError> {
+    replay_explorer_flow_with_progress(workspace, platform, device_id, flow, prompt_values, None)
+        .await
+}
+
+/// Replays an Explorer Flow and reports the zero-based command currently printed by Maestro.
+/// Progress is observational only and does not alter the single-process replay semantics.
+///
+/// # Errors
+///
+/// Returns an error when validation, input resolution, managed tool lookup, or Maestro execution
+/// fails.
+pub async fn replay_explorer_flow_with_progress(
+    workspace: &Path,
+    platform: reactor_protocol::Platform,
+    device_id: &str,
+    flow: &Flow,
+    prompt_values: Option<BTreeMap<String, Zeroizing<String>>>,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
+) -> Result<(), RunnerError> {
     let compiled = compile_maestro(flow)?;
     let input_environment =
         resolve_input_environment(&compiled.input_bindings, prompt_values.as_ref())?;
@@ -1126,23 +1149,25 @@ pub async fn replay_explorer_flow(
     let result = match platform {
         reactor_protocol::Platform::Android => {
             let adb = tools.adb.ok_or(RunnerError::MissingTool("adb"))?;
-            run_maestro_paths_with_inputs(
+            run_maestro_paths_with_inputs_progress(
                 &maestro,
                 &java,
                 &adb,
                 &paths,
                 Some(device_id),
                 &input_environment,
+                progress,
             )
             .await
         }
         reactor_protocol::Platform::Ios => {
-            run_maestro_ios_paths_with_inputs(
+            run_maestro_ios_paths_with_inputs_progress(
                 &maestro,
                 &java,
                 &paths,
                 device_id,
                 &input_environment,
+                progress,
             )
             .await
         }
@@ -3300,6 +3325,27 @@ async fn run_maestro_paths_with_inputs(
     device_id: Option<&str>,
     input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
+    run_maestro_paths_with_inputs_progress(
+        maestro,
+        java,
+        adb,
+        flows,
+        device_id,
+        input_environment,
+        None,
+    )
+    .await
+}
+
+async fn run_maestro_paths_with_inputs_progress(
+    maestro: &Path,
+    java: &Path,
+    adb: &Path,
+    flows: &[PathBuf],
+    device_id: Option<&str>,
+    input_environment: &[(String, Zeroizing<String>)],
+    progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
+) -> Result<(), RunnerError> {
     let mut command = Command::new(maestro);
     command.arg("test").args(flows).arg("--no-ansi");
     if let Some(device_id) = device_id {
@@ -3307,13 +3353,7 @@ async fn run_maestro_paths_with_inputs(
     }
     configure_environment(&mut command, java, adb, device_id);
     apply_input_environment(&mut command, input_environment);
-    run_command_with_timeout_redacted(
-        command,
-        "maestro",
-        Duration::from_secs(120),
-        input_environment,
-    )
-    .await
+    run_maestro_command_with_progress(command, "maestro", input_environment, progress).await
 }
 
 async fn run_maestro_ios_with_inputs(
@@ -3334,6 +3374,25 @@ async fn run_maestro_ios_paths_with_inputs(
     simulator_id: &str,
     input_environment: &[(String, Zeroizing<String>)],
 ) -> Result<(), RunnerError> {
+    run_maestro_ios_paths_with_inputs_progress(
+        maestro,
+        java,
+        flows,
+        simulator_id,
+        input_environment,
+        None,
+    )
+    .await
+}
+
+async fn run_maestro_ios_paths_with_inputs_progress(
+    maestro: &Path,
+    java: &Path,
+    flows: &[PathBuf],
+    simulator_id: &str,
+    input_environment: &[(String, Zeroizing<String>)],
+    progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
+) -> Result<(), RunnerError> {
     let mut command = Command::new(maestro);
     command
         .arg("test")
@@ -3341,13 +3400,111 @@ async fn run_maestro_ios_paths_with_inputs(
         .args(["--no-ansi", "--udid", simulator_id]);
     configure_java_environment(&mut command, java);
     apply_input_environment(&mut command, input_environment);
-    run_command_with_timeout_redacted(
+    run_maestro_command_with_progress(
         command,
         "maestro-ios-simulator",
-        Duration::from_secs(120),
         input_environment,
+        progress,
     )
     .await
+}
+
+async fn run_maestro_command_with_progress(
+    mut command: Command,
+    label: &str,
+    input_environment: &[(String, Zeroizing<String>)],
+    progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
+) -> Result<(), RunnerError> {
+    #[cfg(unix)]
+    command.as_std_mut().process_group(0);
+    command
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let child_id = child.id();
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunnerError::CommandFailed {
+            command: label.to_owned(),
+            output: "Maestro stdout unavailable".to_owned(),
+        })?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| RunnerError::CommandFailed {
+            command: label.to_owned(),
+            output: "Maestro stderr unavailable".to_owned(),
+        })?;
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(&mut stdout);
+        let mut bytes = Vec::new();
+        let mut line = Vec::new();
+        let mut completed = 0;
+        loop {
+            line.clear();
+            let count = reader.read_until(b'\n', &mut line).await?;
+            if count == 0 {
+                break;
+            }
+            if line.windows(13).any(|window| window == b"... COMPLETED")
+                || line.windows(10).any(|window| window == b"... FAILED")
+            {
+                if let Some(sender) = &progress {
+                    let _ = sender.send(completed);
+                }
+                completed += 1;
+            }
+            bytes.extend_from_slice(&line);
+        }
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let status =
+        if let Ok(status) = tokio::time::timeout(Duration::from_secs(120), child.wait()).await {
+            status?
+        } else {
+            if let Some(child_id) = child_id {
+                terminate_worker_group(child_id);
+            }
+            return Err(RunnerError::CommandFailed {
+                command: label.to_owned(),
+                output: "timed out after 120 seconds".to_owned(),
+            });
+        };
+    let stdout = stdout_task
+        .await
+        .map_err(|error| RunnerError::CommandFailed {
+            command: label.to_owned(),
+            output: error.to_string(),
+        })??;
+    let stderr = stderr_task
+        .await
+        .map_err(|error| RunnerError::CommandFailed {
+            command: label.to_owned(),
+            output: error.to_string(),
+        })??;
+    if status.success() {
+        return Ok(());
+    }
+    let mut captured = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    for (_, value) in input_environment {
+        if !value.is_empty() {
+            captured = captured.replace(value.as_str(), "[REDACTED_INPUT]");
+        }
+    }
+    Err(RunnerError::CommandFailed {
+        command: label.to_owned(),
+        output: captured,
+    })
 }
 
 fn apply_input_environment(
