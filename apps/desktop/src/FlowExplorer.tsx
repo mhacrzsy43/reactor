@@ -178,16 +178,25 @@ export function FlowExplorer({
     };
   }, [appId, goal, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
 
+  const draftReplayFlow = useMemo<Flow>(() => {
+    const replay = { ...explorerFlow, intent: undefined };
+    if (replay.measured.length > 0 || recordedSteps.length === 0) return replay;
+    return {
+      ...replay,
+      setup: recordedSteps.slice(0, -1),
+      measured: recordedSteps.slice(-1),
+      teardown: [],
+    };
+  }, [explorerFlow, recordedSteps]);
+
   const promptReferences = useMemo(() => collectPromptReferences(explorerFlow), [explorerFlow]);
   const missingReplayPrompt = promptReferences.find((reference) => !promptValues[reference]);
   const replayBlockedReason = activeJobRunning
     ? "性能任务运行期间不能操作设备"
     : jsonDirty
       ? "完整 Flow JSON 尚未应用，请先校验并应用或放弃编辑"
-      : explorerFlow.measured.length === 0
-        ? "请在“测量窗口”中指定至少一个 measured 步骤"
-        : !compiledFlow
-          ? "Flow 正在校验，或尚未通过 Rust 校验"
+      : recordedSteps.length === 0
+        ? "请先录制至少一个步骤"
           : missingReplayPrompt
             ? `请先填写本次回放输入：${missingReplayPrompt}`
             : undefined;
@@ -207,7 +216,7 @@ export function FlowExplorer({
     }).catch((reason) => {
       if (!cancelled) {
         setCompiledFlow(undefined);
-        setEditorError(`Flow 校验失败：${String(reason)}`);
+        setEditorError(`性能锁定校验未通过：${String(reason)}。你仍可使用“整体回放（草稿）”验证动作。`);
       }
     });
     return () => { cancelled = true; };
@@ -535,7 +544,7 @@ export function FlowExplorer({
   }
 
   async function replayWholeFlow() {
-    if (!selectedDevice || !compiledFlow) return;
+    if (!selectedDevice || recordedSteps.length === 0) return;
     const missingPrompt = promptReferences.find((reference) => !promptValues[reference]);
     if (missingPrompt) {
       setEditorError(`整体回放前请输入本次验证码：${missingPrompt}`);
@@ -546,10 +555,11 @@ export function FlowExplorer({
     setLive(false);
     setEditorError("");
     try {
+      await compileFlowPreview(draftReplayFlow);
       const next = await replayRecordedFlow({
-        platform: explorerFlow.platform,
+        platform: draftReplayFlow.platform,
         deviceId: selectedDevice.id,
-        flow: explorerFlow,
+        flow: draftReplayFlow,
         promptValues,
       });
       setSnapshot(next);
@@ -704,10 +714,16 @@ export function FlowExplorer({
         ? { ...candidate.selector, enabled: element.enabled }
         : candidate.selector;
     const step: FlowStep = { action: "assert_visible", target };
-    const insertAt = measurementStart ?? teardownStart;
+    let lastNavigationIndex = -1;
+    recordedSteps.forEach((candidate, index) => {
+      if (candidate.action === "tap" || candidate.action === "input_text") lastNavigationIndex = index;
+    });
+    const insertAt = lastNavigationIndex + 1;
     rememberEditorState();
     setRecordedSteps((steps) => [...steps.slice(0, insertAt), step, ...steps.slice(insertAt)]);
-    if (measurementStart !== undefined) setMeasurementStart(measurementStart + 1);
+    if (measurementStart !== undefined) {
+      setMeasurementStart(measurementStart <= insertAt ? insertAt + 1 : measurementStart + 1);
+    }
     const nextTeardownStart = teardownStart + 1;
     teardownStartRef.current = nextTeardownStart;
     setTeardownStart(nextTeardownStart);
@@ -914,7 +930,7 @@ export function FlowExplorer({
                 {promptReferences.length > 0 && <div className="replay-prompts"><b>本次回放输入（不写入 Flow）</b>{promptReferences.map((reference) => <label key={reference}><span>{reference}</span><input type="password" autoComplete="off" value={promptValues[reference] ?? ""} onChange={(event) => setPromptValues((values) => ({ ...values, [reference]: event.target.value }))} /></label>)}</div>}
                 {editorError && <div ref={editorErrorRef} className="flow-editor-error">{editorError}</div>}
                 {!editorError && replayBlockedReason && <div className="flow-editor-error">整体回放暂不可用：{replayBlockedReason}</div>}
-                <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? "整体回放中" : "整体回放"}</button></div>
+                <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? "整体回放中" : "整体回放（草稿）"}</button></div>
               </section>
             )}
             <section className="state-graph-panel" aria-label="AI 状态图探索">
@@ -936,7 +952,22 @@ export function FlowExplorer({
               </div>
               <p className="state-graph-privacy">请在目标页点选一个只属于该页面的稳定文本或语义 ID。坐标不能证明目标页，整体回放成功也不能替代唯一性证明。</p>
               <label className="assertion-mode"><span>断言类型</span><select value={assertionMode} disabled={Boolean(targetAssertion)} onChange={(event) => setAssertionMode(event.target.value as typeof assertionMode)}><option value="visible">元素可见</option><option value="text">文本完全匹配</option><option value="enabled">启用状态与当前一致</option></select></label>
-              <button className="secondary-button state-suggest-button" disabled={!selectedElement || Boolean(targetAssertion) || !selectedElement.candidates.some((candidate) => isStableSelector(candidate.selector))} onClick={() => selectedElement && addTargetPageAssertion(selectedElement)}><Crosshair size={14} />{targetAssertion ? "目标页断言已加入 Flow" : selectedElement ? `把“${elementName(selectedElement)}”设为目标页断言` : "先在镜像中点选目标页标记"}</button>
+              <button
+                className="secondary-button state-suggest-button"
+                disabled={Boolean(targetAssertion) || gateBusy || activeJobRunning}
+                onClick={() => {
+                  if (!selectedElement) {
+                    setGateError("请先把设备导航到目标页，再在左侧镜像中点击一个只属于该页的稳定文本或语义 ID；例如列表页的“List ready”。");
+                    mirrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                    return;
+                  }
+                  if (!selectedElement.candidates.some((candidate) => isStableSelector(candidate.selector))) {
+                    setGateError("当前选中元素只有坐标定位，不能证明目标页；请选择页面标题、完成标记或带语义 ID 的元素。");
+                    return;
+                  }
+                  addTargetPageAssertion(selectedElement);
+                }}
+              ><Crosshair size={14} />{targetAssertion ? "目标页断言已加入 Flow" : selectedElement ? `把“${elementName(selectedElement)}”设为目标页断言` : "选择目标页标记"}</button>
               {gatePreparation?.goalEvidence && <div className={`goal-proof ${gatePreparation.goalEvidence.verified ? "verified" : "failed"}`}><b>{gatePreparation.goalEvidence.verified ? "目标页唯一性证明通过" : "目标页唯一性证明失败"}</b><span>“{gatePreparation.goalEvidence.marker}” · 起始页 {gatePreparation.goalEvidence.sourceContainsMarker ? "存在" : "不存在"} · 目标页 {gatePreparation.goalEvidence.destinationContainsMarker ? "存在" : "不存在"}</span><small>{gatePreparation.goalEvidence.sourceElements} → {gatePreparation.goalEvidence.destinationElements} elements</small></div>}
               {gateError && <div className="flow-editor-error">{gateError}</div>}
               {gateLock ? <><div className="explorer-lock"><LockKeyhole size={15} /><div><b>Flow 已锁定</b><code>{gateLock.flowHash}</code></div></div><button className="primary-button state-suggest-button" onClick={() => compiledFlow && onPerformanceHandoff(gateLock, gatePreparation!, compiledFlow)}><ArrowRight size={14} />交给正式性能测试</button></> : <button className="primary-button state-suggest-button" disabled={gateBusy || !compiledFlow || !sourceContext || !targetAssertion || activeJobRunning} onClick={() => void validateLockAndProveTarget()}>{gateBusy ? <RefreshCw size={14} className="spin" /> : <LockKeyhole size={14} />}{gateBusy ? "整体 Maestro 回放与证明中" : "整体回放、证明并锁定"}</button>}
