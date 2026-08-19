@@ -2023,7 +2023,10 @@ financial, account-removal, logout, permission-grant, or other sensitive actions
 cannot be represented safely with Reactor Flow v1, return the original Flow unchanged. When trial
 failure evidence is supplied, repair the concrete failing step using only selectors present in the
 redacted UI tree. Selector text is case-sensitive and language-sensitive: copy an exact observed
-value and never translate it from the user's instruction. A missing promptRef runtime value is not a Flow defect: preserve the promptRef so
+value and never translate it from the user's instruction. When a failed wait/assert selector is
+absent from the observed selector inventory, replace only that failing step's target with the
+closest exact observed value for the same control; do not delete, insert, or reorder other steps,
+and do not modify selectors for pages that have not been observed yet. A missing promptRef runtime value is not a Flow defect: preserve the promptRef so
 Reactor can request its one-time value before replay.";
 
 const ANALYSIS_SYSTEM_PROMPT: &str = r"You explain an immutable Reactor performance report as JSON only.
