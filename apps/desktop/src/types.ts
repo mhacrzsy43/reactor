@@ -242,6 +242,38 @@ export interface AndroidNativeMetrics {
   memoryPssMb?: number;
   thermalStatusBefore?: number;
   thermalStatusAfter?: number;
+  memoryLeak?: AndroidMemoryLeakReport;
+  warnings: string[];
+}
+
+export interface AndroidMemoryCheckpoint {
+  kind: "cycle" | "cooldown" | string;
+  cycle: number;
+  elapsedMs: number;
+  cpuPct?: number;
+  pssMb?: number;
+  rssMb?: number;
+  javaHeapMb?: number;
+  nativeHeapMb?: number;
+}
+
+export interface AndroidMemoryLeakReport {
+  schemaVersion: number;
+  definitionsVersion: string;
+  collector: string;
+  cycles: number;
+  checkpointEvery: number;
+  warmupCycles: number;
+  stabilizationMs: number;
+  cooldownMs: number;
+  slopeMbPerCycle?: number;
+  endDeltaMb?: number;
+  monotonicGrowthPct?: number;
+  cooldownRecoveryMb?: number;
+  thresholdMbPerCycle: number;
+  verdict: "stable" | "suspected_leak" | "insufficient_evidence" | string;
+  confidence: "low" | "medium" | "high" | string;
+  checkpoints: AndroidMemoryCheckpoint[];
   warnings: string[];
 }
 

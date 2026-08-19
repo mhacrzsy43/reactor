@@ -32,14 +32,14 @@ use reactor_protocol::{
     canonical_flow_hash, navigation_destination_marker, requires_navigation_intent,
 };
 use reactor_runner::{
-    AndroidRunRequest, DiscoveredDevice, DoctorReport, IosRunRequest, TrialFailureEvidence,
-    capture_android_current_ui_tree, capture_android_screenshot, capture_android_trial_failure,
-    capture_android_ui_tree, capture_ios_current_ui_tree, capture_ios_screenshot,
-    capture_ios_trial_failure, capture_ios_ui_tree, delete_all_flow_secrets, delete_flow_secret,
-    discover_android_devices, discover_ios_simulators, doctor, enqueue_android, enqueue_demo,
-    enqueue_ios, execute_android_job, execute_demo_job, execute_explorer_step, execute_ios_job,
-    has_flow_secret, recover_orphaned_jobs, replay_explorer_flow_with_progress, save_flow_secret,
-    trial_android, trial_ios_simulator,
+    AndroidLeakTestPlan, AndroidRunRequest, DiscoveredDevice, DoctorReport, IosRunRequest,
+    TrialFailureEvidence, capture_android_current_ui_tree, capture_android_screenshot,
+    capture_android_trial_failure, capture_android_ui_tree, capture_ios_current_ui_tree,
+    capture_ios_screenshot, capture_ios_trial_failure, capture_ios_ui_tree,
+    delete_all_flow_secrets, delete_flow_secret, discover_android_devices, discover_ios_simulators,
+    doctor, enqueue_android, enqueue_demo, enqueue_ios, execute_android_job, execute_demo_job,
+    execute_explorer_step, execute_ios_job, has_flow_secret, recover_orphaned_jobs,
+    replay_explorer_flow_with_progress, save_flow_secret, trial_android, trial_ios_simulator,
 };
 use reactor_store::{Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
@@ -518,6 +518,7 @@ struct RealRunInput {
     device_id: String,
     duration_ms: u64,
     iterations: u32,
+    leak_test: Option<AndroidLeakTestPlan>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2297,6 +2298,7 @@ fn start_android(input: RealRunInput) -> Result<StartedJob, String> {
         device_id: input.device_id,
         duration_ms: input.duration_ms,
         iteration_count: input.iterations,
+        leak_test: input.leak_test,
     };
     let job = enqueue_android(&request).map_err(|error| error.to_string())?;
     let worker_workspace = request.workspace.clone();

@@ -158,6 +158,33 @@ pub fn render_html_report(title: &str, results: &[NormalizedResult]) -> String {
                 escape(&native.trace_processor_version),
             )
             .expect("writing to String cannot fail");
+            if let Some(leak) = &native.memory_leak {
+                let verdict = match leak.verdict.as_str() {
+                    "suspected_leak" => "疑似泄漏",
+                    "stable" => "趋势稳定",
+                    _ => "证据不足",
+                };
+                write!(
+                    html,
+                    "<div class=\"native leak\"><h3>同进程循环内存 · {}</h3><dl>\
+                     <div><dt>行为循环</dt><dd>{} 轮</dd></div>\
+                     <div><dt>PSS 增长斜率</dt><dd>{}</dd></div>\
+                     <div><dt>首尾差</dt><dd>{}</dd></div>\
+                     <div><dt>单调增长</dt><dd>{}</dd></div>\
+                     <div><dt>冷却回落</dt><dd>{}</dd></div>\
+                     <div><dt>置信度</dt><dd>{}</dd></div></dl>\
+                     <p>进程趋势只允许标记疑似泄漏；确认泄漏需要堆对象保留证据。 · {}</p></div>",
+                    verdict,
+                    leak.cycles,
+                    number(leak.slope_mb_per_cycle, " MB/轮"),
+                    number(leak.end_delta_mb, " MB"),
+                    number(leak.monotonic_growth_pct, "%"),
+                    number(leak.cooldown_recovery_mb, " MB"),
+                    escape(&leak.confidence),
+                    escape(&leak.definitions_version),
+                )
+                .expect("writing to String cannot fail");
+            }
         }
         if let Some(native) = ios {
             write!(
@@ -331,6 +358,7 @@ mod tests {
                 memory_pss_mb: Some(51.7),
                 thermal_status_before: Some(0),
                 thermal_status_after: Some(1),
+                memory_leak: None,
                 warnings: vec![],
             }),
             ..result.clone()

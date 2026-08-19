@@ -11,6 +11,7 @@ pub use flow::{
     requires_navigation_intent, validate_flow,
 };
 pub use result::{
-    AndroidNativeMetrics, DeviceMetadata, IosMetricAvailability, IosNativeMetrics,
-    IterationMetrics, MetricSummary, NormalizedResult, ResultSource,
+    AndroidMemoryCheckpoint, AndroidMemoryLeakReport, AndroidNativeMetrics, DeviceMetadata,
+    IosMetricAvailability, IosNativeMetrics, IterationMetrics, MetricSummary, NormalizedResult,
+    ResultSource,
 };

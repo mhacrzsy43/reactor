@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use reactor_protocol::FlowLock;
 use reactor_runner::{
-    AndroidRunRequest, IosRunRequest, doctor, run_android, run_demo_suite, run_ios,
+    AndroidLeakTestPlan, AndroidRunRequest, IosRunRequest, doctor, run_android, run_demo_suite,
+    run_ios,
 };
 
 #[derive(Debug, Parser)]
@@ -32,6 +33,8 @@ enum Command {
         duration_ms: u64,
         #[arg(long, default_value_t = 10)]
         iterations: u32,
+        #[arg(long)]
+        leak_cycles: Option<u32>,
     },
     Ios {
         workspace: PathBuf,
@@ -66,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             device,
             duration_ms,
             iterations,
+            leak_cycles,
         } => {
             let output = run_android(&AndroidRunRequest {
                 workspace,
@@ -75,6 +79,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 device_id: device,
                 duration_ms,
                 iteration_count: iterations,
+                leak_test: leak_cycles.map(|cycles| AndroidLeakTestPlan {
+                    cycles,
+                    checkpoint_every: 2,
+                    warmup_cycles: 2,
+                    stabilization_ms: 750,
+                    cooldown_ms: 5_000,
+                    threshold_mb_per_cycle: 0.25,
+                }),
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&output)?);

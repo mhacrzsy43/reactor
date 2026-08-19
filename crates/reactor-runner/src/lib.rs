@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -15,9 +15,10 @@ use reactor_core::{
     render_html_report,
 };
 use reactor_protocol::{
-    AndroidNativeMetrics, Coordinate, DeviceMetadata, Flow, FlowLock, FlowTrialEvidence,
-    FlowValidationError, InputValue, IosMetricAvailability, IosNativeMetrics, IterationMetrics,
-    NormalizedResult, ResultSource, Step, SwipeDirection, TrialMode, canonical_flow_hash,
+    AndroidMemoryCheckpoint, AndroidMemoryLeakReport, AndroidNativeMetrics, Coordinate,
+    DeviceMetadata, Flow, FlowLock, FlowTrialEvidence, FlowValidationError, InputValue,
+    IosMetricAvailability, IosNativeMetrics, IterationMetrics, NormalizedResult, ResultSource,
+    Step, SwipeDirection, TrialMode, canonical_flow_hash,
 };
 use reactor_store::{ArtifactIssue, Job, JobEvent, JobState, Store};
 use regex::Regex;
@@ -95,6 +96,19 @@ pub struct AndroidRunRequest {
     pub device_id: String,
     pub duration_ms: u64,
     pub iteration_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leak_test: Option<AndroidLeakTestPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidLeakTestPlan {
+    pub cycles: u32,
+    pub checkpoint_every: u32,
+    pub warmup_cycles: u32,
+    pub stabilization_ms: u64,
+    pub cooldown_ms: u64,
+    pub threshold_mb_per_cycle: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +168,8 @@ pub enum RunnerError {
     InvalidTotpSecret { path: String },
     #[error("Flow secret store is unavailable: {0}")]
     SecretStore(String),
+    #[error("invalid Android leak test plan: {0}")]
+    InvalidLeakTestPlan(String),
 }
 
 const FLOW_SECRET_SERVICE: &str = "com.reactor.performance.flow-secret";
@@ -2054,6 +2070,359 @@ async fn sample_android_memory_pss(
     Ok(parse_memory_pss_mb(&output))
 }
 
+async fn sample_android_memory_checkpoint(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+    kind: &str,
+    cycle: u32,
+    started_at: Instant,
+) -> Result<AndroidMemoryCheckpoint, RunnerError> {
+    let output =
+        android_shell_text(adb, device_id, &["dumpsys", "meminfo", app_id], "meminfo").await?;
+    let mut checkpoint = parse_memory_checkpoint(
+        &output,
+        kind,
+        cycle,
+        u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+    );
+    checkpoint.cpu_pct = sample_android_cpu_pct(adb, device_id, app_id)
+        .await
+        .ok()
+        .flatten();
+    Ok(checkpoint)
+}
+
+async fn sample_android_cpu_pct(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+) -> Result<Option<f64>, RunnerError> {
+    let output = android_shell_text(adb, device_id, &["dumpsys", "cpuinfo"], "cpuinfo").await?;
+    Ok(parse_android_cpu_pct(&output, app_id))
+}
+
+fn parse_android_cpu_pct(output: &str, app_id: &str) -> Option<f64> {
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        (trimmed.contains(app_id))
+            .then(|| trimmed.split_whitespace().next())
+            .flatten()
+            .and_then(|value| value.strip_suffix('%'))
+            .and_then(|value| value.parse::<f64>().ok())
+    })
+}
+
+fn parse_memory_checkpoint(
+    output: &str,
+    kind: &str,
+    cycle: u32,
+    elapsed_ms: u64,
+) -> AndroidMemoryCheckpoint {
+    let summary_kb = |label: &str| {
+        output.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix(label)
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+    };
+    let proportional_kb = summary_kb("TOTAL PSS:");
+    let resident_kb = output.lines().find_map(|line| {
+        line.split_once("TOTAL RSS:")
+            .and_then(|(_, value)| value.split_whitespace().next())
+            .and_then(|value| value.parse::<f64>().ok())
+    });
+    AndroidMemoryCheckpoint {
+        kind: kind.to_owned(),
+        cycle,
+        elapsed_ms,
+        cpu_pct: None,
+        pss_mb: proportional_kb.map(|value| value / 1024.0),
+        rss_mb: resident_kb.map(|value| value / 1024.0),
+        java_heap_mb: summary_kb("Java Heap:").map(|value| value / 1024.0),
+        native_heap_mb: summary_kb("Native Heap:").map(|value| value / 1024.0),
+    }
+}
+
+fn validate_leak_test_plan(plan: &AndroidLeakTestPlan) -> Result<(), RunnerError> {
+    if !(3..=500).contains(&plan.cycles) {
+        return Err(RunnerError::InvalidLeakTestPlan(
+            "cycles must be between 3 and 500".to_owned(),
+        ));
+    }
+    if plan.checkpoint_every == 0 || plan.checkpoint_every > plan.cycles {
+        return Err(RunnerError::InvalidLeakTestPlan(
+            "checkpointEvery must be between 1 and cycles".to_owned(),
+        ));
+    }
+    if plan.warmup_cycles >= plan.cycles {
+        return Err(RunnerError::InvalidLeakTestPlan(
+            "warmupCycles must be lower than cycles".to_owned(),
+        ));
+    }
+    if plan.stabilization_ms > 60_000 || plan.cooldown_ms > 300_000 {
+        return Err(RunnerError::InvalidLeakTestPlan(
+            "stabilization/cooldown exceeds the bounded limit".to_owned(),
+        ));
+    }
+    if !plan.threshold_mb_per_cycle.is_finite() || plan.threshold_mb_per_cycle <= 0.0 {
+        return Err(RunnerError::InvalidLeakTestPlan(
+            "thresholdMbPerCycle must be a positive finite number".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn linear_slope(points: &[(f64, f64)]) -> Option<f64> {
+    if points.len() < 2 {
+        return None;
+    }
+    let count = points.len() as f64;
+    let mean_x = points.iter().map(|(x, _)| x).sum::<f64>() / count;
+    let mean_y = points.iter().map(|(_, y)| y).sum::<f64>() / count;
+    let denominator = points
+        .iter()
+        .map(|(x, _)| (x - mean_x).powi(2))
+        .sum::<f64>();
+    (denominator > f64::EPSILON).then(|| {
+        points
+            .iter()
+            .map(|(x, y)| (x - mean_x) * (y - mean_y))
+            .sum::<f64>()
+            / denominator
+    })
+}
+
+fn analyze_memory_leak(
+    plan: &AndroidLeakTestPlan,
+    checkpoints: Vec<AndroidMemoryCheckpoint>,
+) -> AndroidMemoryLeakReport {
+    let cycle_points = checkpoints
+        .iter()
+        .filter(|point| point.kind == "cycle" && point.cycle > plan.warmup_cycles)
+        .filter_map(|point| point.pss_mb.map(|pss| (f64::from(point.cycle), pss)))
+        .collect::<Vec<_>>();
+    let slope_mb_per_cycle = linear_slope(&cycle_points);
+    let end_delta_mb = cycle_points
+        .first()
+        .zip(cycle_points.last())
+        .map(|(first, last)| last.1 - first.1);
+    let monotonic_growth_pct = (cycle_points.len() > 1).then(|| {
+        let growing = cycle_points
+            .windows(2)
+            .filter(|pair| pair[1].1 >= pair[0].1)
+            .count();
+        growing as f64 / (cycle_points.len() - 1) as f64 * 100.0
+    });
+    let last_cycle_pss = checkpoints
+        .iter()
+        .rev()
+        .find(|point| point.kind == "cycle")
+        .and_then(|point| point.pss_mb);
+    let cooldown_pss = checkpoints
+        .iter()
+        .rev()
+        .find(|point| point.kind == "cooldown")
+        .and_then(|point| point.pss_mb);
+    let cooldown_recovery_mb = last_cycle_pss
+        .zip(cooldown_pss)
+        .map(|(before, after)| before - after);
+    let enough_points = cycle_points.len() >= 3;
+    let sustained = slope_mb_per_cycle.is_some_and(|slope| slope >= plan.threshold_mb_per_cycle)
+        && monotonic_growth_pct.is_some_and(|growth| growth >= 60.0)
+        && end_delta_mb.is_some_and(|delta| {
+            delta
+                >= plan.threshold_mb_per_cycle
+                    * f64::from(plan.cycles.saturating_sub(plan.warmup_cycles))
+                    * 0.5
+        });
+    let verdict = if !enough_points {
+        "insufficient_evidence"
+    } else if sustained {
+        "suspected_leak"
+    } else {
+        "stable"
+    };
+    let confidence = if !enough_points {
+        "low"
+    } else if cycle_points.len() >= 6 && cooldown_recovery_mb.is_some() {
+        "high"
+    } else {
+        "medium"
+    };
+    let mut warnings =
+        vec!["进程内存趋势只能判定疑似泄漏；没有堆对象保留链时不得宣称确认泄漏。".to_owned()];
+    if checkpoints.iter().any(|point| point.pss_mb.is_none()) {
+        warnings.push("部分检查点缺少 TOTAL PSS，判定置信度可能降低。".to_owned());
+    }
+    AndroidMemoryLeakReport {
+        schema_version: 1,
+        definitions_version: "android-memory-leak-v1".to_owned(),
+        collector: "adb-dumpsys-meminfo-checkpoints-v1".to_owned(),
+        cycles: plan.cycles,
+        checkpoint_every: plan.checkpoint_every,
+        warmup_cycles: plan.warmup_cycles,
+        stabilization_ms: plan.stabilization_ms,
+        cooldown_ms: plan.cooldown_ms,
+        slope_mb_per_cycle,
+        end_delta_mb,
+        monotonic_growth_pct,
+        cooldown_recovery_mb,
+        threshold_mb_per_cycle: plan.threshold_mb_per_cycle,
+        verdict: verdict.to_owned(),
+        confidence: confidence.to_owned(),
+        checkpoints,
+        warnings,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_android_measured_cycle_with_progress(
+    workspace: &Path,
+    job_id: &str,
+    cycle: u32,
+    total_cycles: u32,
+    maestro: &Path,
+    java: &Path,
+    adb: &Path,
+    device_id: &str,
+    measured_path: &Path,
+    input_environment: &[(String, Zeroizing<String>)],
+) -> Result<(), RunnerError> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    let event_workspace = workspace.to_path_buf();
+    let event_job_id = job_id.to_owned();
+    let event_task = tokio::spawn(async move {
+        while let Some(command_index) = receiver.recv().await {
+            let command_number = command_index.saturating_add(1);
+            if let Ok(store) = open_store(&event_workspace) {
+                let _ = store.append_event(
+                    &event_job_id,
+                    JobState::Measuring,
+                    &format!("Flow 循环 {cycle}/{total_cycles} · 命令 {command_number} 已完成"),
+                    Some(&serde_json::json!({
+                        "kind": "flow_progress",
+                        "cycle": cycle,
+                        "totalCycles": total_cycles,
+                        "commandIndex": command_index,
+                        "commandNumber": command_number
+                    })),
+                );
+            }
+        }
+    });
+    let flows = [measured_path.to_path_buf()];
+    let result = run_maestro_paths_with_inputs_progress(
+        maestro,
+        java,
+        adb,
+        &flows,
+        Some(device_id),
+        input_environment,
+        Some(sender),
+    )
+    .await;
+    let _ = event_task.await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_android_memory_leak_test(
+    plan: &AndroidLeakTestPlan,
+    workspace: &Path,
+    job_id: &str,
+    maestro: &Path,
+    java: &Path,
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+    setup_path: Option<&Path>,
+    measured_path: &Path,
+    teardown_path: Option<&Path>,
+    input_environment: &[(String, Zeroizing<String>)],
+) -> Result<AndroidMemoryLeakReport, RunnerError> {
+    validate_leak_test_plan(plan)?;
+    if let Some(setup_path) = setup_path {
+        run_maestro_with_inputs(
+            maestro,
+            java,
+            adb,
+            setup_path,
+            Some(device_id),
+            input_environment,
+        )
+        .await?;
+    }
+    let started_at = Instant::now();
+    let mut checkpoints = Vec::new();
+    for cycle in 1..=plan.cycles {
+        run_android_measured_cycle_with_progress(
+            workspace,
+            job_id,
+            cycle,
+            plan.cycles,
+            maestro,
+            java,
+            adb,
+            device_id,
+            measured_path,
+            input_environment,
+        )
+        .await?;
+        if cycle % plan.checkpoint_every == 0 || cycle == plan.cycles {
+            tokio::time::sleep(Duration::from_millis(plan.stabilization_ms)).await;
+            let checkpoint = sample_android_memory_checkpoint(
+                adb, device_id, app_id, "cycle", cycle, started_at,
+            )
+            .await?;
+            open_store(workspace)?.append_event(
+                job_id,
+                JobState::Measuring,
+                &format!("内存循环 {cycle}/{}", plan.cycles),
+                Some(&serde_json::json!({
+                    "kind": "live_telemetry",
+                    "source": "memory_checkpoint",
+                    "cycle": cycle,
+                    "totalCycles": plan.cycles,
+                    "elapsedMs": checkpoint.elapsed_ms,
+                    "cpuPct": checkpoint.cpu_pct,
+                    "pssMb": checkpoint.pss_mb,
+                    "rssMb": checkpoint.rss_mb,
+                    "javaHeapMb": checkpoint.java_heap_mb,
+                    "nativeHeapMb": checkpoint.native_heap_mb,
+                    "officialMetric": false
+                })),
+            )?;
+            checkpoints.push(checkpoint);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(plan.cooldown_ms)).await;
+    checkpoints.push(
+        sample_android_memory_checkpoint(
+            adb,
+            device_id,
+            app_id,
+            "cooldown",
+            plan.cycles,
+            started_at,
+        )
+        .await?,
+    );
+    if let Some(teardown_path) = teardown_path {
+        run_maestro_with_inputs(
+            maestro,
+            java,
+            adb,
+            teardown_path,
+            Some(device_id),
+            input_environment,
+        )
+        .await?;
+    }
+    Ok(analyze_memory_leak(plan, checkpoints))
+}
+
 fn parse_memory_pss_mb(output: &str) -> Option<f64> {
     output.lines().find_map(|line| {
         line.trim()
@@ -2248,6 +2617,39 @@ async fn execute_android_job_inner(
     }
     perfetto_result?;
     register_artifact(&request.workspace, job_id, "flashlight_raw", &raw_path)?;
+    let memory_leak = if let Some(plan) = &request.leak_test {
+        open_store(&request.workspace)?.append_event(
+            job_id,
+            JobState::Measuring,
+            "同一进程循环 Flow 并采集内存检查点",
+            None,
+        )?;
+        let report = run_android_memory_leak_test(
+            plan,
+            &request.workspace,
+            job_id,
+            &maestro,
+            &java,
+            &adb,
+            &request.device_id,
+            &lock.flow.app_id,
+            (!lock.flow.setup.is_empty()).then_some(setup_path.as_path()),
+            &measured_path,
+            (!lock.flow.teardown.is_empty()).then_some(teardown_path.as_path()),
+            &input_environment,
+        )
+        .await?;
+        let path = artifact_dir.join("android-memory-leak.json");
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string_pretty(&report)?),
+        )
+        .await?;
+        register_artifact(&request.workspace, job_id, "android_memory_leak", &path)?;
+        Some(report)
+    } else {
+        None
+    };
     transition_job(
         &request.workspace,
         job_id,
@@ -2306,6 +2708,7 @@ async fn execute_android_job_inner(
         memory_pss_mb,
         thermal_status_before,
         thermal_status_after,
+        memory_leak,
         warnings: native_warnings,
     };
     let native_metrics_path = artifact_dir.join("android-native-metrics.json");
@@ -4096,6 +4499,74 @@ mod tests {
     }
 
     #[test]
+    fn parses_android_memory_checkpoint_breakdown() {
+        let checkpoint = parse_memory_checkpoint(
+            "Java Heap: 12288 0 0\nNative Heap: 24576 0 0\nTOTAL PSS: 65536 TOTAL RSS: 98304\n",
+            "cycle",
+            4,
+            1_250,
+        );
+        assert_eq!(checkpoint.kind, "cycle");
+        assert_eq!(checkpoint.cycle, 4);
+        assert_eq!(checkpoint.elapsed_ms, 1_250);
+        assert_eq!(checkpoint.pss_mb, Some(64.0));
+        assert_eq!(checkpoint.rss_mb, Some(96.0));
+        assert_eq!(checkpoint.java_heap_mb, Some(12.0));
+        assert_eq!(checkpoint.native_heap_mb, Some(24.0));
+        assert_eq!(
+            parse_android_cpu_pct(
+                "  3.7% 1234/com.reactor.bench.reactnative: 2.4% user + 1.3% kernel\n",
+                "com.reactor.bench.reactnative",
+            ),
+            Some(3.7)
+        );
+    }
+
+    #[test]
+    fn leak_analysis_distinguishes_sustained_growth_from_stable_memory() {
+        let plan = AndroidLeakTestPlan {
+            cycles: 10,
+            checkpoint_every: 2,
+            warmup_cycles: 2,
+            stabilization_ms: 0,
+            cooldown_ms: 0,
+            threshold_mb_per_cycle: 0.25,
+        };
+        let points = |values: &[f64]| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| AndroidMemoryCheckpoint {
+                    kind: "cycle".to_owned(),
+                    cycle: u32::try_from((index + 1) * 2).unwrap(),
+                    elapsed_ms: u64::try_from(index).unwrap() * 100,
+                    cpu_pct: None,
+                    pss_mb: Some(*value),
+                    rss_mb: None,
+                    java_heap_mb: None,
+                    native_heap_mb: None,
+                })
+                .chain(std::iter::once(AndroidMemoryCheckpoint {
+                    kind: "cooldown".to_owned(),
+                    cycle: 10,
+                    elapsed_ms: 600,
+                    cpu_pct: None,
+                    pss_mb: Some(*values.last().unwrap()),
+                    rss_mb: None,
+                    java_heap_mb: None,
+                    native_heap_mb: None,
+                }))
+                .collect::<Vec<_>>()
+        };
+        let leaking = analyze_memory_leak(&plan, points(&[50.0, 52.0, 54.0, 56.0, 58.0]));
+        assert_eq!(leaking.verdict, "suspected_leak");
+        assert!(leaking.slope_mb_per_cycle.is_some_and(|slope| slope > 0.9));
+
+        let stable = analyze_memory_leak(&plan, points(&[50.0, 50.2, 49.9, 50.1, 50.0]));
+        assert_eq!(stable.verdict, "stable");
+    }
+
+    #[test]
     fn inspector_screenshot_requires_a_bounded_png() {
         let valid = b"\x89PNG\r\n\x1a\nsmall".to_vec();
         assert_eq!(
@@ -4214,6 +4685,7 @@ mod tests {
             device_id: "emulator-5554".to_owned(),
             duration_ms: 18_000,
             iteration_count: 10,
+            leak_test: None,
         };
         assert_eq!(flashlight_timeout(&request), Duration::from_secs(900));
     }

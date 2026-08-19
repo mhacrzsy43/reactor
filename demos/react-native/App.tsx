@@ -15,7 +15,7 @@ import {
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
 
-type Screen = 'home' | 'list' | 'update' | 'animation';
+type Screen = 'home' | 'list' | 'update' | 'animation' | 'memory';
 type Palette = ReturnType<typeof paletteFor>;
 
 const DATA_SEED = 20260818;
@@ -24,6 +24,11 @@ const UPDATE_COUNT = 500;
 const UPDATE_TICKS = 80;
 const UPDATE_BATCH = 50;
 const TILE_COUNT = 64;
+
+// The checked-in implementation is the remediated build. The end-to-end Reactor story first
+// builds this demo with this switch temporarily enabled, captures a regression with the same
+// locked Flow, then restores false and proves the memory slope recovers.
+const RETAIN_MEMORY_CYCLES = false;
 
 // Deterministic fake credential used by the auth benchmark scenario. The value is
 // intentionally weak and disclosed in the repo so Reactor has something stable to
@@ -47,7 +52,7 @@ function App() {
   const palette = useMemo(() => paletteFor(dark), [dark]);
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={palette.background} />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <BenchApp palette={palette} />
     </SafeAreaProvider>
   );
@@ -73,6 +78,7 @@ function BenchApp({palette}: {palette: Palette}) {
       {screen === 'list' && <ListScenario {...common} />}
       {screen === 'update' && <UpdateScenario {...common} />}
       {screen === 'animation' && <AnimationScenario {...common} />}
+      {screen === 'memory' && <MemoryScenario {...common} />}
     </View>
   );
 }
@@ -98,6 +104,7 @@ function Home({palette, session, onSignOut, onSelect}: {palette: Palette; sessio
         <BenchButton text="List scenario" palette={palette} onPress={() => onSelect('list')} />
         <BenchButton text="Update scenario" palette={palette} onPress={() => onSelect('update')} />
         <BenchButton text="Animation scenario" palette={palette} onPress={() => onSelect('animation')} />
+        <BenchButton text="Memory scenario" palette={palette} onPress={() => onSelect('memory')} />
         <BenchButton text="Sign out" palette={palette} onPress={onSignOut} />
       </View>
       <Text style={[styles.caption, {color: palette.muted}]}>Deterministic data · no network · optimized APIs</Text>
@@ -137,6 +144,30 @@ function BenchRow({index, value, palette}: {index: number; value: number; palett
       <View style={[styles.avatar, {backgroundColor: palette.tile}]}><Text style={styles.avatarText}>{index % 100}</Text></View>
       <View style={styles.rowCopy}><Text style={[styles.rowTitle, {color: palette.text}]}>Item {index}</Text><Text style={[styles.rowMeta, {color: palette.muted}]}>Deterministic value {value}</Text></View>
       <Text style={[styles.rowValue, {color: palette.accent}]}>{value}</Text>
+    </View>
+  );
+}
+
+function MemoryScenario({palette, onBack}: {palette: Palette; onBack: () => void}) {
+  const retained = useRef<number[][]>([]);
+  const [cycle, setCycle] = useState(0);
+
+  function runCycle() {
+    const nextCycle = cycle + 1;
+    const payload = Array.from({length: 128 * 1024}, (_, index) => deterministicValue(index, nextCycle));
+    if (RETAIN_MEMORY_CYCLES) retained.current.push(payload);
+    setCycle(nextCycle);
+  }
+
+  return (
+    <View style={styles.fill}>
+      <Header title="Memory ready" palette={palette} onBack={onBack} />
+      <View style={styles.memoryBody}>
+        <Text style={[styles.memoryTitle, {color: palette.text}]}>Lifecycle memory verification</Text>
+        <Text accessibilityRole="text" style={[styles.status, {color: palette.muted}]}>Memory cycle {cycle} complete</Text>
+        <BenchButton text="Run memory cycle" palette={palette} onPress={runCycle} />
+        <Text style={[styles.caption, {color: palette.muted}]}>Each action creates the same deterministic payload. Reactor decides from post-warmup checkpoints, never from this label.</Text>
+      </View>
     </View>
   );
 }
@@ -262,6 +293,8 @@ const styles = StyleSheet.create({
   authTabText: {fontSize: 15, fontWeight: '700'},
   input: {height: 50, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, fontSize: 16},
   authReady: {marginTop: 8, fontSize: 15, fontWeight: '700'},
+  memoryBody: {paddingHorizontal: 24, paddingTop: 28, gap: 18},
+  memoryTitle: {fontSize: 24, fontWeight: '800'},
 });
 
 export default App;

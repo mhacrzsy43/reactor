@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import {Text} from 'react-native';
+import {Text, TextInput} from 'react-native';
 import ReactTestRenderer from 'react-test-renderer';
 
 jest.mock('react-native-safe-area-context', () => {
@@ -24,27 +24,40 @@ function textContent(value: unknown): string {
   return value === null || value === undefined ? '' : String(value);
 }
 
-test('exposes the shared ready markers and list workload', async () => {
+function buttonByLabel(renderer: ReactTestRenderer.ReactTestRenderer, label: string) {
+  return renderer.root.findAll(
+    node => node.props.accessibilityRole === 'button' && typeof node.props.onPress === 'function' &&
+      node.findAllByType(Text).some(text => textContent(text.props.children) === label),
+  ).at(-1)!;
+}
+
+test('authenticates before exposing shared workloads and memory verification', async () => {
   let renderer!: ReactTestRenderer.ReactTestRenderer;
   await ReactTestRenderer.act(() => {
     renderer = ReactTestRenderer.create(<App />);
   });
+
+  const inputs = renderer.root.findAllByType(TextInput);
+  await ReactTestRenderer.act(() => {
+    inputs[0].props.onChangeText('test');
+    inputs[1].props.onChangeText('test');
+  });
+  await ReactTestRenderer.act(() => buttonByLabel(renderer, 'Sign in').props.onPress());
 
   const home = JSON.stringify(renderer.toJSON());
   expect(home).toContain('Reactor ready');
   expect(home).toContain('List scenario');
   expect(home).toContain('Update scenario');
   expect(home).toContain('Animation scenario');
+  expect(home).toContain('Memory scenario');
 
-  const firstButton = renderer.root.findAll(
-    node => node.props.accessibilityRole === 'button',
-  )[0];
-  await ReactTestRenderer.act(() => firstButton.props.onPress());
+  await ReactTestRenderer.act(() => buttonByLabel(renderer, 'Memory scenario').props.onPress());
 
   const labels = renderer.root
     .findAllByType(Text)
     .map(node => textContent(node.props.children));
-  expect(labels).toContain('List ready');
-  expect(labels).toContain('Item 0');
-  expect(labels).toContain('Deterministic value 818');
+  expect(labels).toContain('Memory ready');
+  expect(labels).toContain('Memory cycle 0 complete');
+  await ReactTestRenderer.act(() => buttonByLabel(renderer, 'Run memory cycle').props.onPress());
+  expect(renderer.root.findAllByType(Text).map(node => textContent(node.props.children))).toContain('Memory cycle 1 complete');
 });

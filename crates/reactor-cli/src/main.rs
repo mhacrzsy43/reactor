@@ -12,9 +12,10 @@ use reactor_protocol::{
     validate_flow,
 };
 use reactor_runner::{
-    AndroidRunRequest, IosRunRequest, cancel_persisted_job, discover_android_devices,
-    discover_ios_simulators, doctor, get_job, list_jobs, run_android, run_demo_suite, run_ios,
-    trial_android, trial_ios_simulator, validate_product_tour_flow, verify_job_artifacts,
+    AndroidLeakTestPlan, AndroidRunRequest, IosRunRequest, cancel_persisted_job,
+    discover_android_devices, discover_ios_simulators, doctor, get_job, list_jobs, run_android,
+    run_demo_suite, run_ios, trial_android, trial_ios_simulator, validate_product_tour_flow,
+    verify_job_artifacts,
 };
 use reactor_toolchain::{ManagedToolsManifest, SetupOptions, setup};
 
@@ -158,6 +159,9 @@ enum Command {
         duration_ms: u64,
         #[arg(long, default_value_t = 10)]
         iterations: u32,
+        /// Also run the measured Flow repeatedly in one process and capture memory checkpoints.
+        #[arg(long)]
+        leak_cycles: Option<u32>,
     },
     /// Execute a locked Flow on an iOS Simulator with xctrace Time Profiler evidence.
     RunIos {
@@ -388,6 +392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             workspace,
             duration_ms,
             iterations,
+            leak_cycles,
         } => {
             let result = run_android(&AndroidRunRequest {
                 workspace,
@@ -397,6 +402,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 device_id: device,
                 duration_ms,
                 iteration_count: iterations,
+                leak_test: leak_cycles.map(|cycles| AndroidLeakTestPlan {
+                    cycles,
+                    checkpoint_every: 2,
+                    warmup_cycles: 2,
+                    stabilization_ms: 750,
+                    cooldown_ms: 5_000,
+                    threshold_mb_per_cycle: 0.25,
+                }),
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);

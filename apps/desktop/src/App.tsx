@@ -70,7 +70,7 @@ interface PersistedFlowDraft {
   compiledFlow?: CompiledFlow;
   preparation?: TrialPreparation;
   flowLock?: FlowLock;
-  runPreset: "quick" | "standard";
+  runPreset: "quick" | "standard" | "leak";
 }
 
 const FLOW_DRAFT_KEY = "reactor.flow-draft.v1";
@@ -158,7 +158,7 @@ function App() {
   const [results, setResults] = useState<NormalizedResult[]>([]);
   const [reportPath, setReportPath] = useState("");
   const [activeJob, setActiveJob] = useState<JobSnapshot>();
-  const [runPreset, setRunPreset] = useState<"quick" | "standard">("quick");
+  const [runPreset, setRunPreset] = useState<"quick" | "standard" | "leak">("quick");
   const [cancelling, setCancelling] = useState(false);
   const [preparingTools, setPreparingTools] = useState(false);
   const [refreshingDevices, setRefreshingDevices] = useState(false);
@@ -670,6 +670,14 @@ function App() {
         deviceId: selectedTarget.id,
         durationMs: runPreset === "standard" ? 18_000 : 5_000,
         iterations: runPreset === "standard" ? 10 : 1,
+        leakTest: runPreset === "leak" ? {
+          cycles: 20,
+          checkpointEvery: 2,
+          warmupCycles: 2,
+          stabilizationMs: 750,
+          cooldownMs: 5_000,
+          thresholdMbPerCycle: 0.25,
+        } : undefined,
       }, setActiveJob);
       applyOutput(output);
     } catch (reason) {
@@ -1231,7 +1239,7 @@ function App() {
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
                     <div className="run-buttons">
-                      <label className="run-preset"><span>采集预设</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard")}><option value="quick">快速验收 · 1 次 × 5 秒</option><option value="standard">正式基准 · 10 次 × 18 秒</option></select></label>
+                      <label className="run-preset"><span>采集预设</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">快速验收 · 1 次 × 5 秒</option><option value="standard">正式基准 · 10 次 × 18 秒</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>
                       {flowLock.trial?.synthetic && availableTargets.length > 0 && (
                         <button className="secondary-button" disabled={busy} onClick={() => { setFlowLock(undefined); setPreparation(undefined); }}>改用模拟器试跑</button>
                       )}
@@ -1675,6 +1683,14 @@ function RunStatus({
 }) {
   const terminal = ["completed", "failed", "cancelled"].includes(snapshot.job.state);
   const latestEvents = snapshot.events.slice(-4);
+  const telemetry = snapshot.events
+    .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
+    .map((event) => event.data as { cycle?: number; totalCycles?: number; cpuPct?: number; pssMb?: number; rssMb?: number; javaHeapMb?: number; nativeHeapMb?: number; officialMetric?: boolean });
+  const latestTelemetry = telemetry.at(-1);
+  const latestProgress = snapshot.events
+    .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "flow_progress")
+    .at(-1)?.data as { cycle?: number; totalCycles?: number; commandNumber?: number } | undefined;
+  const maxLivePss = Math.max(...telemetry.map((sample) => sample.pssMb ?? 0), 1);
   return (
     <section className={`run-status card ${terminal ? "terminal" : "active"}`} aria-live="polite">
       <div className="run-status-heading">
@@ -1686,6 +1702,18 @@ function RunStatus({
       {latestEvents.length > 0 && (
         <div className="run-events">
           {latestEvents.map((event) => <div key={event.id}><span>{jobStateNames[event.phase]}</span><p>{event.message}</p></div>)}
+        </div>
+      )}
+      {(latestTelemetry || latestProgress) && (
+        <div className="live-performance">
+          <div className="live-performance-heading"><div><span className="status-dot" /><b>Flow 执行中 · 实时性能观察</b></div><small>观察值不进入最终判定</small></div>
+          <div className="live-performance-values">
+            <div><span>循环 / 命令</span><b>{latestProgress?.cycle ?? latestTelemetry?.cycle ?? "—"}/{latestProgress?.totalCycles ?? latestTelemetry?.totalCycles ?? "—"} · #{latestProgress?.commandNumber ?? "—"}</b></div>
+            <div><span>CPU / PSS</span><b>{formatMetric(latestTelemetry?.cpuPct)}% · {formatMetric(latestTelemetry?.pssMb)} MB</b></div>
+            <div><span>Java Heap</span><b>{formatMetric(latestTelemetry?.javaHeapMb)} MB</b></div>
+            <div><span>Native Heap</span><b>{formatMetric(latestTelemetry?.nativeHeapMb)} MB</b></div>
+          </div>
+          <div className="live-performance-chart">{telemetry.map((sample, index) => <i key={`${sample.cycle ?? index}-${index}`} style={{ height: `${Math.max(5, ((sample.pssMb ?? 0) / maxLivePss) * 100)}%` }} title={`第 ${sample.cycle ?? "—"} 轮 · ${formatMetric(sample.pssMb)} MB`} />)}</div>
         </div>
       )}
       {snapshot.job.error && <p className="run-error">{snapshot.job.error}</p>}
@@ -1827,7 +1855,7 @@ function loadFlowDraft(): PersistedFlowDraft | undefined {
       || !["react-native", "flutter", "lynx"].includes(value.framework ?? "")
       || !["android", "ios"].includes(value.platform ?? "")
       || !["offline", "local", "codex", "claude", "cloud"].includes(storedProvider ?? "")
-      || !["quick", "standard"].includes(value.runPreset ?? "")
+      || !["quick", "standard", "leak"].includes(value.runPreset ?? "")
     ) return undefined;
     const draft = value as unknown as PersistedFlowDraft;
     if (storedProvider !== "offline") return draft;
@@ -2242,9 +2270,31 @@ function Results({ results, reportPath }: { results: NormalizedResult[]; reportP
           </article>
         ))}
       </div>
+      {results.map((result) => result.androidNative?.memoryLeak ? <MemoryLeakEvidence key={`${result.runId}-memory-leak`} report={result.androidNative.memoryLeak} /> : null)}
       <div className="result-warning"><ShieldCheck size={16} /><span>{synthetic ? "这组数据只用于体验产品交互。启动模拟器后，Reactor 将使用受管 Maestro 与原生采集器生成可追溯报告。" : emulator ? `结果来自 ${simulatorLabel}，只能与同一主机、同一模拟器配置的结果比较；不支持的指标不会输出占位值。` : "结果由锁定 Flow 在物理设备执行，原始采集文件和 Flow 哈希已经保存。"}</span></div>
       {reportPath && <div className="flow-actions"><p>独立 HTML 报告与原始结果已保存。</p><button className="secondary-button" onClick={() => openReport(reportPath)}><HardDrive size={16} />打开完整报告</button></div>}
     </div>
+  );
+}
+
+function MemoryLeakEvidence({ report }: { report: NonNullable<NonNullable<NormalizedResult["androidNative"]>["memoryLeak"]> }) {
+  const cyclePoints = report.checkpoints.filter((point) => point.kind === "cycle" && point.pssMb !== undefined);
+  const maxPss = Math.max(...cyclePoints.map((point) => point.pssMb ?? 0), 1);
+  const verdict = report.verdict === "suspected_leak" ? "疑似泄漏" : report.verdict === "stable" ? "趋势稳定" : "证据不足";
+  return (
+    <section className={`memory-leak-card ${report.verdict}`}>
+      <div className="memory-leak-heading"><div><span>同进程循环内存</span><h3>{verdict}</h3></div><b>{report.cycles} 轮 · {report.confidence === "high" ? "高" : report.confidence === "medium" ? "中" : "低"}置信度</b></div>
+      <div className="memory-leak-facts">
+        <div><span>增长斜率</span><b>{formatMetric(report.slopeMbPerCycle)} MB/轮</b></div>
+        <div><span>首尾差</span><b>{formatMetric(report.endDeltaMb)} MB</b></div>
+        <div><span>单调增长</span><b>{formatMetric(report.monotonicGrowthPct)}%</b></div>
+        <div><span>冷却回落</span><b>{formatMetric(report.cooldownRecoveryMb)} MB</b></div>
+      </div>
+      <div className="memory-checkpoint-chart" aria-label="逐循环 PSS 趋势">
+        {cyclePoints.map((point) => <div key={`${point.cycle}-${point.elapsedMs}`} title={`第 ${point.cycle} 轮 · ${formatMetric(point.pssMb)} MB`}><i style={{ height: `${Math.max(4, ((point.pssMb ?? 0) / maxPss) * 100)}%` }} /><span>{point.cycle}</span></div>)}
+      </div>
+      <p>{report.warnings[0]}</p>
+    </section>
   );
 }
 

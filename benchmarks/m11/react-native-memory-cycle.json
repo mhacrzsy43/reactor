@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "react-native-memory-cycle",
+  "name": "React Native lifecycle memory cycle",
+  "appId": "com.reactor.bench.reactnative",
+  "platform": "android",
+  "intent": "Measure repeated deterministic memory lifecycle actions in one process",
+  "setup": [
+    { "action": "reset_app_state" },
+    { "action": "launch_app" },
+    { "action": "wait_for", "target": { "text": "Username" }, "timeout_ms": 10000 },
+    { "action": "input_text", "target": { "text": "Username" }, "value": "test", "clear_before": true },
+    { "action": "input_text", "target": { "text": "Password" }, "value": { "variableRef": "REACTOR_DEMO_PASSWORD" }, "clear_before": true },
+    { "action": "tap", "target": { "text": "Sign in", "index": 2 } },
+    { "action": "wait_for", "target": { "text": "Reactor ready" }, "timeout_ms": 10000 },
+    { "action": "tap", "target": { "text": "Memory scenario" } },
+    { "action": "wait_for", "target": { "text": "Memory ready" }, "timeout_ms": 10000 },
+    { "action": "assert_visible", "target": { "text": "Memory ready" } }
+  ],
+  "measured": [
+    { "action": "tap", "target": { "text": "Run memory cycle" } },
+    { "action": "pause", "duration_ms": 100 }
+  ],
+  "teardown": []
+}

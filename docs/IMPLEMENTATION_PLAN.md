@@ -445,6 +445,27 @@ M10.5 执行门禁（2026-08-19）：设置页可显式选择 Stable/Beta，开�
 
 验收：干净系统安装测试通过；升级不丢历史；诊断包默认不含凭据和未授权截图。
 
+### M11：Flow 驱动的验证闭环与内存泄漏检测
+
+目标：用同一份已锁定 Flow 完成“基线 → 故障版回归 → 性能下钻 → 整改 → 复测 → CI”闭环，证明 Reactor 解决的是 AI 代码产出之后的可信验证问题，而不是只生成自动化脚本。
+
+| 子项 | 状态 | 完成口径 |
+|---|---|---|
+| M11.1 验收协议 | ✅ 完成 | 固定相同 App ID、设备、Release 构建、Flow Hash 和采集器版本；正常版与故障版只允许改变被验证实现 |
+| M11.2 Soak/Leak Run Plan | ✅ 完成 | setup 一次、同一进程执行 N 个行为循环、按固定轮次采样、cool-down 后再采样、teardown 一次 |
+| M11.3 内存证据与判定 | ✅ 完成 | 保存逐检查点 PSS/RSS/Java Heap/Native Heap、CPU、增长斜率、单调增长比例、首尾差和冷却回落；只凭趋势标记“疑似泄漏”，有对象保留证据才允许“确认泄漏” |
+| M11.4 实时性能观察 | 🚧 进行中 | Flow 执行时低频展示当前阶段/命令、CPU、PSS/堆分项和趋势；观察值不进入最终 Benchmark 判定，断开 UI 不影响 Runner |
+| M11.5 RN 受管诊断 | ⬜ 待完成 | Reactor RN SDK/受管桥提供实时组件树、Console/Network、Flow 自动 Render/Hermes Profile、JS Heap Snapshot；Android profileable 构建接 Java HPROF 与 Perfetto heapprofd |
+| M11.6 故障 Demo | ⬜ 待完成 | RN Demo 提供确定性的正常、重复渲染和内存保留模式；模式与版本进入结果元数据，相同 Flow 可复测 |
+| M11.7 整改故事与 CI | ⬜ 待完成 | 故障版由规则检出并下钻到组件/源码，整改后同 Flow 复测恢复；CI 先失败后通过，结论可从 artifact 重建 |
+| M11.8 模拟器验收与交付 | ⬜ 待完成 | Android Emulator 完成全流程录像式步骤证据、全仓测试、严格 clippy、桌面构建、App/DMG 与正式安装 |
+
+Soak/Leak 的采样策略属于 Run Plan，不写入 Flow DSL。Flow 只描述用户行为；这样同一 Flow 可在普通 Benchmark、长期稳定性和内存泄漏测试中复用，且修改采样频率不会改变行为哈希。
+
+首个故事使用四段演示：AI/录制生成并锁定登录与列表 Flow；三框架等价黑盒基准；RN 重复渲染 Profile Diff；正常版/泄漏版在同一进程循环后的内存趋势对比。用户已确认实时组件树、Console/Network、Flow 自动 Profile 与堆级证据也属于本轮必做能力；对未接 Reactor RN SDK 或非 profileable 的第三方 App 必须显示能力缺失，不能生成占位证据。
+
+M11.1–M11.3 首次真实门禁（2026-08-19）：Android Emulator `emulator-5554`、RN Release、Flow Hash `a6fff11504bf…` 完成任务 `6307b013-1834-44ee-a1fd-3d23f9dc4a3a`。setup 只执行一次，随后同一进程循环 6 轮并在第 2/4/6 轮与 cool-down 后采样；PSS 为 58.08/65.85/66.60 MB，冷却回落 1.50 MB。由于 warm-up 后只有两个有效趋势点，规则正确返回 `insufficient_evidence`，没有把短样本冒充泄漏。任务保存独立 `android-memory-leak.json`、逐轮 SQLite 遥测事件、Perfetto、Flashlight 和最终 HTML；状态机严格保持 Measuring → Normalizing，禁止逆向阶段迁移。
+
 ## 9. 测试体系
 
 - **单元测试**：DSL 校验、统计、hash、状态机和脱敏。

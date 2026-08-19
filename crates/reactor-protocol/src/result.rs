@@ -49,6 +49,44 @@ pub struct AndroidNativeMetrics {
     pub memory_pss_mb: Option<f64>,
     pub thermal_status_before: Option<u32>,
     pub thermal_status_after: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_leak: Option<AndroidMemoryLeakReport>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidMemoryCheckpoint {
+    pub kind: String,
+    pub cycle: u32,
+    pub elapsed_ms: u64,
+    pub cpu_pct: Option<f64>,
+    pub pss_mb: Option<f64>,
+    pub rss_mb: Option<f64>,
+    pub java_heap_mb: Option<f64>,
+    pub native_heap_mb: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidMemoryLeakReport {
+    pub schema_version: u32,
+    pub definitions_version: String,
+    pub collector: String,
+    pub cycles: u32,
+    pub checkpoint_every: u32,
+    pub warmup_cycles: u32,
+    pub stabilization_ms: u64,
+    pub cooldown_ms: u64,
+    pub slope_mb_per_cycle: Option<f64>,
+    pub end_delta_mb: Option<f64>,
+    pub monotonic_growth_pct: Option<f64>,
+    pub cooldown_recovery_mb: Option<f64>,
+    pub threshold_mb_per_cycle: f64,
+    pub verdict: String,
+    pub confidence: String,
+    pub checkpoints: Vec<AndroidMemoryCheckpoint>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }

@@ -129,6 +129,14 @@ export interface RealRunInput {
   deviceId: string;
   durationMs: number;
   iterations: number;
+  leakTest?: {
+    cycles: number;
+    checkpointEvery: number;
+    warmupCycles: number;
+    stabilizationMs: number;
+    cooldownMs: number;
+    thresholdMbPerCycle: number;
+  };
 }
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
