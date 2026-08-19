@@ -167,16 +167,17 @@ fn selector(selector: &Selector, path: &str) -> Result<String, CompileError> {
         .as_deref()
         .or(selector.semantic_id.as_deref())
     {
-        return Ok(match selector.enabled {
-            Some(enabled) => format!("{{ id: {}, enabled: {enabled} }}", quote(id)),
-            None => format!("{{ id: {} }}", quote(id)),
-        });
+        let mut fields = vec![format!("id: {}", quote(id))];
+        append_selector_qualifiers(&mut fields, selector);
+        return Ok(format!("{{ {} }}", fields.join(", ")));
     }
     if let Some(text) = selector.text.as_deref() {
-        return Ok(match selector.enabled {
-            Some(enabled) => format!("{{ text: {}, enabled: {enabled} }}", quote(text)),
-            None => quote(text),
-        });
+        if selector.index.is_none() && selector.enabled.is_none() {
+            return Ok(quote(text));
+        }
+        let mut fields = vec![format!("text: {}", quote(text))];
+        append_selector_qualifiers(&mut fields, selector);
+        return Ok(format!("{{ {} }}", fields.join(", ")));
     }
     if let Some(coordinate) = selector.coordinate {
         return Ok(format!(
@@ -187,6 +188,15 @@ fn selector(selector: &Selector, path: &str) -> Result<String, CompileError> {
     Err(CompileError::UnsupportedSelector {
         path: path.to_owned(),
     })
+}
+
+fn append_selector_qualifiers(fields: &mut Vec<String>, selector: &Selector) {
+    if let Some(index) = selector.index {
+        fields.push(format!("index: {index}"));
+    }
+    if let Some(enabled) = selector.enabled {
+        fields.push(format!("enabled: {enabled}"));
+    }
 }
 
 fn quote(value: &str) -> String {
@@ -271,6 +281,61 @@ mod tests {
             output
                 .measured
                 .contains("assertVisible: { text: \"Continue\", enabled: true }")
+        );
+    }
+
+    #[test]
+    fn text_index_compiles_into_the_maestro_selector() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "duplicate-text".to_owned(),
+            name: "Duplicate text".to_owned(),
+            app_id: "com.reactor.demo".to_owned(),
+            platform: Platform::Android,
+            intent: None,
+            setup: vec![],
+            measured: vec![Step::Tap {
+                target: Selector {
+                    text: Some("Sign in".to_owned()),
+                    index: Some(3),
+                    ..Selector::default()
+                },
+            }],
+            teardown: vec![],
+        };
+        let output = compile_maestro(&flow).unwrap();
+        assert!(
+            output
+                .measured
+                .contains("tapOn: { text: \"Sign in\", index: 3 }")
+        );
+    }
+
+    #[test]
+    fn id_index_and_enabled_compile_into_the_maestro_selector() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "qualified-id".to_owned(),
+            name: "Qualified id".to_owned(),
+            app_id: "com.reactor.demo".to_owned(),
+            platform: Platform::Android,
+            intent: None,
+            setup: vec![],
+            measured: vec![Step::AssertVisible {
+                target: Selector {
+                    semantic_id: Some("submit".to_owned()),
+                    index: Some(1),
+                    enabled: Some(true),
+                    ..Selector::default()
+                },
+            }],
+            teardown: vec![],
+        };
+        let output = compile_maestro(&flow).unwrap();
+        assert!(
+            output
+                .measured
+                .contains("assertVisible: { id: \"submit\", index: 1, enabled: true }")
         );
     }
 
