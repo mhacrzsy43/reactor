@@ -1685,7 +1685,7 @@ function RunStatus({
   const latestEvents = snapshot.events.slice(-4);
   const telemetry = snapshot.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
-    .map((event) => event.data as { cycle?: number; totalCycles?: number; cpuPct?: number; pssMb?: number; rssMb?: number; javaHeapMb?: number; nativeHeapMb?: number; officialMetric?: boolean });
+    .map((event) => event.data as { source?: string; cycle?: number; totalCycles?: number; elapsedMs?: number; cpuPct?: number; pssMb?: number; rssMb?: number; javaHeapMb?: number; nativeHeapMb?: number; rn?: { sampledEventCount?: number; componentRenderCount?: number; componentTreeCommitCount?: number; profileCommitCount?: number; consoleEventCount?: number; networkEventCount?: number; hermesHeapSampleCount?: number; latestKind?: string; latestName?: string }; officialMetric?: boolean });
   const latestTelemetry = telemetry.at(-1);
   const latestProgress = snapshot.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "flow_progress")
@@ -1708,12 +1708,15 @@ function RunStatus({
         <div className="live-performance">
           <div className="live-performance-heading"><div><span className="status-dot" /><b>Flow 执行中 · 实时性能观察</b></div><small>观察值不进入最终判定</small></div>
           <div className="live-performance-values">
-            <div><span>循环 / 命令</span><b>{latestProgress?.cycle ?? latestTelemetry?.cycle ?? "—"}/{latestProgress?.totalCycles ?? latestTelemetry?.totalCycles ?? "—"} · #{latestProgress?.commandNumber ?? "—"}</b></div>
+            <div><span>{latestProgress?.cycle ? "循环 / 命令" : "Flow 已执行"}</span><b>{latestProgress?.cycle ? `${latestProgress.cycle}/${latestProgress.totalCycles ?? "—"} · #${latestProgress.commandNumber ?? "—"}` : `${((latestTelemetry?.elapsedMs ?? 0) / 1000).toFixed(1)} 秒`}</b></div>
             <div><span>CPU / PSS</span><b>{formatMetric(latestTelemetry?.cpuPct)}% · {formatMetric(latestTelemetry?.pssMb)} MB</b></div>
             <div><span>Java Heap</span><b>{formatMetric(latestTelemetry?.javaHeapMb)} MB</b></div>
             <div><span>Native Heap</span><b>{formatMetric(latestTelemetry?.nativeHeapMb)} MB</b></div>
+            {latestTelemetry?.rn && <div><span>RN Tree / Profile</span><b>{latestTelemetry.rn.componentTreeCommitCount ?? 0} / {latestTelemetry.rn.profileCommitCount ?? 0}</b></div>}
+            {latestTelemetry?.rn && <div><span>Console / Network</span><b>{latestTelemetry.rn.consoleEventCount ?? 0} / {latestTelemetry.rn.networkEventCount ?? 0}</b></div>}
+            {latestTelemetry?.rn && <div><span>Hermes Heap 样本</span><b>{latestTelemetry.rn.hermesHeapSampleCount ?? 0}</b></div>}
           </div>
-          <div className="live-performance-chart">{telemetry.map((sample, index) => <i key={`${sample.cycle ?? index}-${index}`} style={{ height: `${Math.max(5, ((sample.pssMb ?? 0) / maxLivePss) * 100)}%` }} title={`第 ${sample.cycle ?? "—"} 轮 · ${formatMetric(sample.pssMb)} MB`} />)}</div>
+          <div className="live-performance-chart">{telemetry.map((sample, index) => <i key={`${sample.elapsedMs ?? sample.cycle ?? index}-${index}`} style={{ height: `${Math.max(5, ((sample.pssMb ?? 0) / maxLivePss) * 100)}%` }} title={sample.cycle ? `第 ${sample.cycle} 轮 · ${formatMetric(sample.pssMb)} MB` : `${((sample.elapsedMs ?? 0) / 1000).toFixed(1)} 秒 · ${formatMetric(sample.pssMb)} MB`} />)}</div>
         </div>
       )}
       {snapshot.job.error && <p className="run-error">{snapshot.job.error}</p>}
@@ -2248,6 +2251,7 @@ function Results({ results, reportPath }: { results: NormalizedResult[]; reportP
                 <div className="metric-row"><span>冷启动</span><b>{formatMetric(result.androidNative.startupTimeMs)} ms</b></div>
                 <div className="metric-row"><span>原生 PSS</span><b>{formatMetric(result.androidNative.memoryPssMb)} MB</b></div>
                 <div className="metric-row"><span>热状态</span><b>{formatThermal(result.androidNative.thermalStatusBefore)} → {formatThermal(result.androidNative.thermalStatusAfter)}</b></div>
+                {result.androidNative.rnDiagnostics && <><div className="metric-row"><span>RN 自动 Profile</span><b>{result.androidNative.rnDiagnostics.profileCommitCount} Commit · {result.androidNative.rnDiagnostics.componentRenderCount} Render</b></div><div className="metric-row"><span>Console / Network</span><b>{result.androidNative.rnDiagnostics.consoleEventCount} / {result.androidNative.rnDiagnostics.networkEventCount}</b></div><div className="metric-row"><span>SDK 保留对象</span><b>{result.androidNative.rnDiagnostics.retainedObjectCount} · {formatBytes(result.androidNative.rnDiagnostics.retainedBytes)}</b></div></>}
                 <div className="native-evidence">{result.androidNative.collector} · TP {result.androidNative.traceProcessorVersion}</div>
               </>
             ) : result.iosNative ? (
@@ -2280,7 +2284,7 @@ function Results({ results, reportPath }: { results: NormalizedResult[]; reportP
 function MemoryLeakEvidence({ report }: { report: NonNullable<NonNullable<NormalizedResult["androidNative"]>["memoryLeak"]> }) {
   const cyclePoints = report.checkpoints.filter((point) => point.kind === "cycle" && point.pssMb !== undefined);
   const maxPss = Math.max(...cyclePoints.map((point) => point.pssMb ?? 0), 1);
-  const verdict = report.verdict === "suspected_leak" ? "疑似泄漏" : report.verdict === "stable" ? "趋势稳定" : "证据不足";
+  const verdict = report.verdict === "confirmed_leak" ? "确认泄漏" : report.verdict === "suspected_leak" ? "疑似泄漏" : report.verdict === "stable" ? "趋势稳定" : "证据不足";
   return (
     <section className={`memory-leak-card ${report.verdict}`}>
       <div className="memory-leak-heading"><div><span>同进程循环内存</span><h3>{verdict}</h3></div><b>{report.cycles} 轮 · {report.confidence === "high" ? "高" : report.confidence === "medium" ? "中" : "低"}置信度</b></div>
@@ -2289,10 +2293,15 @@ function MemoryLeakEvidence({ report }: { report: NonNullable<NonNullable<Normal
         <div><span>首尾差</span><b>{formatMetric(report.endDeltaMb)} MB</b></div>
         <div><span>单调增长</span><b>{formatMetric(report.monotonicGrowthPct)}%</b></div>
         <div><span>冷却回落</span><b>{formatMetric(report.cooldownRecoveryMb)} MB</b></div>
+        {report.nativeRetainedBytes !== undefined && <div><span>Native 净保留</span><b>{formatMetric(report.nativeRetainedBytes / 1024 / 1024)} MB</b></div>}
+        {report.nativeRetainedAllocationCount !== undefined && <div><span>Native 净样本</span><b>{report.nativeRetainedAllocationCount}</b></div>}
+        {report.managedRetainedObjectCount !== undefined && <div><span>RN 保留对象</span><b>{report.managedRetainedObjectCount}</b></div>}
+        {report.managedRetainedBytes !== undefined && <div><span>RN 保留字节</span><b>{formatMetric(report.managedRetainedBytes / 1024 / 1024)} MB</b></div>}
       </div>
       <div className="memory-checkpoint-chart" aria-label="逐循环 PSS 趋势">
         {cyclePoints.map((point) => <div key={`${point.cycle}-${point.elapsedMs}`} title={`第 ${point.cycle} 轮 · ${formatMetric(point.pssMb)} MB`}><i style={{ height: `${Math.max(4, ((point.pssMb ?? 0) / maxPss) * 100)}%` }} /><span>{point.cycle}</span></div>)}
       </div>
+      {report.nativeHeapTraceFile && <p>已保存 Perfetto heapprofd 原始证据；只有趋势与对象/调用链证据共同成立时才允许升级泄漏结论。</p>}
       <p>{report.warnings[0]}</p>
     </section>
   );

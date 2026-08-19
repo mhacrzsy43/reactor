@@ -51,8 +51,51 @@ pub struct AndroidNativeMetrics {
     pub thermal_status_after: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_leak: Option<AndroidMemoryLeakReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rn_diagnostics: Option<ReactNativeDiagnosticsSummary>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactNativeDiagnosticsSummary {
+    pub schema_version: u32,
+    pub collector: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_mode: Option<String>,
+    pub event_file: String,
+    pub event_count: u64,
+    pub component_names: Vec<String>,
+    pub component_render_count: u64,
+    pub component_tree_commit_count: u64,
+    pub profile_commit_count: u64,
+    pub console_event_count: u64,
+    pub network_event_count: u64,
+    pub hermes_heap_sample_count: u64,
+    pub allocated_object_count: u64,
+    pub retained_object_count: u64,
+    pub retained_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hermes_heap_stats_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hermes_heap_snapshot_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_heap_dump_file: Option<String>,
+    #[serde(default)]
+    pub recent_events: Vec<ReactNativeDiagnosticEvent>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactNativeDiagnosticEvent {
+    pub timestamp_ms: u64,
+    pub kind: String,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +129,18 @@ pub struct AndroidMemoryLeakReport {
     pub threshold_mb_per_cycle: f64,
     pub verdict: String,
     pub confidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_heap_trace_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_retained_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_retained_allocation_count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_retained_object_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_retained_bytes: Option<u64>,
     pub checkpoints: Vec<AndroidMemoryCheckpoint>,
     #[serde(default)]
     pub warnings: Vec<String>,

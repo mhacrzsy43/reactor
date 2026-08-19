@@ -13,5 +13,5 @@ pub use flow::{
 pub use result::{
     AndroidMemoryCheckpoint, AndroidMemoryLeakReport, AndroidNativeMetrics, DeviceMetadata,
     IosMetricAvailability, IosNativeMetrics, IterationMetrics, MetricSummary, NormalizedResult,
-    ResultSource,
+    ReactNativeDiagnosticEvent, ReactNativeDiagnosticsSummary, ResultSource,
 };

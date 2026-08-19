@@ -17,8 +17,9 @@ use reactor_core::{
 use reactor_protocol::{
     AndroidMemoryCheckpoint, AndroidMemoryLeakReport, AndroidNativeMetrics, Coordinate,
     DeviceMetadata, Flow, FlowLock, FlowTrialEvidence, FlowValidationError, InputValue,
-    IosMetricAvailability, IosNativeMetrics, IterationMetrics, NormalizedResult, ResultSource,
-    Step, SwipeDirection, TrialMode, canonical_flow_hash,
+    IosMetricAvailability, IosNativeMetrics, IterationMetrics, NormalizedResult,
+    ReactNativeDiagnosticEvent, ReactNativeDiagnosticsSummary, ResultSource, Step, SwipeDirection,
+    TrialMode, canonical_flow_hash,
 };
 use reactor_store::{ArtifactIssue, Job, JobEvent, JobState, Store};
 use regex::Regex;
@@ -1649,6 +1650,27 @@ incremental_state_config {{ clear_period_ms: 5000 }}
     )
 }
 
+fn heapprofd_config(app_id: &str, duration_ms: u64) -> String {
+    let app_id = app_id.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"buffers {{ size_kb: 65536 fill_policy: RING_BUFFER }}
+data_sources {{
+  config {{
+    name: "android.heapprofd"
+    target_buffer: 0
+    heapprofd_config {{
+      sampling_interval_bytes: 4096
+      process_cmdline: "{app_id}"
+      continuous_dump_config {{ dump_phase_ms: 1000 dump_interval_ms: 3000 }}
+    }}
+  }}
+}}
+duration_ms: {duration_ms}
+flush_period_ms: 2000
+"#
+    )
+}
+
 async fn ensure_android_trace_space(
     adb: &Path,
     device_id: &str,
@@ -1733,7 +1755,22 @@ async fn start_perfetto(
     job_id: &str,
     duration_ms: u64,
 ) -> Result<PerfettoSession, RunnerError> {
-    let remote_trace = format!("/data/misc/perfetto-traces/reactor-{job_id}.pftrace");
+    start_perfetto_with_config(
+        adb,
+        device_id,
+        &format!("reactor-{job_id}"),
+        &perfetto_config(app_id, duration_ms),
+    )
+    .await
+}
+
+async fn start_perfetto_with_config(
+    adb: &Path,
+    device_id: &str,
+    trace_name: &str,
+    config: &str,
+) -> Result<PerfettoSession, RunnerError> {
+    let remote_trace = format!("/data/misc/perfetto-traces/{trace_name}.pftrace");
     let mut cleanup = Command::new(adb);
     cleanup.args(["-s", device_id, "shell", "rm", "-f", &remote_trace]);
     let _ = run_command_with_timeout(cleanup, "perfetto-cleanup", Duration::from_secs(5)).await;
@@ -1767,9 +1804,7 @@ async fn start_perfetto(
             command: "perfetto-start".to_owned(),
             output: "failed to open Perfetto config stream".to_owned(),
         })?;
-    stdin
-        .write_all(perfetto_config(app_id, duration_ms).as_bytes())
-        .await?;
+    stdin.write_all(config.as_bytes()).await?;
     drop(stdin);
     let output = if let Ok(output) =
         tokio::time::timeout(Duration::from_secs(35), child.wait_with_output()).await
@@ -1889,6 +1924,59 @@ async fn parse_perfetto_frames(
         });
     }
     parse_frame_metrics_csv(&String::from_utf8_lossy(&output.stdout))
+}
+
+async fn analyze_heapprofd_trace(
+    trace_processor: &Path,
+    trace_path: &Path,
+) -> Result<(i64, i64), RunnerError> {
+    let query = "select coalesce(sum(size),0) as retained_bytes, \
+                 coalesce(sum(count),0) as retained_allocation_count \
+                 from heap_profile_allocation";
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        Command::new(trace_processor)
+            .args(["query", &trace_path.display().to_string(), query])
+            .output(),
+    )
+    .await
+    .map_err(|_| RunnerError::CommandFailed {
+        command: "trace-processor-heapprofd".to_owned(),
+        output: "timed out after 60 seconds".to_owned(),
+    })??;
+    if !output.status.success() {
+        return Err(RunnerError::CommandFailed {
+            command: "trace-processor-heapprofd".to_owned(),
+            output: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    parse_heapprofd_csv(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_heapprofd_csv(output: &str) -> Result<(i64, i64), RunnerError> {
+    let row = output
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty() && !line.starts_with("retained_bytes"))
+        .ok_or_else(|| {
+            RunnerError::InvalidPerfetto("heapprofd query returned no row".to_owned())
+        })?;
+    let values = row
+        .split(',')
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    if values.len() != 2 {
+        return Err(RunnerError::InvalidPerfetto(
+            "heapprofd query returned an invalid row".to_owned(),
+        ));
+    }
+    let retained_bytes = values[0]
+        .parse::<i64>()
+        .map_err(|error| RunnerError::InvalidPerfetto(error.to_string()))?;
+    let retained_count = values[1]
+        .parse::<i64>()
+        .map_err(|error| RunnerError::InvalidPerfetto(error.to_string()))?;
+    Ok((retained_bytes, retained_count))
 }
 
 fn parse_frame_metrics_csv(output: &str) -> Result<FrameTimelineMetrics, RunnerError> {
@@ -2093,6 +2181,144 @@ async fn sample_android_memory_checkpoint(
     Ok(checkpoint)
 }
 
+async fn run_android_live_observer(
+    workspace: PathBuf,
+    job_id: String,
+    adb: PathBuf,
+    device_id: String,
+    app_id: String,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    const SAMPLE_INTERVAL: Duration = Duration::from_millis(2_000);
+    let started_at = Instant::now();
+    if let Ok(store) = open_store(&workspace) {
+        let _ = store.append_event(
+            &job_id,
+            JobState::Measuring,
+            "已开启 Flow 同屏性能观察",
+            Some(&serde_json::json!({
+                "kind": "live_observer_status",
+                "active": true,
+                "samplingIntervalMs": SAMPLE_INTERVAL.as_millis(),
+                "officialMetric": false,
+            })),
+        );
+    }
+    loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    break;
+                }
+            }
+            () = tokio::time::sleep(SAMPLE_INTERVAL) => {
+                let checkpoint = sample_android_memory_checkpoint(
+                    &adb,
+                    &device_id,
+                    &app_id,
+                    "live",
+                    0,
+                    started_at,
+                ).await;
+                let remote = format!(
+                    "/sdcard/Android/data/{app_id}/files/reactor/rn-diagnostics.ndjson"
+                );
+                let rn = android_shell_text(
+                    &adb,
+                    &device_id,
+                    &["tail", "-n", "1000", &remote],
+                    "live-rn-diagnostics",
+                )
+                .await
+                .ok()
+                .map(|output| summarize_live_rn_events(&output));
+                if let Ok(checkpoint) = checkpoint
+                    && let Ok(store) = open_store(&workspace)
+                {
+                    let _ = store.append_event(
+                        &job_id,
+                        JobState::Measuring,
+                        "Flow 执行中 · 实时观察样本",
+                        Some(&serde_json::json!({
+                            "kind": "live_telemetry",
+                            "source": "flow_observer",
+                            "elapsedMs": checkpoint.elapsed_ms,
+                            "cpuPct": checkpoint.cpu_pct,
+                            "pssMb": checkpoint.pss_mb,
+                            "rssMb": checkpoint.rss_mb,
+                            "javaHeapMb": checkpoint.java_heap_mb,
+                            "nativeHeapMb": checkpoint.native_heap_mb,
+                            "rn": rn,
+                            "officialMetric": false,
+                        })),
+                    );
+                }
+            }
+        }
+    }
+    if let Ok(store) = open_store(&workspace) {
+        let _ = store.append_event(
+            &job_id,
+            JobState::Measuring,
+            "Flow 同屏性能观察结束，开始归一化正式证据",
+            Some(&serde_json::json!({
+                "kind": "live_observer_status",
+                "active": false,
+                "officialMetric": false,
+            })),
+        );
+    }
+}
+
+fn summarize_live_rn_events(output: &str) -> Value {
+    let mut total = 0_u64;
+    let mut renders = 0_u64;
+    let mut tree_commits = 0_u64;
+    let mut commits = 0_u64;
+    let mut console = 0_u64;
+    let mut network = 0_u64;
+    let mut hermes_heap = 0_u64;
+    let mut latest_kind = None;
+    let mut latest_name = None;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        total = total.saturating_add(1);
+        let kind = event
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match kind {
+            "component_render" => renders = renders.saturating_add(1),
+            "component_tree" => tree_commits = tree_commits.saturating_add(1),
+            "react_profile" => commits = commits.saturating_add(1),
+            "console" => console = console.saturating_add(1),
+            "network" => network = network.saturating_add(1),
+            "hermes_heap" => hermes_heap = hermes_heap.saturating_add(1),
+            _ => {}
+        }
+        latest_kind = Some(kind.to_owned());
+        latest_name = event
+            .pointer("/payload/name")
+            .or_else(|| event.pointer("/payload/id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    serde_json::json!({
+        "sampledEventCount": total,
+        "componentRenderCount": renders,
+        "componentTreeCommitCount": tree_commits,
+        "profileCommitCount": commits,
+        "consoleEventCount": console,
+        "networkEventCount": network,
+        "hermesHeapSampleCount": hermes_heap,
+        "latestKind": latest_kind,
+        "latestName": latest_name,
+        "windowLimit": 1000,
+    })
+}
+
 async fn sample_android_cpu_pct(
     adb: &Path,
     device_id: &str,
@@ -2258,7 +2484,7 @@ fn analyze_memory_leak(
     }
     AndroidMemoryLeakReport {
         schema_version: 1,
-        definitions_version: "android-memory-leak-v1".to_owned(),
+        definitions_version: "android-memory-leak-v2".to_owned(),
         collector: "adb-dumpsys-meminfo-checkpoints-v1".to_owned(),
         cycles: plan.cycles,
         checkpoint_every: plan.checkpoint_every,
@@ -2272,9 +2498,533 @@ fn analyze_memory_leak(
         threshold_mb_per_cycle: plan.threshold_mb_per_cycle,
         verdict: verdict.to_owned(),
         confidence: confidence.to_owned(),
+        native_heap_trace_file: None,
+        native_retained_bytes: None,
+        native_retained_allocation_count: None,
+        retention_evidence: None,
+        managed_retained_object_count: None,
+        managed_retained_bytes: None,
         checkpoints,
         warnings,
     }
+}
+
+fn reconcile_memory_leak_with_rn_diagnostics(
+    report: &mut AndroidMemoryLeakReport,
+    diagnostics: Option<&ReactNativeDiagnosticsSummary>,
+) {
+    let Some(diagnostics) = diagnostics else {
+        return;
+    };
+    if diagnostics.retained_object_count == 0 || diagnostics.retained_bytes == 0 {
+        return;
+    }
+    report.retention_evidence = Some("reactor-rn-sdk-object-lifecycle-v1".to_owned());
+    report.managed_retained_object_count = Some(diagnostics.retained_object_count);
+    report.managed_retained_bytes = Some(diagnostics.retained_bytes);
+    let effective_cycles = report.cycles.saturating_sub(report.warmup_cycles);
+    let sustained = report
+        .slope_mb_per_cycle
+        .is_some_and(|slope| slope >= report.threshold_mb_per_cycle)
+        && report
+            .monotonic_growth_pct
+            .is_some_and(|growth| growth >= 60.0)
+        && report.end_delta_mb.is_some_and(|delta| {
+            delta >= report.threshold_mb_per_cycle * f64::from(effective_cycles) * 0.5
+        });
+    report.warnings.retain(|warning| {
+        warning != "进程内存趋势只能判定疑似泄漏；没有堆对象保留链时不得宣称确认泄漏。"
+    });
+    if sustained {
+        "confirmed_leak".clone_into(&mut report.verdict);
+        if diagnostics.hermes_heap_snapshot_file.is_some() {
+            "high".clone_into(&mut report.confidence);
+        } else {
+            "medium".clone_into(&mut report.confidence);
+        }
+        report.warnings.push(format!(
+            "增长趋势与 RN 对象保留证据同时成立：{} 个对象、{} bytes 在 Flow 结束后仍被保留。",
+            diagnostics.retained_object_count, diagnostics.retained_bytes
+        ));
+    } else {
+        "suspected_leak".clone_into(&mut report.verdict);
+        "medium".clone_into(&mut report.confidence);
+        report.warnings.push(format!(
+            "检测到 {} 个受管对象仍被保留，但进程增长趋势尚不足以确认泄漏。",
+            diagnostics.retained_object_count
+        ));
+    }
+}
+
+async fn pull_optional_android_artifact(
+    adb: &Path,
+    device_id: &str,
+    remote: &str,
+    local: &Path,
+    max_bytes: u64,
+) -> Result<Option<String>, RunnerError> {
+    let size = match android_shell_text(
+        adb,
+        device_id,
+        &["stat", "-c", "%s", remote],
+        "artifact-stat",
+    )
+    .await
+    {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| RunnerError::CommandFailed {
+                command: "artifact-stat".to_owned(),
+                output: format!("invalid size for {remote}: {error}"),
+            })?,
+        Err(RunnerError::CommandFailed { output, .. })
+            if output.contains("No such file") || output.contains("cannot stat") =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if size == 0 {
+        return Ok(None);
+    }
+    if size > max_bytes {
+        return Err(RunnerError::CommandFailed {
+            command: "artifact-size-gate".to_owned(),
+            output: format!("{remote} is {size} bytes, above the {max_bytes} byte limit"),
+        });
+    }
+    let mut pull = Command::new(adb);
+    pull.args([
+        "-s",
+        device_id,
+        "pull",
+        remote,
+        &local.display().to_string(),
+    ]);
+    run_command_with_timeout(pull, "artifact-pull", Duration::from_secs(60)).await?;
+    Ok(Some(local.display().to_string()))
+}
+
+#[allow(clippy::too_many_lines)]
+async fn capture_react_native_diagnostics(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+    artifact_dir: &Path,
+) -> Result<Option<ReactNativeDiagnosticsSummary>, RunnerError> {
+    const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_HEAP_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+    let remote = format!("/sdcard/Android/data/{app_id}/files/reactor/rn-diagnostics.ndjson");
+    let output = match android_shell_text(adb, device_id, &["cat", &remote], "rn-diagnostics").await
+    {
+        Ok(output) => output,
+        Err(RunnerError::CommandFailed { output, .. })
+            if output.contains("No such file") || output.contains("Permission denied") =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if output.is_empty() {
+        return Ok(None);
+    }
+    if output.len() > MAX_DIAGNOSTIC_BYTES {
+        return Err(RunnerError::CommandFailed {
+            command: "rn-diagnostics".to_owned(),
+            output: "RN diagnostic evidence exceeds the 64 MiB local limit".to_owned(),
+        });
+    }
+    let mut component_names = BTreeSet::new();
+    let mut retained = BTreeMap::<String, u64>::new();
+    let mut event_count = 0_u64;
+    let mut component_render_count = 0_u64;
+    let mut component_tree_commit_count = 0_u64;
+    let mut profile_commit_count = 0_u64;
+    let mut console_event_count = 0_u64;
+    let mut network_event_count = 0_u64;
+    let mut hermes_heap_sample_count = 0_u64;
+    let mut allocated = BTreeSet::new();
+    let mut benchmark_mode = None;
+    let mut recent_events = Vec::new();
+    let mut latest_component_tree = None;
+    for (index, line) in output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+    {
+        let event: Value =
+            serde_json::from_str(line).map_err(|error| RunnerError::CommandFailed {
+                command: "parse rn-diagnostics".to_owned(),
+                output: format!("invalid NDJSON event at line {}: {error}", index + 1),
+            })?;
+        event_count = event_count.saturating_add(1);
+        let kind = event
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let payload = event.get("payload").unwrap_or(&Value::Null);
+        let diagnostic_event = ReactNativeDiagnosticEvent {
+            timestamp_ms: event
+                .get("timestampMs")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            kind: kind.to_owned(),
+            payload: payload.clone(),
+        };
+        if kind == "component_tree" {
+            latest_component_tree = Some(diagnostic_event);
+        } else if recent_events.len() < 1_999 {
+            recent_events.push(diagnostic_event);
+        }
+        match kind {
+            "benchmark_mode" => {
+                benchmark_mode = payload
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            "component_render" => {
+                component_render_count = component_render_count.saturating_add(1);
+                if let Some(name) = payload.get("name").and_then(Value::as_str) {
+                    component_names.insert(name.to_owned());
+                }
+            }
+            "component_tree" => {
+                component_tree_commit_count = component_tree_commit_count.saturating_add(1);
+                for node in payload
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(name) = node.get("name").and_then(Value::as_str) {
+                        component_names.insert(name.to_owned());
+                    }
+                }
+            }
+            "react_profile" => {
+                profile_commit_count = profile_commit_count.saturating_add(1);
+                if let Some(name) = payload.get("id").and_then(Value::as_str) {
+                    component_names.insert(name.to_owned());
+                }
+            }
+            "console" => console_event_count = console_event_count.saturating_add(1),
+            "network" => network_event_count = network_event_count.saturating_add(1),
+            "hermes_heap" => hermes_heap_sample_count = hermes_heap_sample_count.saturating_add(1),
+            "object_lifecycle" => {
+                let object_id = payload
+                    .get("objectId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let bytes = payload.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+                match payload.get("action").and_then(Value::as_str) {
+                    Some("allocate") if !object_id.is_empty() => {
+                        allocated.insert(object_id.to_owned());
+                    }
+                    Some("retain") if !object_id.is_empty() => {
+                        retained.insert(object_id.to_owned(), bytes);
+                    }
+                    Some("release") if !object_id.is_empty() => {
+                        retained.remove(object_id);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(latest_component_tree) = latest_component_tree {
+        recent_events.push(latest_component_tree);
+    }
+    let path = artifact_dir.join("rn-diagnostics.ndjson");
+    fs::write(&path, output).await?;
+    let remote_profile =
+        format!("/sdcard/Android/data/{app_id}/files/reactor/rn-react-devtools-profile.json");
+    let devtools_profile = android_shell_text(
+        adb,
+        device_id,
+        &["cat", &remote_profile],
+        "rn-devtools-profile",
+    )
+    .await
+    .ok()
+    .filter(|profile| profile.len() <= MAX_DIAGNOSTIC_BYTES)
+    .and_then(|profile| serde_json::from_str::<Value>(&profile).ok())
+    .filter(|profile| {
+        profile
+            .get("dataForRoots")
+            .and_then(Value::as_array)
+            .is_some()
+    });
+    let profile = devtools_profile
+        .map(|profile| enrich_react_profile_source_locations(profile, &recent_events))
+        .or_else(|| build_managed_react_profile(&recent_events));
+    let profile_file = if let Some(profile) = profile {
+        let profile_path = artifact_dir.join("rn-profile.json");
+        fs::write(&profile_path, serde_json::to_vec_pretty(&profile)?).await?;
+        Some(profile_path.display().to_string())
+    } else {
+        None
+    };
+    let remote_root = format!("/sdcard/Android/data/{app_id}/files/reactor");
+    let mut warnings = Vec::new();
+    let hermes_heap_stats_file = match pull_optional_android_artifact(
+        adb,
+        device_id,
+        &format!("{remote_root}/rn-hermes-heap-stats.ndjson"),
+        &artifact_dir.join("rn-hermes-heap-stats.ndjson"),
+        MAX_DIAGNOSTIC_BYTES as u64,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warnings.push(format!("Hermes Heap 统计未保存：{error}"));
+            None
+        }
+    };
+    let hermes_heap_snapshot_file = match pull_optional_android_artifact(
+        adb,
+        device_id,
+        &format!("{remote_root}/rn-hermes.heapsnapshot"),
+        &artifact_dir.join("rn-hermes.heapsnapshot"),
+        MAX_HEAP_ARTIFACT_BYTES,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warnings.push(format!("Hermes Heap Snapshot 未保存：{error}"));
+            None
+        }
+    };
+    let java_heap_dump_file = match pull_optional_android_artifact(
+        adb,
+        device_id,
+        &format!("{remote_root}/rn-java.hprof"),
+        &artifact_dir.join("rn-java.hprof"),
+        MAX_HEAP_ARTIFACT_BYTES,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warnings.push(format!("Java HPROF 未保存：{error}"));
+            None
+        }
+    };
+    if hermes_heap_snapshot_file.is_none() {
+        warnings.push(
+            "通用 JS 对象保留确认需要使用 Reactor 诊断构建采集 Hermes Heap Snapshot。".to_owned(),
+        );
+    }
+    if java_heap_dump_file.is_none() {
+        warnings
+            .push("Java HPROF 只在独立诊断构建中采集，不用于 Release Benchmark 数值。".to_owned());
+    }
+    let retained_bytes = retained.values().copied().sum();
+    Ok(Some(ReactNativeDiagnosticsSummary {
+        schema_version: 1,
+        collector: "reactor-rn-sdk-v1".to_owned(),
+        benchmark_mode,
+        event_file: path.display().to_string(),
+        event_count,
+        component_names: component_names.into_iter().collect(),
+        component_render_count,
+        component_tree_commit_count,
+        profile_commit_count,
+        console_event_count,
+        network_event_count,
+        hermes_heap_sample_count,
+        allocated_object_count: u64::try_from(allocated.len()).unwrap_or(u64::MAX),
+        retained_object_count: u64::try_from(retained.len()).unwrap_or(u64::MAX),
+        retained_bytes,
+        profile_file,
+        hermes_heap_stats_file,
+        hermes_heap_snapshot_file,
+        java_heap_dump_file,
+        recent_events,
+        warnings,
+    }))
+}
+
+fn build_managed_react_profile(events: &[ReactNativeDiagnosticEvent]) -> Option<Value> {
+    let mut parents = BTreeMap::<String, Option<String>>::new();
+    let mut source_locations = BTreeMap::<String, Value>::new();
+    let mut commits = Vec::new();
+    for event in events {
+        match event.kind.as_str() {
+            "component_render" => {
+                if let Some(name) = event.payload.get("name").and_then(Value::as_str) {
+                    parents.insert(
+                        name.to_owned(),
+                        event
+                            .payload
+                            .get("parent")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                    if let Some(file) = event.payload.get("sourceFile").and_then(Value::as_str) {
+                        source_locations.insert(
+                            name.to_owned(),
+                            serde_json::json!({
+                                "file": file,
+                                "line": event.payload.get("sourceLine").and_then(Value::as_u64),
+                                "column": event.payload.get("sourceColumn").and_then(Value::as_u64),
+                            }),
+                        );
+                    }
+                }
+            }
+            "react_profile" => {
+                let Some(id) = event.payload.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let duration = event
+                    .payload
+                    .get("actualDuration")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .unwrap_or_default();
+                let self_duration = event
+                    .payload
+                    .get("baseDuration")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(duration);
+                parents.entry(id.to_owned()).or_default();
+                commits.push(serde_json::json!({
+                    "timestamp": event.payload.get("commitTime").and_then(Value::as_f64),
+                    "duration": duration,
+                    "fiberActualDurations": [[id, duration]],
+                    "fiberSelfDurations": [[id, self_duration]],
+                    "changeDescriptions": {}
+                }));
+            }
+            _ => {}
+        }
+    }
+    if commits.is_empty() {
+        return None;
+    }
+    let names = parents.keys().cloned().collect::<BTreeSet<_>>();
+    let snapshots = parents
+        .keys()
+        .map(|name| {
+            let children = parents
+                .iter()
+                .filter_map(|(child, candidate_parent)| {
+                    (candidate_parent.as_deref() == Some(name.as_str())).then_some(child)
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "id": name,
+                "displayName": name,
+                "children": children,
+            })
+        })
+        .collect::<Vec<_>>();
+    let roots = parents
+        .iter()
+        .filter_map(|(name, parent)| {
+            parent
+                .as_ref()
+                .is_none_or(|parent| !names.contains(parent))
+                .then_some(name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Some(serde_json::json!({
+        "version": 5,
+        "source": "reactor-rn-sdk-v1",
+        "sourceLocations": source_locations,
+        "dataForRoots": [{
+            "rootID": roots.first().cloned().unwrap_or_else(|| "reactor-root".to_owned()),
+            "snapshots": snapshots,
+            "commitData": commits,
+        }]
+    }))
+}
+
+fn enrich_react_profile_source_locations(
+    mut profile: Value,
+    events: &[ReactNativeDiagnosticEvent],
+) -> Value {
+    let locations_by_name = events
+        .iter()
+        .filter(|event| event.kind == "component_render")
+        .filter_map(|event| {
+            let name = event.payload.get("name").and_then(Value::as_str)?;
+            let file = event.payload.get("sourceFile").and_then(Value::as_str)?;
+            Some((
+                name.to_owned(),
+                serde_json::json!({
+                    "file": file,
+                    "line": event.payload.get("sourceLine").and_then(Value::as_u64),
+                    "column": event.payload.get("sourceColumn").and_then(Value::as_u64),
+                }),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if locations_by_name.is_empty() {
+        return profile;
+    }
+
+    let mut source_locations = profile
+        .get("sourceLocations")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for root in profile
+        .get("dataForRoots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for snapshot in root
+            .get("snapshots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some((id, node)) = react_profile_snapshot_entry(snapshot) else {
+                continue;
+            };
+            let Some(location) = node
+                .get("displayName")
+                .and_then(Value::as_str)
+                .and_then(|name| locations_by_name.get(name))
+            else {
+                continue;
+            };
+            source_locations.insert(id, location.clone());
+        }
+    }
+    if let Some(object) = profile.as_object_mut() {
+        object.insert(
+            "sourceLocations".to_owned(),
+            Value::Object(source_locations),
+        );
+    }
+    profile
+}
+
+fn react_profile_snapshot_entry(value: &Value) -> Option<(String, &Value)> {
+    if let Some(pair) = value.as_array() {
+        let id = pair.first().and_then(|id| match id {
+            Value::String(id) => Some(id.clone()),
+            Value::Number(id) => Some(id.to_string()),
+            _ => None,
+        })?;
+        return Some((id, pair.get(1)?));
+    }
+    let id = value.get("id").and_then(|id| match id {
+        Value::String(id) => Some(id.clone()),
+        Value::Number(id) => Some(id.to_string()),
+        _ => None,
+    })?;
+    Some((id, value))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2593,6 +3343,15 @@ async fn execute_android_job_inner(
         expected_trace_ms,
     )
     .await?;
+    let (observer_stop, observer_stop_rx) = tokio::sync::watch::channel(false);
+    let observer_task = tokio::spawn(run_android_live_observer(
+        request.workspace.clone(),
+        job_id.to_owned(),
+        adb.clone(),
+        request.device_id.clone(),
+        lock.flow.app_id.clone(),
+        observer_stop_rx,
+    ));
     let flashlight_result = run_flashlight(
         &flashlight,
         &maestro,
@@ -2607,6 +3366,8 @@ async fn execute_android_job_inner(
         &input_environment,
     )
     .await;
+    let _ = observer_stop.send(true);
+    let _ = observer_task.await;
     let perfetto_result = stop_perfetto(&adb, &request.device_id, &perfetto, &perfetto_path).await;
     if perfetto_path.is_file() {
         register_artifact(&request.workspace, job_id, "perfetto_trace", &perfetto_path)?;
@@ -2617,14 +3378,28 @@ async fn execute_android_job_inner(
     }
     perfetto_result?;
     register_artifact(&request.workspace, job_id, "flashlight_raw", &raw_path)?;
-    let memory_leak = if let Some(plan) = &request.leak_test {
+    let mut memory_leak = if let Some(plan) = &request.leak_test {
         open_store(&request.workspace)?.append_event(
             job_id,
             JobState::Measuring,
             "同一进程循环 Flow 并采集内存检查点",
             None,
         )?;
-        let report = run_android_memory_leak_test(
+        let heap_duration_ms = u64::from(plan.cycles)
+            .saturating_mul(30_000)
+            .saturating_add(plan.stabilization_ms.saturating_mul(u64::from(plan.cycles)))
+            .saturating_add(plan.cooldown_ms)
+            .saturating_add(120_000)
+            .min(30 * 60 * 1_000);
+        let heap_config = heapprofd_config(&lock.flow.app_id, heap_duration_ms);
+        let heap_session = start_perfetto_with_config(
+            &adb,
+            &request.device_id,
+            &format!("reactor-{job_id}-heapprofd"),
+            &heap_config,
+        )
+        .await;
+        let leak_result = run_android_memory_leak_test(
             plan,
             &request.workspace,
             job_id,
@@ -2638,18 +3413,105 @@ async fn execute_android_job_inner(
             (!lock.flow.teardown.is_empty()).then_some(teardown_path.as_path()),
             &input_environment,
         )
-        .await?;
-        let path = artifact_dir.join("android-memory-leak.json");
-        fs::write(
-            &path,
-            format!("{}\n", serde_json::to_string_pretty(&report)?),
-        )
-        .await?;
-        register_artifact(&request.workspace, job_id, "android_memory_leak", &path)?;
+        .await;
+        let native_heap_path = artifact_dir.join("android-native-heap.pftrace");
+        let native_heap_result = match heap_session {
+            Ok(session) => {
+                stop_perfetto(&adb, &request.device_id, &session, &native_heap_path).await
+            }
+            Err(error) => Err(error),
+        };
+        let mut report = leak_result?;
+        match native_heap_result {
+            Ok(()) => {
+                register_artifact(
+                    &request.workspace,
+                    job_id,
+                    "android_native_heap_trace",
+                    &native_heap_path,
+                )?;
+                report.native_heap_trace_file = Some(native_heap_path.display().to_string());
+                match analyze_heapprofd_trace(&trace_processor, &native_heap_path).await {
+                    Ok((bytes, count)) => {
+                        report.native_retained_bytes = Some(bytes);
+                        report.native_retained_allocation_count = Some(count);
+                    }
+                    Err(error) => report
+                        .warnings
+                        .push(format!("Native Heap 保留量解析失败：{error}")),
+                }
+            }
+            Err(error) => report
+                .warnings
+                .push(format!("Perfetto heapprofd 不可用：{error}")),
+        }
         Some(report)
     } else {
         None
     };
+    let rn_diagnostics = if request.framework == "react-native" {
+        match capture_react_native_diagnostics(
+            &adb,
+            &request.device_id,
+            &lock.flow.app_id,
+            &artifact_dir,
+        )
+        .await
+        {
+            Ok(Some(summary)) => {
+                register_artifact(
+                    &request.workspace,
+                    job_id,
+                    "react_native_diagnostics",
+                    Path::new(&summary.event_file),
+                )?;
+                if let Some(profile_file) = &summary.profile_file {
+                    register_artifact(
+                        &request.workspace,
+                        job_id,
+                        "react_native_profile",
+                        Path::new(profile_file),
+                    )?;
+                }
+                for (kind, path) in [
+                    (
+                        "react_native_hermes_heap_stats",
+                        &summary.hermes_heap_stats_file,
+                    ),
+                    (
+                        "react_native_hermes_heap_snapshot",
+                        &summary.hermes_heap_snapshot_file,
+                    ),
+                    ("react_native_java_heap_dump", &summary.java_heap_dump_file),
+                ] {
+                    if let Some(path) = path {
+                        register_artifact(&request.workspace, job_id, kind, Path::new(path))?;
+                    }
+                }
+                Some(summary)
+            }
+            Ok(None) => {
+                native_warnings.push("目标 App 未提供 Reactor RN SDK 诊断证据。".to_owned());
+                None
+            }
+            Err(error) => {
+                native_warnings.push(format!("RN SDK 诊断证据不可用：{error}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(report) = memory_leak.as_mut() {
+        reconcile_memory_leak_with_rn_diagnostics(report, rn_diagnostics.as_ref());
+        let path = artifact_dir.join("android-memory-leak.json");
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string_pretty(report)?),
+        )
+        .await?;
+        register_artifact(&request.workspace, job_id, "android_memory_leak", &path)?;
+    }
     transition_job(
         &request.workspace,
         job_id,
@@ -2709,6 +3571,7 @@ async fn execute_android_job_inner(
         thermal_status_before,
         thermal_status_after,
         memory_leak,
+        rn_diagnostics,
         warnings: native_warnings,
     };
     let native_metrics_path = artifact_dir.join("android-native-metrics.json");
@@ -4567,6 +5430,117 @@ mod tests {
     }
 
     #[test]
+    fn retained_rn_objects_confirm_an_existing_growth_trend() {
+        let plan = AndroidLeakTestPlan {
+            cycles: 6,
+            checkpoint_every: 2,
+            warmup_cycles: 2,
+            stabilization_ms: 0,
+            cooldown_ms: 0,
+            threshold_mb_per_cycle: 0.25,
+        };
+        let checkpoints = vec![
+            AndroidMemoryCheckpoint {
+                kind: "cycle".to_owned(),
+                cycle: 2,
+                elapsed_ms: 0,
+                cpu_pct: None,
+                pss_mb: Some(60.0),
+                rss_mb: None,
+                java_heap_mb: None,
+                native_heap_mb: None,
+            },
+            AndroidMemoryCheckpoint {
+                kind: "cycle".to_owned(),
+                cycle: 4,
+                elapsed_ms: 100,
+                cpu_pct: None,
+                pss_mb: Some(62.0),
+                rss_mb: None,
+                java_heap_mb: None,
+                native_heap_mb: None,
+            },
+            AndroidMemoryCheckpoint {
+                kind: "cycle".to_owned(),
+                cycle: 6,
+                elapsed_ms: 200,
+                cpu_pct: None,
+                pss_mb: Some(64.0),
+                rss_mb: None,
+                java_heap_mb: None,
+                native_heap_mb: None,
+            },
+        ];
+        let mut report = analyze_memory_leak(&plan, checkpoints);
+        assert_eq!(report.verdict, "insufficient_evidence");
+        let diagnostics = ReactNativeDiagnosticsSummary {
+            schema_version: 1,
+            collector: "reactor-rn-sdk-v1".to_owned(),
+            benchmark_mode: Some("memory-retention-fault".to_owned()),
+            event_file: "rn-diagnostics.ndjson".to_owned(),
+            event_count: 12,
+            component_names: vec![],
+            component_render_count: 0,
+            component_tree_commit_count: 0,
+            profile_commit_count: 0,
+            console_event_count: 0,
+            network_event_count: 0,
+            hermes_heap_sample_count: 0,
+            allocated_object_count: 6,
+            retained_object_count: 6,
+            retained_bytes: 6 * 1024 * 1024,
+            profile_file: None,
+            hermes_heap_stats_file: None,
+            hermes_heap_snapshot_file: None,
+            java_heap_dump_file: None,
+            recent_events: vec![],
+            warnings: vec![],
+        };
+        reconcile_memory_leak_with_rn_diagnostics(&mut report, Some(&diagnostics));
+        assert_eq!(report.verdict, "confirmed_leak");
+        assert_eq!(report.confidence, "medium");
+        assert_eq!(report.managed_retained_object_count, Some(6));
+        assert_eq!(report.managed_retained_bytes, Some(6 * 1024 * 1024));
+    }
+
+    #[test]
+    fn enriches_devtools_profile_with_managed_component_source_locations() {
+        let profile = serde_json::json!({
+            "version": 5,
+            "dataForRoots": [{
+                "rootID": 1,
+                "snapshots": [[42, {
+                    "id": 42,
+                    "displayName": "MemoryScenario",
+                    "children": []
+                }]],
+                "commitData": []
+            }]
+        });
+        let events = vec![ReactNativeDiagnosticEvent {
+            timestamp_ms: 1,
+            kind: "component_render".to_owned(),
+            payload: serde_json::json!({
+                "name": "MemoryScenario",
+                "sourceFile": "demos/react-native/App.tsx",
+                "sourceLine": 170,
+                "sourceColumn": 1
+            }),
+        }];
+
+        let enriched = enrich_react_profile_source_locations(profile, &events);
+
+        assert_eq!(
+            enriched.pointer("/sourceLocations/42"),
+            Some(&serde_json::json!({
+                "file": "demos/react-native/App.tsx",
+                "line": 170,
+                "column": 1
+            }))
+        );
+    }
+
+    #[test]
     fn inspector_screenshot_requires_a_bounded_png() {
         let valid = b"\x89PNG\r\n\x1a\nsmall".to_vec();
         assert_eq!(
@@ -4638,6 +5612,18 @@ mod tests {
         assert!(config.contains("android.surfaceflinger.frametimeline"));
         assert!(config.contains("atrace_apps: \"com.reactor.fixture\""));
         assert!(config.contains("duration_ms: 12345"));
+    }
+
+    #[test]
+    fn heapprofd_config_and_retention_csv_are_versioned_and_parseable() {
+        let config = heapprofd_config("com.reactor.fixture", 45_000);
+        assert!(config.contains("android.heapprofd"));
+        assert!(config.contains("process_cmdline: \"com.reactor.fixture\""));
+        assert!(config.contains("duration_ms: 45000"));
+        assert_eq!(
+            parse_heapprofd_csv("retained_bytes,retained_allocation_count\n1048576,12\n").unwrap(),
+            (1_048_576, 12)
+        );
     }
 
     #[tokio::test]

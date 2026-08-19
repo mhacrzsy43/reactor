@@ -84,6 +84,13 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+        buildConfigField "boolean", "REACTOR_DIAGNOSTIC", "false"
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared"
+                cppFlags "-std=c++20", "-fexceptions", "-frtti"
+            }
+        }
     }
     signingConfigs {
         debug {
@@ -104,6 +111,20 @@ android {
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
+        diagnostic {
+            initWith release
+            signingConfig signingConfigs.debug
+            matchingFallbacks = ["release"]
+            manifestPlaceholders = [usesCleartextTraffic: "false"]
+            buildConfigField "boolean", "REACTOR_DIAGNOSTIC", "true"
+            versionNameSuffix "-diagnostic"
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("src/main/jni/CMakeLists.txt")
+            version "3.22.1"
+        }
     }
 }
 
@@ -116,4 +137,11 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+}
+
+// Metro's deterministic fault selector is part of the bundle input. Declaring it here prevents
+// Gradle from reusing a normal bundle when Reactor asks for a render or memory fault build.
+tasks.matching { it.name.startsWith("createBundle") && it.name.endsWith("JsAndAssets") }.configureEach {
+    inputs.property("reactorDemoFault", providers.environmentVariable("REACTOR_DEMO_FAULT").orElse("normal"))
+    inputs.property("reactorRnProfile", providers.environmentVariable("REACTOR_RN_PROFILE").orElse("0"))
 }

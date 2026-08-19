@@ -92,7 +92,7 @@ h1 { margin: 0; font-size: 25px; line-height: 1.2; letter-spacing: -.035em; }
 .live-performance-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .live-performance-heading > div { display: flex; align-items: center; gap: 7px; }
 .live-performance-heading small { color: var(--muted); font-size: 10px; }
-.live-performance-values { margin-top: 10px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.live-performance-values { margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 7px; }
 .live-performance-values div { padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; }
 .live-performance-values span, .live-performance-values b { display: block; }
 .live-performance-values span { color: var(--muted); font-size: 9px; }
@@ -500,6 +500,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .explorer-empty p { max-width: 480px; margin: 0 0 8px; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .memory-leak-card { margin-top: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.memory-leak-card.confirmed_leak { border-color: color-mix(in srgb, var(--red) 70%, var(--line)); }
 .memory-leak-card.suspected_leak { border-color: color-mix(in srgb, var(--orange) 60%, var(--line)); }
 .memory-leak-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .memory-leak-heading span, .memory-leak-card p { color: var(--muted); font-size: 11px; }
@@ -781,6 +782,19 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .diagnostic-run-empty b { color: var(--text-soft); font-size: 10px; }
 .diagnostic-run-empty span { margin-top: 4px; font-size: 8px; }
 .rn-evidence-status { margin-top: 12px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.runtime-diagnostic-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; }
+.runtime-diagnostic-facts div { padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.runtime-diagnostic-facts span, .runtime-diagnostic-facts b { display: block; }
+.runtime-diagnostic-facts span { color: var(--muted); font-size: 10px; }
+.runtime-diagnostic-facts b { margin-top: 5px; font: 12px DM Mono, monospace; }
+.runtime-component-tree { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; }
+.runtime-component-tree h3 { margin: 0 0 9px; font-size: 13px; }
+.runtime-component-tree div { min-height: 30px; display: flex; align-items: center; gap: 8px; border-left: 1px solid color-mix(in srgb, var(--purple) 35%, transparent); color: var(--text); font: 11px DM Mono, monospace; }
+.runtime-event-timeline { margin-top: 14px; display: grid; gap: 8px; }
+.runtime-event-timeline h3 { margin: 0 0 4px; font-size: 13px; }
+.runtime-event-timeline > div { display: grid; grid-template-columns: 90px 72px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.runtime-event-timeline time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+.runtime-event-timeline span { min-width: 0; overflow-wrap: anywhere; color: var(--muted); }
 .rn-evidence-status button { min-height: 64px; padding: 10px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--surface-raised); cursor: pointer; text-align: left; }
 .rn-evidence-status button > div { min-width: 0; flex: 1; }
 .rn-evidence-status b, .rn-evidence-status span { display: block; }

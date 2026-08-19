@@ -1,0 +1,11 @@
+// Applied only for the second-phase diagnostic build. The normal Release build continues to use
+// React Native's official prebuilt Hermes artifact and remains comparable with production.
+gradle.beforeProject { target ->
+    if (target.name != 'hermes-engine') return
+    target.pluginManager.withPlugin('com.android.library') {
+        def android = target.extensions.getByName('android')
+        android.defaultConfig.externalNativeBuild.cmake.arguments(
+            '-DHERMES_MEMORY_INSTRUMENTATION=True'
+        )
+    }
+}

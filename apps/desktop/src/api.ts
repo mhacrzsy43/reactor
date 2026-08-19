@@ -494,6 +494,11 @@ export async function analyzeProfileJson(json: string, sourceMap?: string): Prom
   return invoke("analyze_profile_json", { input: { json, sourceMap: sourceMap ?? null } });
 }
 
+export async function analyzeManagedProfile(path: string): Promise<DiagnosticProfileReport> {
+  if (!inTauri) throw new Error("受管 Profile 诊断请在 Reactor 桌面应用中使用");
+  return invoke("analyze_managed_profile", { input: { path } });
+}
+
 export async function diffProfileReports(
   baseline: DiagnosticProfileReport,
   current: DiagnosticProfileReport,

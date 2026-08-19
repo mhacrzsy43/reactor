@@ -160,10 +160,17 @@ pub fn render_html_report(title: &str, results: &[NormalizedResult]) -> String {
             .expect("writing to String cannot fail");
             if let Some(leak) = &native.memory_leak {
                 let verdict = match leak.verdict.as_str() {
+                    "confirmed_leak" => "确认泄漏",
                     "suspected_leak" => "疑似泄漏",
                     "stable" => "趋势稳定",
                     _ => "证据不足",
                 };
+                let managed_objects = leak
+                    .managed_retained_object_count
+                    .map_or_else(|| "—".to_owned(), |value| value.to_string());
+                let managed_memory = leak
+                    .managed_retained_bytes
+                    .map_or_else(|| "—".to_owned(), bytes);
                 write!(
                     html,
                     "<div class=\"native leak\"><h3>同进程循环内存 · {}</h3><dl>\
@@ -172,16 +179,40 @@ pub fn render_html_report(title: &str, results: &[NormalizedResult]) -> String {
                      <div><dt>首尾差</dt><dd>{}</dd></div>\
                      <div><dt>单调增长</dt><dd>{}</dd></div>\
                      <div><dt>冷却回落</dt><dd>{}</dd></div>\
+                     <div><dt>RN 保留对象</dt><dd>{}</dd></div>\
+                     <div><dt>RN 保留内存</dt><dd>{}</dd></div>\
                      <div><dt>置信度</dt><dd>{}</dd></div></dl>\
-                     <p>进程趋势只允许标记疑似泄漏；确认泄漏需要堆对象保留证据。 · {}</p></div>",
+                     <p>只有增长趋势与对象保留证据同时成立时才确认泄漏。 · {}</p></div>",
                     verdict,
                     leak.cycles,
                     number(leak.slope_mb_per_cycle, " MB/轮"),
                     number(leak.end_delta_mb, " MB"),
                     number(leak.monotonic_growth_pct, "%"),
                     number(leak.cooldown_recovery_mb, " MB"),
+                    escape(&managed_objects),
+                    escape(&managed_memory),
                     escape(&leak.confidence),
                     escape(&leak.definitions_version),
+                )
+                .expect("writing to String cannot fail");
+            }
+            if let Some(diagnostics) = &native.rn_diagnostics {
+                write!(
+                    html,
+                    "<div class=\"native\"><h3>React Native 受管诊断</h3><dl>\
+                     <div><dt>组件 / Render</dt><dd>{} / {}</dd></div>\
+                     <div><dt>Profiler Commit</dt><dd>{}</dd></div>\
+                     <div><dt>Console / Network</dt><dd>{} / {}</dd></div>\
+                     <div><dt>SDK 保留对象</dt><dd>{} · {}</dd></div></dl>\
+                     <p>{} · 证据只在本机并绑定当前 Flow Run</p></div>",
+                    diagnostics.component_names.len(),
+                    diagnostics.component_render_count,
+                    diagnostics.profile_commit_count,
+                    diagnostics.console_event_count,
+                    diagnostics.network_event_count,
+                    diagnostics.retained_object_count,
+                    bytes(diagnostics.retained_bytes),
+                    escape(&diagnostics.collector),
                 )
                 .expect("writing to String cannot fail");
             }
@@ -267,6 +298,18 @@ pub fn render_html_report(title: &str, results: &[NormalizedResult]) -> String {
 
 fn number(value: Option<f64>, unit: &str) -> String {
     value.map_or_else(|| "—".to_owned(), |value| format!("{value:.1}{unit}"))
+}
+
+fn bytes(value: u64) -> String {
+    if value < 1024 {
+        format!("{value} B")
+    } else if value < 1024 * 1024 {
+        let tenths = value.saturating_mul(10) / 1024;
+        format!("{}.{:01} KiB", tenths / 10, tenths % 10)
+    } else {
+        let tenths = value.saturating_mul(10) / 1024 / 1024;
+        format!("{}.{:01} MiB", tenths / 10, tenths % 10)
+    }
 }
 
 fn thermal(value: Option<u32>) -> String {
@@ -359,6 +402,7 @@ mod tests {
                 thermal_status_before: Some(0),
                 thermal_status_after: Some(1),
                 memory_leak: None,
+                rn_diagnostics: None,
                 warnings: vec![],
             }),
             ..result.clone()

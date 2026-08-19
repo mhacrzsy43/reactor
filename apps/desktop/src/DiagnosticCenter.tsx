@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { Component, useEffect, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
-import { analyzeProfileJson, diffProfileReports, getJobSnapshot, listJobs } from "./api";
+import { analyzeManagedProfile, analyzeProfileJson, diffProfileReports, getJobSnapshot, listJobs } from "./api";
 import type {
   ComponentProfileStat,
   DiagnosticProfileReport,
@@ -24,7 +24,7 @@ import type {
   SourceLocation,
 } from "./types";
 
-type DiagnosticView = "overview" | "render" | "findings" | "hermes" | "timeline" | "diff" | "source";
+type DiagnosticView = "overview" | "runtime" | "render" | "findings" | "hermes" | "timeline" | "diff" | "source";
 type DiagnosticFramework = "react-native" | "flutter" | "lynx";
 
 interface DiagnosticFlowContext {
@@ -188,6 +188,7 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
 
   const tabs = [
     ["overview", "性能总览", Activity],
+    ["runtime", "实时组件 / 日志", Braces],
     ["render", "Render", Layers3],
     ["findings", "重复渲染", AlertTriangle],
     ["hermes", "Hermes / JS CPU", Cpu],
@@ -204,6 +205,28 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
   const selectedResult = activeFlow
     ? recentRuns.find((result) => result.flowHash === activeFlow.flowHash && normalizeFramework(result.framework) === framework)
     : latestRuns[framework];
+
+  useEffect(() => {
+    const profileFile = selectedResult?.androidNative?.rnDiagnostics?.profileFile;
+    if (!profileFile) return;
+    let cancelled = false;
+    setLoading("current");
+    void analyzeManagedProfile(profileFile)
+      .then((report) => {
+        if (cancelled) return;
+        setCurrent(report);
+        setCurrentName("Flow 自动采集 · RN Profiling Renderer");
+        setProfileFlowHash(selectedResult.flowHash);
+        setSelectedCommit(undefined);
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(`自动解析 Flow RN Profile 失败：${String(reason)}`);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading((value) => value === "current" ? undefined : value);
+      });
+    return () => { cancelled = true; };
+  }, [selectedResult?.flowHash, selectedResult?.androidNative?.rnDiagnostics?.profileFile]);
 
   return (
     <>
@@ -256,6 +279,7 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
         </div>
         {view === "overview" && <PerformanceOverview framework={framework} result={selectedResult} current={current} hermes={hermes} loading={loading === "runs"} onDrill={drill} onNavigate={onNavigate} />}
         {framework !== "react-native" && view !== "overview" && <FrameworkPending framework={framework} onOverview={() => setView("overview")} />}
+        {framework === "react-native" && view === "runtime" && <RuntimeDiagnostics result={selectedResult} />}
         {framework === "react-native" && view === "render" && (current ? <ComponentTable components={current.components} selectedCommit={selectedCommit} /> : <EvidenceEmpty title="尚未采集 React Render Profile" detail="从 React Native DevTools 的 Profiler 导出 JSON，导入后可查看每个组件的 Render/Commit 次数与耗时。" />)}
         {framework === "react-native" && view === "findings" && (current ? <Findings report={current} onDrill={(commitId) => drill(commitId ? "timeline" : "render", commitId)} /> : <EvidenceEmpty title="重复渲染需要 React Profile 证据" detail="导入后 Reactor 会识别无变化 Render、父组件级联，并给出组件和 Commit 引用。" />)}
         {framework === "react-native" && view === "hermes" && (hermes ? <FunctionHotspots report={hermes} /> : <EvidenceEmpty title="尚未采集 Hermes / JS CPU Profile" detail="导入 Hermes 或 Chrome CPU Profile，查看 JS Self Time、采样数和 Source Map 源码位置。" />)}
@@ -405,6 +429,58 @@ function PerformanceOverview({
       {result && onNavigate && <div className="diagnostic-overview-actions"><button className="secondary-button" onClick={() => onNavigate("history")}>查看原始运行</button><button className="secondary-button" onClick={() => onNavigate("analysis")}>进行回归对比</button></div>}
     </div>
   );
+}
+
+function RuntimeDiagnostics({ result }: { result?: NormalizedResult }) {
+  const evidence = result?.androidNative?.rnDiagnostics;
+  if (!evidence) return <EvidenceEmpty title="当前 Run 没有 RN 受管诊断证据" detail="目标 App 需要接入 Reactor RN SDK；Release Benchmark 仍可运行，但不会伪造组件树、Console、Network 或对象保留证据。" />;
+  const recentEvents = evidence.recentEvents ?? [];
+  const latestTreeEvent = [...recentEvents].reverse().find((event) => event.kind === "component_tree");
+  const treeNodes = Array.isArray(latestTreeEvent?.payload.nodes) ? latestTreeEvent.payload.nodes as Array<Record<string, unknown>> : [];
+  const timeline = recentEvents.filter((event) => ["component_render", "component_tree", "react_profile", "console", "network", "object_lifecycle", "hermes_heap"].includes(event.kind)).slice(-24);
+  return (
+    <div className="diagnostic-panel runtime-diagnostics">
+      <div className="diagnostic-panel-heading"><div><h2>Flow 自动绑定的 RN 运行时证据</h2><p>{evidence.collector} · {evidence.benchmarkMode ?? "未声明模式"} · {evidence.eventCount} 条本地事件</p></div><span>{evidence.profileCommitCount ? "Profiling Renderer" : "生产 Renderer · 无耗时 Profile"}</span></div>
+      <div className="runtime-diagnostic-facts">
+        <div><span>组件树 Commit</span><b>{evidence.componentTreeCommitCount ?? 0}</b></div>
+        <div><span>Profiler Commit</span><b>{evidence.profileCommitCount}</b></div>
+        <div><span>Console</span><b>{evidence.consoleEventCount}</b></div>
+        <div><span>Network</span><b>{evidence.networkEventCount}</b></div>
+        <div><span>Hermes Heap</span><b>{evidence.hermesHeapSampleCount ?? 0}</b></div>
+        <div><span>JS 堆快照</span><b>{evidence.hermesHeapSnapshotFile ? "已保存" : "未采集"}</b></div>
+        <div><span>Java HPROF</span><b>{evidence.javaHeapDumpFile ? "已保存" : "未采集"}</b></div>
+        <div><span>保留对象</span><b>{evidence.retainedObjectCount}</b></div>
+        <div><span>显式保留</span><b>{formatDiagnosticBytes(evidence.retainedBytes)}</b></div>
+      </div>
+      <div className="runtime-component-tree"><h3>最新 React 组件树</h3>{treeNodes.length ? treeNodes.map((node, index) => <div key={String(node.id ?? index)} style={{ paddingLeft: `${Math.min(Number(node.depth ?? 0), 8) * 14}px` }}><Layers3 size={14} /><span>{String(node.name ?? "Anonymous")}</span></div>) : evidence.componentNames.map((name) => <div key={name}><Layers3 size={14} /><span>{name}</span></div>)}</div>
+      <div className="runtime-event-timeline">
+        <h3>Flow 期间事件时间线</h3>
+        {timeline.length ? timeline.map((event, index) => <div key={`${event.timestampMs}-${event.kind}-${index}`}><time>{new Date(event.timestampMs).toLocaleTimeString()}</time><b>{runtimeEventLabel(event.kind)}</b><span>{runtimeEventSummary(event.kind, event.payload)}</span></div>) : <p>当前 Run 没有可展示的详细事件。</p>}
+      </div>
+      <div className="diagnostic-note">Console 与 Network 只保存脱敏的本地事件；查询参数、Header 和 Body 不进入证据。JS/Java 堆快照只在独立诊断构建中于测量后生成，不混入正式 Release Benchmark 数值。</div>
+    </div>
+  );
+}
+
+function runtimeEventLabel(kind: string) {
+  return ({ component_render: "Render", component_tree: "Tree", react_profile: "Commit", console: "Console", network: "Network", object_lifecycle: "Object", hermes_heap: "Hermes Heap" } as Record<string, string>)[kind] ?? kind;
+}
+
+function runtimeEventSummary(kind: string, payload: Record<string, unknown>) {
+  if (kind === "component_render") return `${String(payload.name ?? "Unknown")} · parent ${String(payload.parent ?? "—")}`;
+  if (kind === "component_tree") return `Commit #${String(payload.commit ?? "—")} · ${String(payload.nodeCount ?? 0)} 个组件${payload.truncated ? " · 已截断" : ""}`;
+  if (kind === "react_profile") return `${String(payload.id ?? "Unknown")} · ${formatMs(typeof payload.actualDuration === "number" ? payload.actualDuration : 0)} · ${String(payload.phase ?? "commit")}`;
+  if (kind === "console") return `${String(payload.level ?? "log")} · ${Array.isArray(payload.values) ? payload.values.join(" ").slice(0, 240) : ""}`;
+  if (kind === "network") return `${String(payload.method ?? "GET")} ${String(payload.url ?? "")} · ${String(payload.status ?? payload.event ?? "")}`;
+  if (kind === "object_lifecycle") return `${String(payload.objectId ?? "object")} · ${String(payload.action ?? "event")} · ${formatDiagnosticBytes(typeof payload.bytes === "number" ? payload.bytes : 0)}`;
+  if (kind === "hermes_heap") return `${String(payload.label ?? "sample")} · ${Object.keys((payload.stats as Record<string, unknown> | undefined) ?? {}).length} 项 VM 指标`;
+  return kind;
+}
+
+function formatDiagnosticBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
 }
 
 function EvidenceEmpty({ title, detail }: { title: string; detail: string }) {

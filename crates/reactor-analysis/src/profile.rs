@@ -637,6 +637,7 @@ pub fn diff_profile_reports(
     baseline: &DiagnosticProfileReport,
     current: &DiagnosticProfileReport,
 ) -> ProfileDiffReport {
+    const MIN_TOTAL_TIME_REGRESSION_MS: f64 = 5.0;
     let mut reasons = Vec::new();
     if baseline.profile_type != current.profile_type {
         reasons.push("Profile 类型不同".to_owned());
@@ -676,7 +677,8 @@ pub fn diff_profile_reports(
             );
             let total_time_delta_pct = percent_delta(baseline_total_time_ms, current_total_time_ms);
             let regressed = render_count_delta_pct.is_some_and(|value| value > 20.0)
-                || total_time_delta_pct.is_some_and(|value| value > 20.0);
+                || (total_time_delta_ms >= MIN_TOTAL_TIME_REGRESSION_MS
+                    && total_time_delta_pct.is_some_and(|value| value > 20.0));
             let Some(component) = right.or(left) else {
                 return ComponentProfileDiff {
                     key,
@@ -1071,6 +1073,25 @@ mod tests {
                 .iter()
                 .all(|component| component.render_count_delta == 4)
         );
+    }
+
+    #[test]
+    fn profile_diff_ignores_small_absolute_timing_noise() {
+        let mut baseline = analyze_profile_json(&react_profile(2)).unwrap();
+        let mut current = baseline.clone();
+        for component in &mut baseline.components {
+            component.total_time_ms = 1.0;
+        }
+        for component in &mut current.components {
+            component.total_time_ms = 1.5;
+        }
+
+        let noisy_diff = diff_profile_reports(&baseline, &current);
+        assert_eq!(noisy_diff.regression_count, 0);
+
+        current.components[0].total_time_ms = 7.0;
+        let material_diff = diff_profile_reports(&baseline, &current);
+        assert_eq!(material_diff.regression_count, 1);
     }
 
     #[test]

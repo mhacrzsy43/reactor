@@ -176,7 +176,7 @@ AI Provider    Maestro      Perfetto / xctrace
          原始证据 + 版本化结果 + HTML/桌面报告
 ```
 
-正式测量由独立 Runner 执行。桌面 UI 可以断开或关闭；任务状态、日志游标和结果均通过 SQLite 恢复。正式运行时 UI 默认只接收低频进度事件，不持续解析 trace 或绘制实时图表。
+正式测量由独立 Runner 执行。桌面 UI 可以断开或关闭；任务状态、日志游标和结果均通过 SQLite 恢复。正式运行时 UI 只接收 Runner 持久化的低频观察样本，不持续解析 trace；实时曲线明确标为观察值，最终判定仍使用结束后归一化的正式 artifact。
 
 ## 4. Rust Workspace 边界
 
@@ -257,7 +257,7 @@ AI Provider    Maestro      Perfetto / xctrace
 3. **Flow Studio**：自然语言输入、结构化步骤、设备画面、UI 树、试跑和 diff。
 4. **设备实验室**：设备、OS、刷新率、电量、温度和连接状态。
 5. **实验配置**：场景、框架、seed、迭代次数、公平性检查和运行顺序预览。
-6. **运行中心**：阶段进度、低频日志、取消与 UI 断开；不绘制高频实时指标。
+6. **运行中心**：阶段/Flow 进度、2 秒级 CPU/内存/RN 诊断观察、取消与 UI 断开；不在桌面端执行高频采集或正式判定。
 7. **结果中心**：原始迭代、分布、对比、回归基线、AI 解释和证据链接。
 8. **设置**：AI Provider、隐私策略、受管工具版本、插件和数据保留。
 9. **诊断中心**：时间线、火焰图、Commit/Render 列表、组件热点、重复渲染检测、调用栈、源码定位和 profile diff。
@@ -454,17 +454,27 @@ M10.5 执行门禁（2026-08-19）：设置页可显式选择 Stable/Beta，开�
 | M11.1 验收协议 | ✅ 完成 | 固定相同 App ID、设备、Release 构建、Flow Hash 和采集器版本；正常版与故障版只允许改变被验证实现 |
 | M11.2 Soak/Leak Run Plan | ✅ 完成 | setup 一次、同一进程执行 N 个行为循环、按固定轮次采样、cool-down 后再采样、teardown 一次 |
 | M11.3 内存证据与判定 | ✅ 完成 | 保存逐检查点 PSS/RSS/Java Heap/Native Heap、CPU、增长斜率、单调增长比例、首尾差和冷却回落；只凭趋势标记“疑似泄漏”，有对象保留证据才允许“确认泄漏” |
-| M11.4 实时性能观察 | 🚧 进行中 | Flow 执行时低频展示当前阶段/命令、CPU、PSS/堆分项和趋势；观察值不进入最终 Benchmark 判定，断开 UI 不影响 Runner |
-| M11.5 RN 受管诊断 | ⬜ 待完成 | Reactor RN SDK/受管桥提供实时组件树、Console/Network、Flow 自动 Render/Hermes Profile、JS Heap Snapshot；Android profileable 构建接 Java HPROF 与 Perfetto heapprofd |
-| M11.6 故障 Demo | ⬜ 待完成 | RN Demo 提供确定性的正常、重复渲染和内存保留模式；模式与版本进入结果元数据，相同 Flow 可复测 |
-| M11.7 整改故事与 CI | ⬜ 待完成 | 故障版由规则检出并下钻到组件/源码，整改后同 Flow 复测恢复；CI 先失败后通过，结论可从 artifact 重建 |
-| M11.8 模拟器验收与交付 | ⬜ 待完成 | Android Emulator 完成全流程录像式步骤证据、全仓测试、严格 clippy、桌面构建、App/DMG 与正式安装 |
+| M11.4 实时性能观察 | ✅ 完成 | Flow 主测量与 Soak 均低频展示进度、CPU、PSS/RSS、Java/Native Heap、RN Tree/Profile、Console/Network 和趋势；观察值不进入最终 Benchmark 判定，断开 UI 不影响 Runner |
+| M11.5 RN 受管诊断 | ✅ 完成 | SDK 本地桥、真实 React Fiber 组件树、Console/Network、Profiling Renderer、Flow 自动 Profile、Hermes JS Heap Snapshot、Java HPROF、JSI Heap Stats 与 Perfetto heapprofd 均已在 Android Emulator 真实采集 |
+| M11.6 故障 Demo | ✅ 完成 | 正常、重复渲染和内存保留三种确定性 APK 已用相同 Flow、App ID、设备和采集器完成真实对照；趋势与对象保留证据分级判定通过 |
+| M11.7 整改故事与 CI | ✅ 完成 | 故障版由规则检出并下钻到组件/源码，整改后同 Flow 复测恢复；CI 真实先以退出码 2 失败、再以退出码 0 通过，结论可从 artifact 重建 |
+| M11.8 模拟器验收与交付 | ✅ 完成 | Android Emulator 全流程证据、全仓测试、严格 clippy、桌面生产构建、App/DMG、签名校验、正式安装与界面验收均已完成 |
 
 Soak/Leak 的采样策略属于 Run Plan，不写入 Flow DSL。Flow 只描述用户行为；这样同一 Flow 可在普通 Benchmark、长期稳定性和内存泄漏测试中复用，且修改采样频率不会改变行为哈希。
 
 首个故事使用四段演示：AI/录制生成并锁定登录与列表 Flow；三框架等价黑盒基准；RN 重复渲染 Profile Diff；正常版/泄漏版在同一进程循环后的内存趋势对比。用户已确认实时组件树、Console/Network、Flow 自动 Profile 与堆级证据也属于本轮必做能力；对未接 Reactor RN SDK 或非 profileable 的第三方 App 必须显示能力缺失，不能生成占位证据。
 
 M11.1–M11.3 首次真实门禁（2026-08-19）：Android Emulator `emulator-5554`、RN Release、Flow Hash `a6fff11504bf…` 完成任务 `6307b013-1834-44ee-a1fd-3d23f9dc4a3a`。setup 只执行一次，随后同一进程循环 6 轮并在第 2/4/6 轮与 cool-down 后采样；PSS 为 58.08/65.85/66.60 MB，冷却回落 1.50 MB。由于 warm-up 后只有两个有效趋势点，规则正确返回 `insufficient_evidence`，没有把短样本冒充泄漏。任务保存独立 `android-memory-leak.json`、逐轮 SQLite 遥测事件、Perfetto、Flashlight 和最终 HTML；状态机严格保持 Measuring → Normalizing，禁止逆向阶段迁移。
+
+M11.4 与 M11.5 第一段真实门禁（2026-08-19）：任务 `dcd306cc-60a2-4706-b4f9-f0bb3609f63f` 在 Android Emulator 上用相同 Flow Hash 执行 Profiling Release。运行期间 SQLite 每 2 秒出现 `live_telemetry`，实测可同时看到 PSS 61.93 MB、Java/Native Heap 5.23/15.57 MB、16 次 Fiber Tree Commit、4 次 Profile Commit 与 Console 计数；结束后保存 27 条 RN 本地事件、最新 24 节点真实组件树和自动生成的 `rn-profile.json`。最终正式帧/CPU/内存仍来自 Flashlight、Perfetto 与结束后归一化，实时观察样本明确不参与 verdict。
+
+M11.5 完整堆证据门禁（2026-08-20）：诊断构建将 `react-android`、旧 `react-native:+` 与 `hermes-android` 坐标统一替换为 RN 0.87 源码工程，并以 `HERMES_MEMORY_INSTRUMENTATION` 编译专用 Hermes；正式 Release 仍使用官方预编译 Hermes。ARM64 Diagnostic APK 安装到 `emulator-5554` 后，登录进入 Memory scenario 并真实执行 6 个循环，页面显示 `Memory cycle 6 complete`，最终保存 2.8 MB `rn-hermes.heapsnapshot`、38 MB `rn-java.hprof`、4.9 KB JSI Heap Stats、56 KB React Profile 与 46 KB RN 事件流，且无 Heap Snapshot 错误或进程崩溃。
+
+M11.6 三版故障门禁（2026-08-20）：固定 Flow Hash `a6fff11504bf…`，同一 `emulator-5554` 与 RN Release 分别完成 normal `f8f2b208-a580-42f1-8d27-b873ee49a1ff`、duplicate-render-fault `750088de-0eb2-4fed-9661-4a0a12608017` 和 memory-retention-fault `3ec4ab29-9f8f-432d-801d-1d5700fd4282`。重复渲染版 Render 44 次（正常版 8 次），内存保留版在增长趋势成立的同时记录 6 个 RN 保留对象 / 6,291,456 bytes 与 104,080 native retained bytes，判定为 `confirmed_leak`；正常版保持 `insufficient_evidence`，未误报泄漏。
+
+M11.7 整改与 CI 门禁（2026-08-20）：同一 scenario `m11-source-regression`、Flow Hash 和设备下，正常基线 `383baf59-d27b-4e34-bc5f-6defb9cc2195` 对重复渲染故障 `b8ddb9ef-07f2-4c63-9062-2102e3a69bab` 的 CI 退出码为 2；`MemoryScenario` Render 2→8（+300%），并准确下钻至 `demos/react-native/App.tsx:170`。恢复正常实现后的 Run `99732f06-5b29-4649-a947-501562f5e66b` 对相同基线退出码为 0，Profile 回归数为 0。两轮均从保存的 result/Profile artifact 重建 `analysis.json`、`junit.xml`、`report.html`，JUnit XML 校验通过。为避免亚毫秒组件耗时的相对比例噪声误阻断 CI，耗时回归新增 5ms 绝对变化下限；Render 次数回归规则保持不变。
+
+M11.8 最终交付门禁（2026-08-20）：全仓 125 个非忽略测试通过，受管 Trace Processor ignored 真机依赖测试单独通过，严格 clippy 零告警，桌面 TypeScript/Vite 生产构建通过。最终 arm64 `Reactor.app` 与 `Reactor_0.1.0_aarch64.dmg` 成功生成，App 通过 deep/strict codesign 校验；DMG SHA-256 为 `1f5c4ff600f53ee25e69f4e45a72b84d3213cc98c0a78249fe56513ec582634c`。新版已安装到 `/Applications/Reactor.app`，前版可从 `/Applications/Reactor.pre-m11-20260820.app.disabled` 恢复。正式安装版界面验收确认性能总览、实时组件/日志、24 节点组件树、16 次 Tree Commit、4 次 Profile Commit、Console、Hermes Heap 与对象生命周期时间线均可访问；未配置 Apple 开发者凭据，因此仅作 ad-hoc 签名、未 notarize。
 
 ## 9. 测试体系
 

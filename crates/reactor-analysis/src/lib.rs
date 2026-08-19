@@ -682,6 +682,7 @@ mod tests {
                 thermal_status_before: Some(0),
                 thermal_status_after: Some(0),
                 memory_leak: None,
+                rn_diagnostics: None,
                 warnings: vec![],
             }),
             ios_native: None,

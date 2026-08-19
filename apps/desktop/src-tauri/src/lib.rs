@@ -481,6 +481,12 @@ struct AnalyzeProfileInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AnalyzeManagedProfileInput {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DiffProfileInput {
     baseline: DiagnosticProfileReport,
     current: DiagnosticProfileReport,
@@ -2480,6 +2486,34 @@ fn analyze_profile_json(input: AnalyzeProfileInput) -> Result<DiagnosticProfileR
 }
 
 #[tauri::command]
+fn analyze_managed_profile(
+    input: AnalyzeManagedProfileInput,
+) -> Result<DiagnosticProfileReport, String> {
+    let result_root = workspace()
+        .join("results/runs")
+        .canonicalize()
+        .map_err(|error| format!("无法访问 Reactor 结果目录：{error}"))?;
+    let path = PathBuf::from(input.path)
+        .canonicalize()
+        .map_err(|error| format!("无法读取受管 Profile：{error}"))?;
+    if !path.starts_with(&result_root) {
+        return Err("只能读取 Reactor 当前工作区生成的受管 Profile".to_owned());
+    }
+    let metadata = path
+        .metadata()
+        .map_err(|error| format!("无法读取 Profile 元数据：{error}"))?;
+    if metadata.len() > MAX_PROFILE_JSON_BYTES {
+        return Err(format!(
+            "Profile 超过 {} MiB 安全上限",
+            MAX_PROFILE_JSON_BYTES / 1024 / 1024
+        ));
+    }
+    let json =
+        std::fs::read_to_string(path).map_err(|error| format!("无法读取受管 Profile：{error}"))?;
+    analyze_diagnostic_profile(&json).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn diff_profile_reports(input: DiffProfileInput) -> ProfileDiffReport {
     let DiffProfileInput { baseline, current } = input;
     let report = diff_diagnostic_profiles(&baseline, &current);
@@ -2788,6 +2822,7 @@ pub fn run() {
             list_jobs,
             analyze_job_pair,
             analyze_profile_json,
+            analyze_managed_profile,
             diff_profile_reports,
             explain_analysis,
             cancel_job,

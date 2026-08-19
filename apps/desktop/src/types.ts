@@ -243,7 +243,38 @@ export interface AndroidNativeMetrics {
   thermalStatusBefore?: number;
   thermalStatusAfter?: number;
   memoryLeak?: AndroidMemoryLeakReport;
+  rnDiagnostics?: ReactNativeDiagnosticsSummary;
   warnings: string[];
+}
+
+export interface ReactNativeDiagnosticsSummary {
+  schemaVersion: number;
+  collector: string;
+  benchmarkMode?: string;
+  eventFile: string;
+  eventCount: number;
+  componentNames: string[];
+  componentRenderCount: number;
+  componentTreeCommitCount: number;
+  profileCommitCount: number;
+  consoleEventCount: number;
+  networkEventCount: number;
+  hermesHeapSampleCount: number;
+  allocatedObjectCount: number;
+  retainedObjectCount: number;
+  retainedBytes: number;
+  profileFile?: string;
+  hermesHeapStatsFile?: string;
+  hermesHeapSnapshotFile?: string;
+  javaHeapDumpFile?: string;
+  recentEvents: ReactNativeDiagnosticEvent[];
+  warnings: string[];
+}
+
+export interface ReactNativeDiagnosticEvent {
+  timestampMs: number;
+  kind: string;
+  payload: Record<string, unknown>;
 }
 
 export interface AndroidMemoryCheckpoint {
@@ -271,8 +302,14 @@ export interface AndroidMemoryLeakReport {
   monotonicGrowthPct?: number;
   cooldownRecoveryMb?: number;
   thresholdMbPerCycle: number;
-  verdict: "stable" | "suspected_leak" | "insufficient_evidence" | string;
+  verdict: "stable" | "suspected_leak" | "confirmed_leak" | "insufficient_evidence" | string;
   confidence: "low" | "medium" | "high" | string;
+  nativeHeapTraceFile?: string;
+  nativeRetainedBytes?: number;
+  nativeRetainedAllocationCount?: number;
+  retentionEvidence?: string;
+  managedRetainedObjectCount?: number;
+  managedRetainedBytes?: number;
   checkpoints: AndroidMemoryCheckpoint[];
   warnings: string[];
 }

@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useRef, useState} from 'react';
+import React, {Profiler, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Animated,
   FlatList,
@@ -14,6 +14,20 @@ import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
+import {
+  installReactorDiagnostics,
+  recordComponent,
+  recordBenchmarkMode,
+  recordHermesHeap,
+  recordObjectLifecycle,
+  recordProfilerCommit,
+  resetReactorDiagnostics,
+} from './ReactorDiagnostics';
+import {
+  BENCHMARK_MODE,
+  DUPLICATE_RENDER_CYCLES,
+  RETAIN_MEMORY_CYCLES,
+} from './ReactorBenchmarkMode';
 
 type Screen = 'home' | 'list' | 'update' | 'animation' | 'memory';
 type Palette = ReturnType<typeof paletteFor>;
@@ -24,11 +38,6 @@ const UPDATE_COUNT = 500;
 const UPDATE_TICKS = 80;
 const UPDATE_BATCH = 50;
 const TILE_COUNT = 64;
-
-// The checked-in implementation is the remediated build. The end-to-end Reactor story first
-// builds this demo with this switch temporarily enabled, captures a regression with the same
-// locked Flow, then restores false and proves the memory slope recovers.
-const RETAIN_MEMORY_CYCLES = false;
 
 // Deterministic fake credential used by the auth benchmark scenario. The value is
 // intentionally weak and disclosed in the repo so Reactor has something stable to
@@ -50,6 +59,15 @@ function deterministicValue(index: number, tick = 0) {
 function App() {
   const dark = useColorScheme() === 'dark';
   const palette = useMemo(() => paletteFor(dark), [dark]);
+  useEffect(() => {
+    installReactorDiagnostics();
+    resetReactorDiagnostics();
+    console.log('Reactor RN diagnostic session ready');
+    console.log(`Reactor benchmark mode: ${BENCHMARK_MODE}`);
+    recordBenchmarkMode(BENCHMARK_MODE);
+    recordHermesHeap('session-start');
+  }, []);
+  recordComponent('App');
   return (
     <SafeAreaProvider>
       <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
@@ -94,6 +112,7 @@ function Header({title, palette, onBack}: {title: string; palette: Palette; onBa
 }
 
 function Home({palette, session, onSignOut, onSelect}: {palette: Palette; session: string; onSignOut: () => void; onSelect: (screen: Screen) => void}) {
+  recordComponent('Home', 'BenchApp');
   return (
     <View style={styles.home}>
       <Text style={[styles.eyebrow, {color: palette.accent}]}>React Native · Release benchmark</Text>
@@ -151,15 +170,36 @@ function BenchRow({index, value, palette}: {index: number; value: number; palett
 function MemoryScenario({palette, onBack}: {palette: Palette; onBack: () => void}) {
   const retained = useRef<number[][]>([]);
   const [cycle, setCycle] = useState(0);
+  const [, setRenderNoise] = useState(0);
+  recordComponent('MemoryScenario', 'BenchApp', {
+    cycle,
+    sourceFile: 'demos/react-native/App.tsx',
+    sourceLine: 170,
+    sourceColumn: 1,
+  });
 
   function runCycle() {
     const nextCycle = cycle + 1;
     const payload = Array.from({length: 128 * 1024}, (_, index) => deterministicValue(index, nextCycle));
-    if (RETAIN_MEMORY_CYCLES) retained.current.push(payload);
+    const objectId = `memory-cycle-${nextCycle}`;
+    recordObjectLifecycle(objectId, 'allocate', payload.length * 8);
+    if (RETAIN_MEMORY_CYCLES) {
+      retained.current.push(payload);
+      recordObjectLifecycle(objectId, 'retain', payload.length * 8);
+    } else {
+      recordObjectLifecycle(objectId, 'release', payload.length * 8);
+    }
     setCycle(nextCycle);
+    if (DUPLICATE_RENDER_CYCLES) {
+      for (let index = 0; index < 8; index += 1) {
+        setTimeout(() => setRenderNoise(value => value + 1), 12 * (index + 1));
+      }
+    }
+    setTimeout(() => recordHermesHeap(`memory-cycle-${nextCycle}`, nextCycle === 6), 0);
   }
 
   return (
+    <Profiler id="MemoryScenario" onRender={recordProfilerCommit}>
     <View style={styles.fill}>
       <Header title="Memory ready" palette={palette} onBack={onBack} />
       <View style={styles.memoryBody}>
@@ -169,6 +209,7 @@ function MemoryScenario({palette, onBack}: {palette: Palette; onBack: () => void
         <Text style={[styles.caption, {color: palette.muted}]}>Each action creates the same deterministic payload. Reactor decides from post-warmup checkpoints, never from this label.</Text>
       </View>
     </View>
+    </Profiler>
   );
 }
 
