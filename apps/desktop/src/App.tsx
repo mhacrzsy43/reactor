@@ -29,8 +29,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, stageUpdate, trialGeneratedFlow } from "./api";
-import type { CliProviderStatus, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
+import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
+import { FlowCopilot } from "./FlowCopilot";
 import { FlowExplorer } from "./FlowExplorer";
 import type {
   Bootstrap,
@@ -529,41 +530,6 @@ function App() {
     }
   }
 
-  async function onRepair() {
-    if (!preparation?.failure || !selectedTarget) return;
-    setBusy(true);
-    setError("");
-    try {
-      const repaired = await repairFlow({
-        preparation,
-        deviceId: selectedTarget.id,
-        endpoint: providerMode === "local" ? localEndpoint : endpoint,
-        apiKey: apiKey || undefined,
-        saveApiKey,
-        useSavedApiKey,
-        allowModelContext: true,
-        provider: providerMode,
-        cliExecutable: providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined,
-        model: providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel : model,
-      });
-      setPreparation(repaired);
-      setGenerated(repaired.generated);
-      setCompiledFlow(await compileFlowPreview(repaired.generated.flow));
-      setFlowCopied(false);
-      setFlowEditing(false);
-      setFlowEditNotice("AI 修复后的 Flow 已更新，请查看修改并重新确认。");
-      window.setTimeout(() => flowCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
-      if (saveApiKey && apiKey) {
-        setApiKey("");
-        setUseSavedApiKey(true);
-      }
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function onConfirmFlow() {
     if (!preparation?.trial || preparation.failure) return;
     setBusy(true);
@@ -795,6 +761,29 @@ function App() {
     }
   }
 
+  async function applyCopilotProposal(proposal: FlowModificationProposal) {
+    try {
+      const compiled = await compileFlowPreview(proposal.generated.flow);
+      setGenerated(proposal.generated);
+      setCompiledFlow(compiled);
+      setFlowJsonDraft(JSON.stringify(proposal.generated.flow, null, 2));
+      setPreparation(undefined);
+      setFlowLock(undefined);
+      setResults([]);
+      setReportPath("");
+      setStage("generated");
+      setFlowEditing(false);
+      setFlowView("steps");
+      setFlowEditNotice(`AI 修改已应用并通过 Rust 校验；${proposal.changes.length} 处差异，旧试跑、锁定和结果已失效。`);
+      if (saveApiKey && apiKey) {
+        setApiKey("");
+        setUseSavedApiKey(true);
+      }
+    } catch (reason) {
+      throw new Error(String(reason));
+    }
+  }
+
   async function copyFlowSource() {
     if (!generated) return;
     const source = flowView === "json"
@@ -998,11 +987,11 @@ function App() {
                 </div>
               )}
               <div className="provider-mode provider-mode-select" role="group" aria-label="选择 Flow 生成器">
-                <button type="button" className={providerMode === "offline" ? "active" : ""} aria-pressed={providerMode === "offline"} onClick={() => { setProviderMode("offline"); invalidateGeneratedFlow(); }}>Reactor Offline</button>
-                <button type="button" className={providerMode === "local" ? "active" : ""} aria-pressed={providerMode === "local"} onClick={() => { setProviderMode("local"); invalidateGeneratedFlow(); }}>Local Model</button>
-                <button type="button" className={providerMode === "codex" ? "active" : ""} aria-pressed={providerMode === "codex"} onClick={() => { setProviderMode("codex"); invalidateGeneratedFlow(); }}>Codex CLI</button>
-                <button type="button" className={providerMode === "claude" ? "active" : ""} aria-pressed={providerMode === "claude"} onClick={() => { setProviderMode("claude"); invalidateGeneratedFlow(); }}>Claude Code</button>
-                <button type="button" className={providerMode === "cloud" ? "active" : ""} aria-pressed={providerMode === "cloud"} onClick={() => { setProviderMode("cloud"); invalidateGeneratedFlow(); }}>Cloud AI</button>
+                <button type="button" className={providerMode === "offline" ? "active" : ""} aria-pressed={providerMode === "offline"} onClick={() => setProviderMode("offline")}>Reactor Offline</button>
+                <button type="button" className={providerMode === "local" ? "active" : ""} aria-pressed={providerMode === "local"} onClick={() => setProviderMode("local")}>Local Model</button>
+                <button type="button" className={providerMode === "codex" ? "active" : ""} aria-pressed={providerMode === "codex"} onClick={() => setProviderMode("codex")}>Codex CLI</button>
+                <button type="button" className={providerMode === "claude" ? "active" : ""} aria-pressed={providerMode === "claude"} onClick={() => setProviderMode("claude")}>Claude Code</button>
+                <button type="button" className={providerMode === "cloud" ? "active" : ""} aria-pressed={providerMode === "cloud"} onClick={() => setProviderMode("cloud")}>Cloud AI</button>
               </div>
               <button className="provider-toggle" onClick={() => setProviderOpen(!providerOpen)}>
                 <Sparkles size={15} />配置 {providerNames[providerMode]}（{providerMode === "cloud" ? "需要 Key" : "无需 Key"}）<ChevronDown size={15} className={providerOpen ? "rotated" : ""} />
@@ -1068,7 +1057,8 @@ function App() {
             )}
 
             {generated && (
-              <div className="flow-card card" ref={flowCardRef}>
+              <div className="flow-workbench" ref={flowCardRef}>
+              <div className="flow-card card">
                 <div className="card-heading">
                   <div className="heading-icon green"><FlaskConical size={19} /></div>
                   <div><h2>{generated.flow.name}</h2><p>{generated.provider === "reactor" ? "Reactor Offline（规则生成，非大模型）" : generated.provider} · {generated.model}</p></div>
@@ -1116,7 +1106,7 @@ function App() {
                   {!flowLock && !preparation ? (
                     <button className="secondary-button" disabled={busy || !selectedTarget} onClick={onTrial}><Play size={16} />{selectedTarget ? "在目标试跑" : "等待测试目标"}</button>
                   ) : !flowLock && preparation?.failure ? (
-                    preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : <button className="primary-button" disabled={busy || !selectedTarget || providerMode === "offline" || (providerMode === "cloud" && !apiKey && !useSavedApiKey) || (providerMode === "local" && !localModelStatus?.available) || ((providerMode === "codex" || providerMode === "claude") && (!selectedCliStatus?.available || !selectedCliStatus.authenticated))} onClick={onRepair}><WandSparkles size={16} />AI 自愈（最多 2 次）</button>
+                    preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : <button className="primary-button" disabled={busy || providerMode === "offline" || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
                   ) : !flowLock && preparation?.trial ? (
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
@@ -1130,6 +1120,23 @@ function App() {
                     </div>
                   ) : null}
                 </div>
+              </div>
+              <FlowCopilot
+                flow={generated.flow}
+                provider={providerMode}
+                providerLabel={providerNames[providerMode]}
+                endpoint={providerMode === "local" ? localEndpoint : providerMode === "cloud" ? endpoint : undefined}
+                apiKey={providerMode === "cloud" ? apiKey || undefined : undefined}
+                saveApiKey={providerMode === "cloud" && saveApiKey}
+                useSavedApiKey={providerMode === "cloud" && useSavedApiKey}
+                model={providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel || undefined : model}
+                cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
+                disabled={busy || providerBlocked}
+                locked={Boolean(flowLock)}
+                contextHint={preparation?.failure ? `${preparation.failure.code}：${preparation.failure.message}` : undefined}
+                onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
+                onApply={applyCopilotProposal}
+              />
               </div>
             )}
 

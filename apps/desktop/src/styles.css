@@ -168,6 +168,44 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .flow-ready-banner b { font-size: 11px; }
 .flow-ready-banner span { margin-top: 3px; color: var(--text-soft); font-size: 9px; line-height: 1.5; }
 .flow-ready-banner .secondary-button { min-height: 32px; flex: 0 0 auto; }
+.flow-workbench { display: grid; grid-template-columns: minmax(0, 1fr) 310px; align-items: start; gap: 14px; }
+.flow-workbench > .flow-card { min-width: 0; }
+.flow-copilot { position: sticky; top: 18px; min-width: 0; padding: 14px; display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--purple) 38%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--purple) 5%, var(--surface)); box-shadow: 0 12px 35px rgba(0,0,0,.12); }
+.flow-copilot-heading, .flow-copilot-heading > div { display: flex; align-items: center; gap: 8px; }
+.flow-copilot-heading { justify-content: space-between; color: var(--purple); }
+.flow-copilot-heading span { min-width: 0; }
+.flow-copilot-heading b, .flow-copilot-heading small { display: block; }
+.flow-copilot-heading b { color: var(--text); font-size: 11px; }
+.flow-copilot-heading small { margin-top: 2px; color: var(--muted); font-size: 7px; }
+.flow-copilot-messages { max-height: 230px; display: grid; align-content: start; gap: 7px; overflow-y: auto; }
+.flow-copilot-empty { min-height: 105px; padding: 12px; display: grid; align-content: center; justify-items: center; gap: 5px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--purple); text-align: center; }
+.flow-copilot-empty b { color: var(--text-soft); font-size: 9px; }
+.flow-copilot-empty span { color: var(--muted); font-size: 8px; line-height: 1.45; }
+.flow-copilot-message { max-width: 92%; padding: 7px 9px; border-radius: 8px; font-size: 8px; line-height: 1.45; }
+.flow-copilot-message.user { justify-self: end; color: white; background: var(--purple-strong); }
+.flow-copilot-message.assistant { justify-self: start; color: var(--text-soft); background: var(--surface-raised); }
+.flow-copilot textarea { min-height: 92px; resize: vertical; font-size: 9px; line-height: 1.5; }
+.flow-copilot-send { width: 100%; }
+.flow-copilot > p { margin: 0; color: var(--muted); font-size: 7px; line-height: 1.45; }
+.flow-copilot-locked, .flow-copilot-context { padding: 9px; display: grid; gap: 5px; border: 1px solid color-mix(in srgb, var(--orange) 32%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--orange) 6%, transparent); }
+.flow-copilot-context { border-color: color-mix(in srgb, var(--danger) 28%, var(--line)); background: color-mix(in srgb, var(--danger) 5%, transparent); }
+.flow-copilot-locked b, .flow-copilot-context b { font-size: 8px; }
+.flow-copilot-locked span, .flow-copilot-context span { color: var(--muted); font-size: 7px; line-height: 1.45; }
+.flow-copilot-locked .secondary-button { min-height: 30px; margin-top: 2px; }
+.ai-flow-proposal { padding: 9px; border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--green) 5%, transparent); }
+.ai-flow-proposal > div:first-child { display: flex; justify-content: space-between; gap: 8px; }
+.ai-flow-proposal b { font-size: 8px; }
+.ai-flow-proposal > div > span, .ai-flow-proposal > small { color: var(--muted); font-size: 7px; }
+.ai-flow-proposal ol { max-height: 190px; margin: 8px 0; padding: 0; display: grid; gap: 5px; overflow-y: auto; list-style: none; }
+.ai-flow-proposal li { padding: 6px; display: grid; gap: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); }
+.ai-flow-proposal li code { color: var(--purple); font-size: 7px; }
+.ai-flow-proposal li span { min-width: 0; display: flex; align-items: center; gap: 4px; font: 7px DM Mono, monospace; }
+.ai-flow-proposal del, .ai-flow-proposal ins { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-flow-proposal del { color: var(--danger); }
+.ai-flow-proposal ins { color: var(--green); text-decoration: none; }
+.ai-flow-proposal-actions { margin-top: 8px; display: flex; justify-content: flex-end; gap: 6px; }
+.ai-flow-proposal-actions .primary-button, .ai-flow-proposal-actions .secondary-button { min-height: 30px; padding-inline: 9px; }
+.recorded-flow-panel .flow-copilot { position: static; margin-top: 12px; }
 .flow-card-tools { margin-left: auto; display: flex; align-items: center; gap: 9px; }
 .flow-card-tools .schema-badge { margin-left: 0; }
 .flow-view-tabs { height: 31px; padding: 3px; display: flex; gap: 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-raised); }
@@ -786,6 +824,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .sidebar-bottom .privacy-note { display: none; }
   .workspace { width: calc(100% - 72px); margin-left: 72px; padding-inline: 22px; }
   .content-grid { grid-template-columns: 1fr; }
+  .flow-workbench { grid-template-columns: 1fr; }
+  .flow-copilot { position: static; }
   .inspector-column { grid-template-columns: repeat(3, 1fr); }
   .history-layout { grid-template-columns: 260px minmax(0, 1fr); }
   .history-facts { grid-template-columns: repeat(2, 1fr); }

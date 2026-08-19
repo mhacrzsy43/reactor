@@ -14,10 +14,10 @@ use chrono::{DateTime, Utc};
 use reactor_ai::{
     AnalysisAiProvider, AnalysisExplanation, AnalysisExplanationRequest, CliFlowProvider,
     CliProviderKind, CliProviderStatus, CredentialStore, DryRunFailure, FlowAiProvider, FlowChange,
-    FlowGenerationRequest, FlowProbeRequest, FlowRepairRequest, GeneratedFlow, LocalModelStatus,
-    MAX_FLOW_REPAIR_ATTEMPTS, OfflineAnalysisExplainer, OfflineFlowComposer,
-    OpenAiCompatibleProvider, RedactedUiContext, SystemCredentialStore, diff_flows,
-    doctor_cli_provider, doctor_local_model as check_local_model, redact_ui_tree,
+    FlowGenerationRequest, FlowModificationRequest, FlowProbeRequest, FlowRepairRequest,
+    GeneratedFlow, LocalModelStatus, MAX_FLOW_REPAIR_ATTEMPTS, OfflineAnalysisExplainer,
+    OfflineFlowComposer, OpenAiCompatibleProvider, RedactedUiContext, SystemCredentialStore,
+    diff_flows, doctor_cli_provider, doctor_local_model as check_local_model, redact_ui_tree,
 };
 use reactor_analysis::{
     AnalysisReport, DiagnosticProfileReport, ProfileDiffReport, RegressionPolicy, analyze_pair,
@@ -317,6 +317,29 @@ struct GenerateInput {
     model: Option<String>,
     provider: Option<String>,
     cli_executable: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModifyFlowInput {
+    flow: Flow,
+    instruction: String,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    #[serde(default)]
+    save_api_key: bool,
+    #[serde(default)]
+    use_saved_api_key: bool,
+    model: Option<String>,
+    provider: String,
+    cli_executable: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowModificationProposal {
+    generated: GeneratedFlow,
+    changes: Vec<FlowChange>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1052,6 +1075,81 @@ async fn generate_flow(input: GenerateInput) -> Result<GeneratedFlow, String> {
         }
         other => Err(format!("未知 Flow Provider: {other}")),
     }
+}
+
+#[tauri::command]
+async fn modify_flow(input: ModifyFlowInput) -> Result<FlowModificationProposal, String> {
+    let instruction = input.instruction.trim();
+    if instruction.is_empty() {
+        return Err("请输入希望如何修改 Flow".to_owned());
+    }
+    if instruction.chars().count() > 4_000 {
+        return Err("Flow 修改要求不能超过 4000 个字符".to_owned());
+    }
+    if input.provider == "offline" {
+        return Err(
+            "Reactor Offline 不是大模型；请选择 Local Model、Codex CLI、Claude Code 或 Cloud AI"
+                .to_owned(),
+        );
+    }
+    compile_maestro(&input.flow).map_err(|error| format!("当前 Flow 无法修改：{error}"))?;
+    ensure_model_calls_allowed()?;
+    let request = FlowModificationRequest {
+        flow: input.flow.clone(),
+        instruction: instruction.to_owned(),
+    };
+    let mut generated = match input.provider.as_str() {
+        "cloud" => {
+            let api_key =
+                resolve_api_key(input.api_key, input.save_api_key, input.use_saved_api_key)?
+                    .ok_or_else(|| "Cloud AI 需要 API Key，密钥可选保存到系统钥匙串".to_owned())?;
+            OpenAiCompatibleProvider::new(
+                input
+                    .endpoint
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
+                api_key,
+                input.model.unwrap_or_else(|| "gpt-5-mini".to_owned()),
+            )
+            .modify(request)
+            .await
+        }
+        "local" => {
+            OpenAiCompatibleProvider::new_local(
+                input
+                    .endpoint
+                    .unwrap_or_else(|| "http://127.0.0.1:11434".to_owned()),
+                input.model.unwrap_or_else(|| "qwen2.5:7b".to_owned()),
+            )
+            .modify(request)
+            .await
+        }
+        "codex" | "claude" => {
+            let kind = if input.provider == "codex" {
+                CliProviderKind::Codex
+            } else {
+                CliProviderKind::ClaudeCode
+            };
+            CliFlowProvider::new(kind, input.cli_executable.as_deref(), input.model)
+                .map_err(|error| error.to_string())?
+                .modify(request)
+                .await
+        }
+        other => return Err(format!("未知 Flow Provider: {other}")),
+    }
+    .map_err(|error| error.to_string())?;
+    if generated.flow.app_id != input.flow.app_id {
+        return Err("AI 修改试图改变 appId，Reactor 已拒绝该提案".to_owned());
+    }
+    if generated.flow.platform != input.flow.platform {
+        return Err("AI 修改试图改变平台，Reactor 已拒绝该提案".to_owned());
+    }
+    compile_maestro(&generated.flow)
+        .map_err(|error| format!("AI 修改未通过 Rust 校验：{error}"))?;
+    let changes = diff_flows(&input.flow, &generated.flow).map_err(|error| error.to_string())?;
+    generated
+        .notes
+        .push("Natural-language Flow modification proposed and validated".to_owned());
+    Ok(FlowModificationProposal { generated, changes })
 }
 
 #[tauri::command]
@@ -2448,6 +2546,7 @@ pub fn run() {
             erase_private_data,
             setup_tools,
             generate_flow,
+            modify_flow,
             probe_flow,
             preview_generation_context,
             capture_device_inspector,

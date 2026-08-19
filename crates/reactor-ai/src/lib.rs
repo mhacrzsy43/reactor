@@ -60,6 +60,13 @@ pub struct FlowRepairRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FlowModificationRequest {
+    pub flow: Flow,
+    pub instruction: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DryRunFailure {
     pub step_path: String,
     pub code: String,
@@ -419,6 +426,14 @@ pub trait FlowAiProvider: Send + Sync {
         ))
     }
     async fn repair(&self, request: FlowRepairRequest) -> Result<GeneratedFlow, AiProviderError>;
+    async fn modify(
+        &self,
+        _request: FlowModificationRequest,
+    ) -> Result<GeneratedFlow, AiProviderError> {
+        Err(AiProviderError::Unavailable(
+            "this provider does not support natural-language Flow modification".to_owned(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -1171,6 +1186,23 @@ impl FlowAiProvider for CliFlowProvider {
         ))
         .await
     }
+
+    async fn modify(
+        &self,
+        request: FlowModificationRequest,
+    ) -> Result<GeneratedFlow, AiProviderError> {
+        let flow = serde_json::to_string_pretty(&request.flow)
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
+        self.complete_with_system(
+            MODIFY_SYSTEM_PROMPT,
+            format!(
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nCurrent Flow:\n{}",
+                request.instruction, flow
+            ),
+            "reactor-flow-modify-v1",
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -1723,6 +1755,23 @@ impl FlowAiProvider for OpenAiCompatibleProvider {
         ))
         .await
     }
+
+    async fn modify(
+        &self,
+        request: FlowModificationRequest,
+    ) -> Result<GeneratedFlow, AiProviderError> {
+        let flow = serde_json::to_string_pretty(&request.flow)
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
+        self.complete_with_system(
+            MODIFY_SYSTEM_PROMPT,
+            format!(
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nCurrent Flow:\n{}",
+                request.instruction, flow
+            ),
+            "reactor-flow-modify-v1",
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -1910,6 +1959,16 @@ semanticId/accessibilityId only for a non-empty resource-id; map content-desc or
 text. Do not tap delete,
 payment, purchase, transfer, logout, permission, account, destructive, or ambiguous controls. The
 probe must not scroll, type, submit, or claim the destination is verified.";
+
+const MODIFY_SYSTEM_PROMPT: &str = r"You modify an existing Reactor Flow v1 and return the complete
+updated Flow as one JSON object with no markdown. Apply only the user's requested change and
+preserve schemaVersion, appId, platform, unrelated steps, and existing secret/variable references.
+Never put credential values into the Flow. Keep reset, launch, navigation, readiness checks, and
+destination assertions in setup. measured must remain non-empty and contain only deterministic
+performance actions; never add wait_for or assert_visible to measured. Do not invent selectors or
+claim a destination is reached without an existing stable assertion. Never add destructive,
+financial, account-removal, logout, permission-grant, or other sensitive actions. If the request
+cannot be represented safely with Reactor Flow v1, return the original Flow unchanged.";
 
 const ANALYSIS_SYSTEM_PROMPT: &str = r"You explain an immutable Reactor performance report as JSON only.
 The verdict, compatibility result, metric values, thresholds, and rule findings are facts and must
@@ -2140,6 +2199,25 @@ exit 1"#,
             .unwrap();
         assert_eq!(generated.provider, "codex-cli");
         validate_flow(&generated.flow).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed and authenticated Codex CLI"]
+    async fn real_codex_cli_modifies_a_valid_flow() {
+        let path = env::var("REACTOR_CODEX_E2E_PATH").expect("set REACTOR_CODEX_E2E_PATH");
+        let flow = serde_json::from_str(valid_flow_json()).unwrap();
+        let generated = CliFlowProvider::new(CliProviderKind::Codex, Some(&path), None)
+            .unwrap()
+            .modify(FlowModificationRequest {
+                flow,
+                instruction: "Keep the launch measurement and add a 500 ms pause after it"
+                    .to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(generated.provider, "codex-cli");
+        validate_flow(&generated.flow).unwrap();
+        assert!(generated.flow.measured.len() >= 2);
     }
 
     #[tokio::test]

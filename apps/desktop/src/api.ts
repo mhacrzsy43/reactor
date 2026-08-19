@@ -10,6 +10,7 @@ import type {
   DeviceInspectorSnapshot,
   DeviceReplayFrame,
   Flow,
+  FlowChange,
   FlowLock,
   FlowStep,
   GeneratedFlow,
@@ -35,6 +36,11 @@ export interface GenerateInput {
   model?: string;
   provider?: "offline" | "local" | "codex" | "claude" | "cloud";
   cliExecutable?: string;
+}
+
+export interface FlowModificationProposal {
+  generated: GeneratedFlow;
+  changes: FlowChange[];
 }
 
 export interface CliProviderStatus {
@@ -147,6 +153,21 @@ export async function bootstrap(): Promise<Bootstrap> {
 export async function generateFlow(input: GenerateInput): Promise<GeneratedFlow> {
   if (inTauri) return invoke("generate_flow", { input });
   return browserPreviewFlow(input);
+}
+
+export async function modifyFlow(input: {
+  flow: Flow;
+  instruction: string;
+  endpoint?: string;
+  apiKey?: string;
+  saveApiKey: boolean;
+  useSavedApiKey: boolean;
+  model?: string;
+  provider: "offline" | "local" | "codex" | "claude" | "cloud";
+  cliExecutable?: string;
+}): Promise<FlowModificationProposal> {
+  if (!inTauri) throw new Error("自然语言修改 Flow 请在 Reactor 桌面应用中使用");
+  return invoke("modify_flow", { input });
 }
 
 export async function probeFlow(input: GenerateInput): Promise<GeneratedFlow> {

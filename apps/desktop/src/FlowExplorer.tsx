@@ -1,6 +1,8 @@
 import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Braces, Check, Code2, Copy, Crosshair, GitBranch, ListPlus, LockKeyhole, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { captureDeviceInspector, captureDeviceReplayFrame, compileFlowPreview, confirmFlow, getFlowSecretStatus, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, saveFlowSecret, trialGeneratedFlow } from "./api";
+import type { FlowModificationProposal } from "./api";
+import { FlowCopilot } from "./FlowCopilot";
 import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowLock, FlowStep, GeneratedFlow, InputValue, InspectorElement, InspectorSelectorCandidate, RedactedUiContext, TrialPreparation } from "./types";
 
 interface ExplorerGraphNode {
@@ -199,6 +201,26 @@ export function FlowExplorer({
       teardown: recordedSteps.slice(teardownStart),
     };
   }, [appId, goal, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
+
+  async function applyCopilotProposal(proposal: FlowModificationProposal) {
+    const next = proposal.generated.flow;
+    const compiled = await compileFlowPreview(next);
+    rememberEditorState();
+    setRecordedSteps([...next.setup, ...next.measured, ...next.teardown]);
+    setMeasurementStart(next.setup.length);
+    const nextTeardownStart = next.setup.length + next.measured.length;
+    setTeardownStart(nextTeardownStart);
+    teardownStartRef.current = nextTeardownStart;
+    setCompiledFlow(compiled);
+    setJsonDraft(JSON.stringify(next, null, 2));
+    setJsonDirty(false);
+    setEditorError(`Copilot 已应用 ${proposal.changes.length} 处修改；旧目标页证明、试跑与锁定已失效，请重新回放并确认目标页。`);
+    setTargetAssertion(undefined);
+    setTargetCheckpoint(undefined);
+    setGatePreparation(undefined);
+    setGateLock(undefined);
+    setSelectingTargetMarker(false);
+  }
 
   const draftReplayFlow = useMemo<Flow>(() => {
     const replay = { ...explorerFlow, intent: undefined };
@@ -1062,6 +1084,21 @@ export function FlowExplorer({
                 {editorError && <div ref={editorErrorRef} className="flow-editor-error">{editorError}</div>}
                 {!editorError && replayBlockedReason && <div className="flow-editor-error">整体回放暂不可用：{replayBlockedReason}</div>}
                 <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? replayKind === "step" ? "单步回放中" : "整体回放中" : "整体回放（草稿）"}</button></div>
+                {compiledFlow && <FlowCopilot
+                  flow={explorerFlow}
+                  provider={ai.provider}
+                  providerLabel={providerLabel(ai.provider)}
+                  endpoint={ai.endpoint}
+                  apiKey={ai.apiKey}
+                  saveApiKey={ai.saveApiKey}
+                  useSavedApiKey={ai.useSavedApiKey}
+                  model={ai.model || undefined}
+                  cliExecutable={ai.cliExecutable}
+                  disabled={activeJobRunning || replaying || gateBusy}
+                  locked={Boolean(gateLock)}
+                  onCloneDraft={() => { setGateLock(undefined); setGatePreparation(undefined); setGateError("已从锁定 Flow 复制为可编辑草稿；修改后需重新回放和证明目标页。"); }}
+                  onApply={applyCopilotProposal}
+                />}
               </section>
             )}
             <section className="state-graph-panel" aria-label="AI 状态图探索">
