@@ -63,6 +63,7 @@ pub struct InspectorElement {
     pub text: Option<String>,
     pub accessibility_text: Option<String>,
     pub resource_id: Option<String>,
+    pub package_name: Option<String>,
     pub bounds: Bounds,
     pub enabled: bool,
     pub clickable: bool,
@@ -89,6 +90,7 @@ struct RawElement {
     text: Option<String>,
     accessibility_text: Option<String>,
     resource_id: Option<String>,
+    package_name: Option<String>,
     bounds: Bounds,
     enabled: bool,
     clickable: bool,
@@ -193,6 +195,7 @@ fn android_node(
         text: non_empty(attributes.get("text")),
         accessibility_text: non_empty(attributes.get("content-desc")),
         resource_id: non_empty(attributes.get("resource-id")),
+        package_name: non_empty(attributes.get("package")),
         bounds,
         enabled: bool_attribute(&attributes, "enabled", true),
         clickable: bool_attribute(&attributes, "clickable", false),
@@ -234,6 +237,7 @@ fn parse_ios(hierarchy: &str) -> Result<Vec<RawElement>, InspectorError> {
             text: non_empty(attributes.get("text")),
             accessibility_text: non_empty(attributes.get("accessibilityText")),
             resource_id: non_empty(attributes.get("resource-id")),
+            package_name: None,
             bounds,
             enabled: bool_attribute(&attributes, "enabled", true),
             clickable: true,
@@ -328,6 +332,7 @@ fn score_elements(raw: Vec<RawElement>) -> Vec<InspectorElement> {
                 text: element.text,
                 accessibility_text: element.accessibility_text,
                 resource_id: element.resource_id,
+                package_name: element.package_name,
                 bounds: element.bounds,
                 enabled: element.enabled,
                 clickable: element.clickable,
@@ -422,11 +427,12 @@ mod tests {
 
     #[test]
     fn android_resource_id_beats_text_and_coordinate() {
-        let hierarchy = r#"<?xml version="1.0"?><hierarchy><node text="课程" resource-id="com.example:id/course" content-desc="" clickable="true" enabled="true" bounds="[10,20][210,100]" /></hierarchy>"#;
+        let hierarchy = r#"<?xml version="1.0"?><hierarchy><node text="课程" resource-id="com.example:id/course" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[10,20][210,100]" /></hierarchy>"#;
         let elements = inspect_hierarchy(Platform::Android, hierarchy).unwrap();
         assert_eq!(elements.len(), 1);
         assert_eq!(elements[0].candidates[0].strategy, "id");
         assert_eq!(elements[0].candidates[0].score, 96);
+        assert_eq!(elements[0].package_name.as_deref(), Some("com.example"));
         assert_eq!(
             elements[0].candidates.last().unwrap().strategy,
             "coordinate"

@@ -17,6 +17,14 @@ interface ExplorerGraphTransition {
   action: string;
 }
 
+interface TargetPageCheckpoint {
+  stateId: string;
+  appId: string;
+  elementCount: number;
+  capturedAt: string;
+  afterStep: number;
+}
+
 interface ExplorerSuggestion {
   step: FlowStep;
   label: string;
@@ -100,6 +108,8 @@ export function FlowExplorer({
   const [sourceContext, setSourceContext] = useState<RedactedUiContext>();
   const [targetAssertion, setTargetAssertion] = useState<FlowStep>();
   const [assertionMode, setAssertionMode] = useState<"visible" | "text" | "enabled">("text");
+  const [selectingTargetMarker, setSelectingTargetMarker] = useState(false);
+  const [targetCheckpoint, setTargetCheckpoint] = useState<TargetPageCheckpoint>();
   const [gateBusy, setGateBusy] = useState(false);
   const [gatePreparation, setGatePreparation] = useState<TrialPreparation>();
   const [gateLock, setGateLock] = useState<FlowLock>();
@@ -147,6 +157,8 @@ export function FlowExplorer({
     setSuggestion(undefined);
     setSourceContext(undefined);
     setTargetAssertion(undefined);
+    setSelectingTargetMarker(false);
+    setTargetCheckpoint(undefined);
     setGatePreparation(undefined);
     setGateLock(undefined);
     setGateError("");
@@ -157,6 +169,7 @@ export function FlowExplorer({
 
   function observeSnapshot(next: DeviceInspectorSnapshot, step?: FlowStep) {
     if (next.elements.length === 0) return;
+    if (!snapshotBelongsToApp(next, appId)) return;
     const node = graphNode(next);
     const from = currentGraphStateRef.current;
     setGraphNodes((nodes) => nodes.some((candidate) => candidate.id === node.id) ? nodes : [...nodes, node]);
@@ -209,6 +222,13 @@ export function FlowExplorer({
           : missingReplayPrompt
             ? `请先填写本次回放输入：${missingReplayPrompt}`
             : undefined;
+  const lockBlockedReasons = [
+    !sourceContext ? "等待保存起始页" : undefined,
+    !targetCheckpoint ? "尚未确认当前目标页" : undefined,
+    !targetAssertion ? "尚未点选目标页唯一标记" : undefined,
+    !compiledFlow ? "尚未指定 measured 步骤或 Flow 校验未通过" : undefined,
+    activeJobRunning ? "性能任务正在运行" : undefined,
+  ].filter((reason): reason is string => Boolean(reason));
 
   useEffect(() => {
     if (!jsonDirty) setJsonDraft(JSON.stringify(explorerFlow, null, 2));
@@ -254,7 +274,7 @@ export function FlowExplorer({
         pendingGraphStepRef.current = undefined;
         setSelectorRefreshAttempt(0);
       }
-      if (next.elements.length > 0 && !sourceContextRef.current && appId.trim()) {
+      if (next.elements.length > 0 && snapshotBelongsToApp(next, appId) && !sourceContextRef.current && appId.trim()) {
         try {
           const context = await previewGenerationContext({
             appId: appId.trim(),
@@ -361,6 +381,19 @@ export function FlowExplorer({
     setPoint({ x, y });
     setSelectedElementKey(hit?.key);
     setError("");
+    if (selectingTargetMarker) {
+      if (!hit) {
+        setGateError("这个位置没有可识别元素，请点选目标页独有的稳定文本或语义 ID。");
+        return;
+      }
+      if (!hit.candidates.some((candidate) => isStableSelector(candidate.selector))) {
+        setGateError("当前元素只有坐标定位，不能证明目标页；请选择页面标题、完成标记或带语义 ID 的元素。");
+        return;
+      }
+      setSelectingTargetMarker(false);
+      addTargetPageAssertion(hit);
+      return;
+    }
     if (mode === "record" && hit) {
       if (hit.editable) {
         setError("已选中输入框；请在右侧选择普通文本、变量、Secret、验证码或 TOTP 后执行。");
@@ -404,15 +437,48 @@ export function FlowExplorer({
     });
   }
 
-  function beginRecording() {
+  async function beginRecording(restart = false): Promise<boolean> {
     setMode("record");
     setLive(false);
-    if (recordedSteps.length === 0) {
+    if (!restart && recordedSteps.length > 0) return true;
+    if (!selectedDevice || !appId.trim() || activeJobRunning || interactionInFlight.current) {
+      setError(!appId.trim() ? "请先填写当前 App 包名 / Bundle ID，再开始录制。" : "当前无法启动录制，请确认设备可用且没有性能任务运行。");
+      return false;
+    }
+    interactionInFlight.current = true;
+    setInteracting(true);
+    setInteractingLabel("启动 App 并建立可信录制起点");
+    setError("");
+    try {
       const initial: FlowStep = { action: "launch_app" };
+      const next = await performExplorerStep({
+        platform: selectedDevice.platform === "ios" ? "ios" : "android",
+        deviceId: selectedDevice.id,
+        appId: appId.trim(),
+        step: initial,
+      });
+      if (restart) rememberEditorState();
       setRecordedSteps([initial]);
       teardownStartRef.current = 1;
       setTeardownStart(1);
+      setMeasurementStart(undefined);
+      setTargetAssertion(undefined);
+      setTargetCheckpoint(undefined);
+      setSelectingTargetMarker(false);
       setJsonDirty(false);
+      setSnapshot(next);
+      observeSnapshot(next, initial);
+      setSelectedElementKey(undefined);
+      setPoint(undefined);
+      return true;
+    } catch (reason) {
+      setMode("inspect");
+      setError(`无法建立录制起点，Flow 未写入 launch_app：${cleanError(reason)}`);
+      return false;
+    } finally {
+      setInteracting(false);
+      setInteractingLabel("");
+      interactionInFlight.current = false;
     }
   }
 
@@ -500,8 +566,8 @@ export function FlowExplorer({
         runtimeInput,
       });
       setRecordedSteps((current) => {
-        const base: FlowStep[] = current.length === 0 ? [{ action: "launch_app" }] : current;
-        const insertAt = current.length === 0 ? 1 : Math.min(teardownStartRef.current, base.length);
+        const base: FlowStep[] = current;
+        const insertAt = Math.min(teardownStartRef.current, base.length);
         const next = [...base.slice(0, insertAt), step, ...base.slice(insertAt)];
         teardownStartRef.current = insertAt + 1;
         setTeardownStart(insertAt + 1);
@@ -747,6 +813,7 @@ export function FlowExplorer({
       setSuggestionConfirmed(true);
       return;
     }
+    if (!await beginRecording()) return;
     await executeRecordedStep(suggestion.step, `AI 建议：${suggestion.label}`, suggestion.executionPoint);
     setSuggestion(undefined);
     setSuggestionConfirmed(false);
@@ -759,6 +826,10 @@ export function FlowExplorer({
     }
     if (!recordedSteps.some((step) => step.action === "tap" || step.action === "input_text")) {
       setGateError("请先在录制/交互模式完成至少一个进入目标页的操作，再选择目标页标记；否则 Reactor 无法证明它属于导航后的页面。");
+      return;
+    }
+    if (!targetCheckpoint) {
+      setGateError("请先把当前镜像页面明确确认为目标页，再点选唯一标记。");
       return;
     }
     const candidate = element.candidates.find((item) => isStableSelector(item.selector));
@@ -777,16 +848,10 @@ export function FlowExplorer({
         ? { ...candidate.selector, enabled: element.enabled }
         : candidate.selector;
     const step: FlowStep = { action: "assert_visible", target };
-    let lastNavigationIndex = -1;
-    recordedSteps.forEach((candidate, index) => {
-      if (candidate.action === "tap" || candidate.action === "input_text") lastNavigationIndex = index;
-    });
-    const insertAt = lastNavigationIndex + 1;
+    const insertAt = Math.min(measurementStart ?? targetCheckpoint.afterStep, recordedSteps.length);
     rememberEditorState();
     setRecordedSteps((steps) => [...steps.slice(0, insertAt), step, ...steps.slice(insertAt)]);
-    if (measurementStart !== undefined) {
-      setMeasurementStart(measurementStart <= insertAt ? insertAt + 1 : measurementStart + 1);
-    }
+    setMeasurementStart(measurementStart === undefined || measurementStart <= insertAt ? insertAt + 1 : measurementStart + 1);
     const nextTeardownStart = teardownStart + 1;
     teardownStartRef.current = nextTeardownStart;
     setTeardownStart(nextTeardownStart);
@@ -914,11 +979,12 @@ export function FlowExplorer({
 
       <section className="recording-console card">
         <div className="recording-mode" role="group" aria-label="Flow Explorer 模式">
-          <button className={mode === "inspect" ? "active" : ""} onClick={() => { setMode("inspect"); setPendingDanger(undefined); }}>审查模式<span>只看 Selector</span></button>
-          <button className={mode === "record" ? "active" : ""} onClick={beginRecording}>录制/交互模式<span>从启动 App 开始录制</span></button>
+          <button className={mode === "inspect" ? "active" : ""} onClick={() => { setMode("inspect"); setPendingDanger(undefined); }}>审查模式<span>{selectingTargetMarker ? "正在点选目标页标记" : "只看 Selector"}</span></button>
+          <button className={mode === "record" ? "active" : ""} onClick={() => { setSelectingTargetMarker(false); void beginRecording(); }}>录制/交互模式<span>真实启动 App 后开始录制</span></button>
         </div>
         <label className="recording-app-id"><span>当前 App 包名 / Bundle ID</span><input value={appId} onChange={(event) => onAppIdChange(event.target.value)} placeholder="com.example.app" /></label>
         <div className="recording-progress"><ListPlus size={17} /><div><b>{recordedSteps.length} 个已录制步骤</b><span>{mode === "record" ? "点击画面后 Reactor 使用最佳语义 Selector 真实执行，并等待下一页面稳定。" : "切换到录制/交互模式后才会操作设备。"}</span></div></div>
+        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting || replaying || activeJobRunning} title="真实重启 App，并用新的 launch_app 替换当前草稿；可撤销" onClick={() => void beginRecording(true)}><RotateCcw size={15} />从可信起点重新录制</button>
         <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => removeRecordedStep(recordedSteps.length - 1)}><Undo2 size={15} />移除记录最后一步</button>
       </section>
 
@@ -937,16 +1003,17 @@ export function FlowExplorer({
               {snapshot ? (
                 <div
                   ref={mirrorRef}
-                  className={`device-mirror ${mode}`}
+                  className={`device-mirror ${mode}${selectingTargetMarker ? " selecting-target" : ""}`}
                   onClick={inspectPoint}
                   onPointerEnter={() => document.body.classList.add("mirror-gesture-lock")}
                   onPointerLeave={() => document.body.classList.remove("mirror-gesture-lock")}
-                  title={mode === "record" ? "点击并录制；滚轮/触控板转换为设备滑动" : "点击审查；镜像内滚动不会滚动 Reactor"}
+                  title={selectingTargetMarker ? "点选目标页独有的稳定文本或语义 ID；不会操作设备" : mode === "record" ? "点击并录制；滚轮/触控板转换为设备滑动" : "点击审查；镜像内滚动不会滚动 Reactor"}
                 >
                   <img src={snapshot.screenshotDataUrl} alt={`${selectedDevice?.name ?? selectedDevice?.id} 当前画面`} draggable={false} />
                   {selectedElement && <span className="element-highlight" style={highlightStyle(selectedElement, snapshot)}><span>{elementName(selectedElement)}</span></span>}
                   {point && <span className="inspection-point" style={{ left: `${(point.x / snapshot.viewportWidth) * 100}%`, top: `${(point.y / snapshot.viewportHeight) * 100}%` }} />}
                   {(replaying || gateBusy) && <span className="mirror-replay-indicator"><RefreshCw size={12} className="spin" />{replayKind === "step" ? "步骤实时回放" : "Maestro 实时回放"}</span>}
+                  {selectingTargetMarker && <span className="mirror-target-indicator"><Crosshair size={12} />点选目标页标记 · 不会操作设备</span>}
                   {interacting && <span className="mirror-interaction-overlay"><RefreshCw size={22} className="spin" /><b>{interactingLabel}</b><small>正在操作设备并等待下一页面稳定</small></span>}
                 </div>
               ) : (
@@ -975,7 +1042,7 @@ export function FlowExplorer({
                   <button className={flowView === "json" ? "active" : ""} onClick={() => setFlowView("json")}><Braces size={13} />完整 Flow JSON</button>
                   <button className={flowView === "yaml" ? "active" : ""} onClick={() => setFlowView("yaml")}><Code2 size={13} />Maestro YAML</button>
                 </div>
-                <label className="measurement-boundary"><span>测量窗口</span><select value={measurementStart ?? ""} onChange={(event) => { rememberEditorState(); setMeasurementStart(event.target.value === "" ? undefined : Number(event.target.value)); setJsonDirty(false); }}><option value="">尚未指定（全部属于 setup）</option>{recordedSteps.map((_, index) => <option value={index} key={index}>从步骤 {index + 1} 开始 measured</option>)}</select></label>
+                <label className="measurement-boundary"><span>测量窗口</span><select value={measurementStart ?? ""} onChange={(event) => { rememberEditorState(); setMeasurementStart(event.target.value === "" ? undefined : Number(event.target.value)); setJsonDirty(false); }}><option value="">尚未指定（全部属于 setup）</option>{recordedSteps.map((_, index) => <option value={index} key={index}>从步骤 {index + 1} 开始 measured</option>)}{measurementStart === recordedSteps.length && <option value={recordedSteps.length}>从下一条性能操作开始 measured（已自动建议）</option>}</select></label>
                 {flowView === "steps" && (recordedSteps.length > 0 ? (
                   <ol className="recorded-flow-list">
                     {recordedSteps.map((step, index) => (
@@ -1011,29 +1078,47 @@ export function FlowExplorer({
               <div className="state-graph-heading"><div><p className="eyebrow">ASSERTION BUILDER · M8.10D</p><h3>证明目标页，再锁定性能 Flow</h3></div><ShieldCheck size={17} /></div>
               <div className="assertion-readiness">
                 <span className={sourceContext ? "ready" : "waiting"}>{sourceContext ? `起始页已保存 · ${sourceContext.preview.elementCount} elements` : "等待保存起始页"}</span>
-                <span className={targetAssertion ? "ready" : "waiting"}>{targetAssertion ? `目标断言 · ${flowStepDetail(targetAssertion)}` : "尚未选择目标页标记"}</span>
+                <span className={targetAssertion ? "ready" : "waiting"}>{targetAssertion ? `目标断言 · ${flowStepDetail(targetAssertion)}` : targetCheckpoint ? "目标页已确认 · 等待点选唯一标记" : "尚未确认目标页"}</span>
                 <span className={compiledFlow ? "ready" : "waiting"}>{compiledFlow ? `${explorerFlow.measured.length} 个 measured 步骤 · Rust 校验通过` : "请指定至少一个 measured 步骤"}</span>
               </div>
+              {targetCheckpoint && <div className="target-page-checkpoint"><div><ShieldCheck size={15} /><span><b>当前目标页已确认 · {targetCheckpoint.stateId.slice(0, 6)}</b><small>{targetCheckpoint.appId} · {targetCheckpoint.elementCount} elements · Flow 第 {targetCheckpoint.afterStep} 步后</small></span></div><button disabled={Boolean(targetAssertion) || gateBusy} onClick={() => { setTargetCheckpoint(undefined); setSelectingTargetMarker(false); setSelectedElementKey(undefined); setGateError("请把设备停在新的目标页，再重新确认当前页。"); }}>更换目标页</button></div>}
               <p className="state-graph-privacy">请在目标页点选一个只属于该页面的稳定文本或语义 ID。坐标不能证明目标页，整体回放成功也不能替代唯一性证明。</p>
               <label className="assertion-mode"><span>断言类型</span><select value={assertionMode} disabled={Boolean(targetAssertion)} onChange={(event) => setAssertionMode(event.target.value as typeof assertionMode)}><option value="visible">元素可见</option><option value="text">文本完全匹配</option><option value="enabled">启用状态与当前一致</option></select></label>
               <button
                 className="secondary-button state-suggest-button"
-                disabled={Boolean(targetAssertion) || gateBusy || activeJobRunning}
+                disabled={Boolean(targetAssertion) || gateBusy || replaying || activeJobRunning}
                 onClick={() => {
-                  if (!selectedElement) {
-                    setGateError("请先把设备导航到目标页，再在左侧镜像中点击一个只属于该页的稳定文本或语义 ID；例如列表页的“List ready”。");
+                  if (!selectingTargetMarker) {
+                    if (!recordedSteps.some((step) => step.action === "tap" || step.action === "input_text")) {
+                      setGateError("请先录制至少一个进入目标页的点击或输入操作，再把当前镜像页面确认为目标页。");
+                      return;
+                    }
+                    if (!snapshot || !snapshotBelongsToApp(snapshot, appId)) {
+                      setGateError("当前镜像属于 Android 系统桌面或其他 App，不能确认为目标 App 页面。请先回到目标 App。");
+                      return;
+                    }
+                    const checkpointNode = graphNode(snapshot);
+                    setTargetCheckpoint({
+                      stateId: checkpointNode.id,
+                      appId: appId.trim(),
+                      elementCount: snapshot.elements.length,
+                      capturedAt: snapshot.capturedAt,
+                      afterStep: recordedSteps.length,
+                    });
+                    setSelectedElementKey(undefined);
+                    setSelectingTargetMarker(true);
+                    setMode("inspect");
+                    setGateError("已将当前镜像视为你明确选择的目标页。请点选该页独有的稳定文本或语义 ID；本次点击只选择，不会操作设备。");
                     mirrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
                     return;
                   }
-                  if (!selectedElement.candidates.some((candidate) => isStableSelector(candidate.selector))) {
-                    setGateError("当前选中元素只有坐标定位，不能证明目标页；请选择页面标题、完成标记或带语义 ID 的元素。");
-                    return;
-                  }
-                  addTargetPageAssertion(selectedElement);
+                  setSelectingTargetMarker(false);
+                  setGateError("已退出目标标记点选模式。");
                 }}
-              ><Crosshair size={14} />{targetAssertion ? "目标页断言已加入 Flow" : selectedElement ? `把“${elementName(selectedElement)}”设为目标页断言` : "选择目标页标记"}</button>
+              ><Crosshair size={14} />{targetAssertion ? "目标页断言已加入 Flow" : selectingTargetMarker ? "取消点选目标页标记" : targetCheckpoint ? "继续点选目标页标记" : "将当前页设为目标页并点选标记"}</button>
               {gatePreparation?.goalEvidence && <div className={`goal-proof ${gatePreparation.goalEvidence.verified ? "verified" : "failed"}`}><b>{gatePreparation.goalEvidence.verified ? "目标页唯一性证明通过" : "目标页唯一性证明失败"}</b><span>“{gatePreparation.goalEvidence.marker}” · 起始页 {gatePreparation.goalEvidence.sourceContainsMarker ? "存在" : "不存在"} · 目标页 {gatePreparation.goalEvidence.destinationContainsMarker ? "存在" : "不存在"}</span><small>{gatePreparation.goalEvidence.sourceElements} → {gatePreparation.goalEvidence.destinationElements} elements</small></div>}
               {gateError && <div className="flow-editor-error">{gateError}</div>}
+              {!gateLock && lockBlockedReasons.length > 0 && <div className="lock-blocked-reasons"><b>完成以下条件后可回放并锁定</b>{lockBlockedReasons.map((reason) => <span key={reason}>○ {reason}</span>)}</div>}
               {gateLock ? <><div className="explorer-lock"><LockKeyhole size={15} /><div><b>Flow 已锁定</b><code>{gateLock.flowHash}</code></div></div><button className="primary-button state-suggest-button" onClick={() => compiledFlow && onPerformanceHandoff(gateLock, gatePreparation!, compiledFlow)}><ArrowRight size={14} />交给正式性能测试</button></> : <button className="primary-button state-suggest-button" disabled={gateBusy || !compiledFlow || !sourceContext || !targetAssertion || activeJobRunning} onClick={() => void validateLockAndProveTarget()}>{gateBusy ? <RefreshCw size={14} className="spin" /> : <LockKeyhole size={14} />}{gateBusy ? "整体 Maestro 回放与证明中" : "整体回放、证明并锁定"}</button>}
             </section>
             <div className="current-selector-heading"><b>当前 Selector</b><span>{selectedElement ? "待审查 / 待执行" : "尚未选择控件"}</span></div>
@@ -1056,9 +1141,9 @@ export function FlowExplorer({
                     {(inputKind === "secretRef" || inputKind === "totpRef") && <label><span>{inputKind === "totpRef" ? "Base32 密钥（仅保存到系统凭据库）" : "Secret（仅保存到系统凭据库）"}</span><input value={secretValue} onChange={(event) => { setSecretValue(event.target.value); setSecretStored(false); }} type="password" autoComplete="off" placeholder={secretStored ? "已保存；留空继续使用" : "输入后执行时保存"} /></label>}
                     <label className="input-clear-option"><input type="checkbox" checked={clearBeforeInput} onChange={(event) => setClearBeforeInput(event.target.checked)} /><span>输入前清空原内容</span></label>
                     <p>Flow 只保存引用名称；Secret、TOTP 密钥和交互验证码不会进入 JSON、YAML 预览或日志。</p>
-                    <button className="primary-button inspector-execute-button" disabled={inputBusy || interacting || activeJobRunning} onClick={() => { beginRecording(); void recordInput(selectedElement); }}><Play size={15} />{inputBusy ? "正在安全输入" : "在设备上输入并继续"}</button>
+                    <button className="primary-button inspector-execute-button" disabled={inputBusy || interacting || activeJobRunning} onClick={() => { void beginRecording().then((ready) => { if (ready) return recordInput(selectedElement); }); }}><Play size={15} />{inputBusy ? "正在安全输入" : "在设备上输入并继续"}</button>
                   </section>
-                ) : <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { beginRecording(); void recordTap(selectedElement); }}><Play size={15} />在设备上点击并继续</button>}
+                ) : <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { void beginRecording().then((ready) => { if (ready) return recordTap(selectedElement); }); }}><Play size={15} />在设备上点击并继续</button>}
                 <div className="selector-candidates">
                   <div className="selector-list-heading"><b>候选 Selector</b><span>按稳定性排序</span></div>
                   {selectedElement.candidates.map((candidate) => (
@@ -1170,6 +1255,12 @@ function graphNode(snapshot: DeviceInspectorSnapshot): ExplorerGraphNode {
     elementCount: snapshot.elements.length,
     capturedAt: snapshot.capturedAt,
   };
+}
+
+function snapshotBelongsToApp(snapshot: DeviceInspectorSnapshot, appId: string): boolean {
+  if (snapshot.platform !== "android" || !appId.trim()) return true;
+  const packages = new Set(snapshot.elements.map((element) => element.packageName).filter(Boolean));
+  return packages.size === 0 || packages.has(appId.trim());
 }
 
 function explorerAiContext(snapshot: DeviceInspectorSnapshot): string {

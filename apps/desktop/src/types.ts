@@ -173,6 +173,7 @@ export interface InspectorElement {
   text?: string;
   accessibilityText?: string;
   resourceId?: string;
+  packageName?: string;
   bounds: InspectorBounds;
   enabled: boolean;
   clickable: boolean;

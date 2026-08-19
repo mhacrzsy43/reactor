@@ -284,10 +284,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .device-mirror-stage { min-height: 492px; padding: 18px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #07080b; }
 .device-mirror { position: relative; width: min(100%, 360px); overflow: visible; cursor: crosshair; user-select: none; overscroll-behavior: contain; touch-action: none; box-shadow: 0 18px 55px rgba(0,0,0,.48); }
 .device-mirror.record { cursor: pointer; box-shadow: 0 0 0 2px color-mix(in srgb, var(--purple) 52%, transparent), 0 18px 55px rgba(0,0,0,.48); }
+.device-mirror.selecting-target { cursor: crosshair; box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 68%, transparent), 0 18px 55px rgba(0,0,0,.48); }
 .mirror-interaction-overlay { position: absolute; inset: 0; z-index: 5; display: grid; align-content: center; justify-items: center; gap: 8px; color: white; background: rgba(8,9,13,.72); backdrop-filter: blur(2px); pointer-events: all; }
 .mirror-interaction-overlay b { font-size: 11px; }
 .mirror-interaction-overlay small { color: rgba(255,255,255,.68); font-size: 8px; }
 .mirror-replay-indicator { position: absolute; top: 8px; right: 8px; z-index: 5; display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid rgba(255,255,255,.2); border-radius: 999px; color: white; background: rgba(8,9,13,.76); box-shadow: 0 4px 18px rgba(0,0,0,.28); font: 8px DM Mono, monospace; pointer-events: none; }
+.mirror-target-indicator { position: absolute; top: 8px; left: 8px; z-index: 5; display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--green) 55%, transparent); border-radius: 999px; color: var(--green); background: rgba(8,9,13,.82); box-shadow: 0 4px 18px rgba(0,0,0,.28); font: 8px DM Mono, monospace; pointer-events: none; }
 .device-mirror img { width: 100%; height: auto; display: block; border-radius: 5px; pointer-events: none; }
 .element-highlight { position: absolute; z-index: 2; border: 2px solid var(--purple); background: color-mix(in srgb, var(--purple) 17%, transparent); box-shadow: 0 0 0 1px rgba(255,255,255,.32), 0 0 18px color-mix(in srgb, var(--purple) 36%, transparent); pointer-events: none; }
 .element-highlight > span { position: absolute; left: -2px; bottom: calc(100% + 4px); max-width: 220px; padding: 4px 6px; overflow: hidden; border-radius: 4px; color: white; background: var(--purple-strong); font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }
@@ -378,12 +380,21 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .assertion-readiness { display: grid; gap: 5px; }
 .assertion-readiness span { padding: 6px 7px; border-radius: 7px; color: var(--muted); background: color-mix(in srgb, var(--muted) 7%, transparent); font: 7px DM Mono, monospace; }
 .assertion-readiness span.ready { color: var(--green); background: color-mix(in srgb, var(--green) 9%, transparent); }
+.target-page-checkpoint { padding: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid color-mix(in srgb, var(--green) 42%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--green) 8%, transparent); }
+.target-page-checkpoint > div { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--green); }
+.target-page-checkpoint span, .target-page-checkpoint b, .target-page-checkpoint small { display: block; }
+.target-page-checkpoint b { color: var(--text); font-size: 8px; }
+.target-page-checkpoint small { margin-top: 3px; overflow: hidden; color: var(--muted); font: 7px DM Mono, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.target-page-checkpoint button { flex: none; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: transparent; font-size: 7px; }
 .assertion-mode { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; color: var(--muted); font-size: 8px; }
 .assertion-mode select { width: 100%; }
 .goal-proof { padding: 8px; display: grid; gap: 4px; border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); border-radius: 8px; }
 .goal-proof.verified { border-color: color-mix(in srgb, var(--green) 50%, var(--line)); }
 .goal-proof b { font-size: 9px; }
 .goal-proof span, .goal-proof small { color: var(--muted); font: 7px DM Mono, monospace; line-height: 1.5; }
+.lock-blocked-reasons { padding: 8px; display: grid; gap: 4px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); background: var(--surface-soft); }
+.lock-blocked-reasons b { color: var(--text); font-size: 8px; }
+.lock-blocked-reasons span { font: 7px/1.4 DM Mono, monospace; }
 .explorer-lock { padding: 8px; display: flex; align-items: center; gap: 8px; color: var(--green); border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); border-radius: 8px; }
 .explorer-lock > div { min-width: 0; display: grid; gap: 3px; }
 .explorer-lock b { font-size: 9px; }
