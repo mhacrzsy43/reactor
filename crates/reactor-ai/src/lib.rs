@@ -267,7 +267,10 @@ pub fn redact_ui_tree(ui_tree: &str, screenshot_count: usize) -> RedactedUiConte
     let token = Regex::new(r"\b[A-Za-z0-9_-]{32,}\b").expect("static token regex is valid");
     let mut redaction_count = 0;
     let mut output = String::with_capacity(ui_tree.len());
-    for line in ui_tree.lines() {
+    // UIAutomator commonly emits the entire hierarchy on one line. Split at each node so a
+    // password field cannot cause unrelated sibling selectors to be treated as password values.
+    let node_scoped_tree = ui_tree.replace("<node", "\n<node");
+    for line in node_scoped_tree.lines() {
         let password = line.contains("password=\"true\"")
             || line.contains("secure=\"true\"")
             || line.contains("password=true")
@@ -277,7 +280,9 @@ pub fn redact_ui_tree(ui_tree: &str, screenshot_count: usize) -> RedactedUiConte
             let original = captures.get(2).map_or("", |value| value.as_str());
             let value = redact_sensitive_value(
                 original,
-                password,
+                password
+                    && !name.eq_ignore_ascii_case("content-desc")
+                    && !name.eq_ignore_ascii_case("label"),
                 &email,
                 &long_number,
                 &token,
@@ -293,7 +298,7 @@ pub fn redact_ui_tree(ui_tree: &str, screenshot_count: usize) -> RedactedUiConte
                 let original = captures.get(2).map_or("", |value| value.as_str());
                 let value = redact_sensitive_value(
                     original,
-                    password,
+                    password && !name.eq_ignore_ascii_case("accessibilityText"),
                     &email,
                     &long_number,
                     &token,
@@ -2547,6 +2552,21 @@ exit 1"#,
         assert_eq!(context.preview.redaction_count, 2);
         assert_eq!(context.preview.screenshot_count, 1);
         assert_eq!(context.preview.screenshot_bytes_uploaded, 0);
+    }
+
+    #[test]
+    fn minified_password_node_does_not_redact_sibling_selectors() {
+        let tree = r#"<hierarchy><node text="Username" content-desc="Username" password="false"/><node text="hunter2" content-desc="Password" password="true"/></hierarchy>"#;
+        let context = redact_ui_tree(tree, 0);
+        let inventory = observed_selector_inventory(Some(&context.ui_tree));
+        let values: Vec<String> = serde_json::from_str(&inventory).unwrap();
+
+        assert!(context.ui_tree.contains(r#"text="Username""#));
+        assert!(context.ui_tree.contains(r#"text="[REDACTED_PASSWORD]""#));
+        assert!(context.ui_tree.contains(r#"content-desc="Password""#));
+        assert!(values.contains(&"Username".to_owned()));
+        assert!(values.contains(&"Password".to_owned()));
+        assert!(!context.ui_tree.contains("hunter2"));
     }
 
     #[test]
