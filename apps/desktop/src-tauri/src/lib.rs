@@ -1280,22 +1280,8 @@ async fn capture_device_inspector_for(
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
-    let (screenshot, hierarchy) = match input.platform {
-        Platform::Android => {
-            tokio::join!(
-                capture_android_screenshot(&root, &input.device_id),
-                capture_android_current_ui_tree(&root, &input.device_id)
-            )
-        }
-        Platform::Ios => {
-            tokio::join!(
-                capture_ios_screenshot(&root, &input.device_id),
-                capture_ios_current_ui_tree(&root, &input.device_id)
-            )
-        }
-    };
-    let screenshot = screenshot.map_err(|error| error.to_string())?;
-    let hierarchy = hierarchy.map_err(|error| error.to_string())?;
+    let (screenshot, hierarchy) =
+        capture_synchronized_inspector_pair(&root, input.platform, &input.device_id).await?;
     // A worker may have been started by another Reactor process while capture was in flight. In
     // that case discard the snapshot so inspection can never be mistaken for measurement data.
     ensure_inspector_capture_allowed(&root)?;
@@ -1325,6 +1311,38 @@ async fn capture_device_inspector_for(
         elements,
         warnings,
     })
+}
+
+async fn capture_synchronized_inspector_pair(
+    root: &Path,
+    platform: Platform,
+    device_id: &str,
+) -> Result<(Vec<u8>, String), String> {
+    for attempt in 0..3 {
+        ensure_inspector_capture_allowed(root)?;
+        let before = match platform {
+            Platform::Android => capture_android_current_ui_tree(root, device_id).await,
+            Platform::Ios => capture_ios_current_ui_tree(root, device_id).await,
+        }
+        .map_err(|error| error.to_string())?;
+        let screenshot = match platform {
+            Platform::Android => capture_android_screenshot(root, device_id).await,
+            Platform::Ios => capture_ios_screenshot(root, device_id).await,
+        }
+        .map_err(|error| error.to_string())?;
+        let after = match platform {
+            Platform::Android => capture_android_current_ui_tree(root, device_id).await,
+            Platform::Ios => capture_ios_current_ui_tree(root, device_id).await,
+        }
+        .map_err(|error| error.to_string())?;
+        if before == after {
+            return Ok((screenshot, after));
+        }
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+    }
+    Err("页面或键盘仍在变化，无法把截图与 Selector 对齐；请等待画面稳定后重新同步。".to_owned())
 }
 
 #[tauri::command]

@@ -396,9 +396,20 @@ export function FlowExplorer({
       setError("整体回放期间镜像保持只读；Reactor 正在实时刷新设备画面。");
       return;
     }
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width) * snapshot.viewportWidth;
-    const y = ((event.clientY - rect.top) / rect.height) * snapshot.viewportHeight;
+    const image = event.currentTarget.querySelector("img");
+    const rect = image?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      setError("设备图片尚未完成布局，请重新同步后再点选。");
+      return;
+    }
+    const relativeX = (event.clientX - rect.left) / rect.width;
+    const relativeY = (event.clientY - rect.top) / rect.height;
+    if (relativeX < 0 || relativeX > 1 || relativeY < 0 || relativeY > 1) {
+      setError("请点击设备图片内部；图片外的留白不会映射到设备坐标。");
+      return;
+    }
+    const x = relativeX * snapshot.viewportWidth;
+    const y = relativeY * snapshot.viewportHeight;
     const hit = hitTest(snapshot.elements, x, y);
     setPoint({ x, y });
     setSelectedElementKey(hit?.key);
