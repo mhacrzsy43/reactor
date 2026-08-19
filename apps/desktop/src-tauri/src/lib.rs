@@ -1689,6 +1689,12 @@ async fn run_preparation(
             audit_path: None,
         });
     };
+    let source_context = if source_context.is_none() && requires_navigation_intent(&generated.flow)
+    {
+        capture_navigation_source_context(&generated.flow, device_id, prompt_values.clone()).await
+    } else {
+        source_context
+    };
     let trial = match generated.flow.platform {
         Platform::Android => {
             trial_android(
@@ -1715,6 +1721,85 @@ async fn run_preparation(
             finish_failed_trial(generated, device_id, source_context, error.to_string()).await
         }
     }
+}
+
+async fn capture_navigation_source_context(
+    flow: &Flow,
+    device_id: &str,
+    prompt_values: std::collections::BTreeMap<String, Zeroizing<String>>,
+) -> Option<RedactedUiContext> {
+    let source_flow = navigation_source_flow(flow)?;
+    let trial = match source_flow.platform {
+        Platform::Android => {
+            trial_android(&workspace(), &source_flow, device_id, Some(prompt_values))
+                .await
+                .ok()?
+        }
+        Platform::Ios => {
+            trial_ios_simulator(&workspace(), &source_flow, device_id, Some(prompt_values))
+                .await
+                .ok()?
+        }
+    };
+    read_trial_destination_context(&trial).await
+}
+
+fn navigation_source_flow(flow: &Flow) -> Option<Flow> {
+    let marker = navigation_destination_marker(flow)?;
+    let verification = flow
+        .setup
+        .iter()
+        .enumerate()
+        .map(|(index, step)| (false, index, step))
+        .chain(
+            flow.measured
+                .iter()
+                .enumerate()
+                .map(|(index, step)| (true, index, step)),
+        )
+        .rfind(|(_, _, step)| {
+            matches!(
+                step,
+                Step::WaitFor { target, .. } | Step::AssertVisible { target }
+                    if target == &marker
+            )
+        })?;
+    let navigation = flow
+        .setup
+        .iter()
+        .enumerate()
+        .map(|(index, step)| (false, index, step))
+        .chain(
+            flow.measured
+                .iter()
+                .enumerate()
+                .map(|(index, step)| (true, index, step)),
+        )
+        .take_while(|(measured, index, _)| (*measured, *index) != (verification.0, verification.1))
+        .filter(|(_, _, step)| matches!(step, Step::Tap { .. } | Step::InputText { .. }))
+        .last()?;
+
+    let mut setup = if navigation.0 {
+        let mut steps = flow.setup.clone();
+        steps.extend_from_slice(&flow.measured[..navigation.1]);
+        steps
+    } else {
+        flow.setup[..navigation.1].to_vec()
+    };
+    while matches!(setup.last(), Some(Step::Pause { .. })) {
+        setup.pop();
+    }
+    Some(Flow {
+        schema_version: flow.schema_version,
+        id: format!("{}-source-evidence", flow.id),
+        name: format!("{} source evidence", flow.name),
+        app_id: flow.app_id.clone(),
+        platform: flow.platform,
+        intent: None,
+        setup,
+        measured: vec![Step::Pause { duration_ms: 1 }],
+        teardown: vec![],
+    })
 }
 
 async fn finish_successful_trial(
@@ -2023,6 +2108,15 @@ where
             .ok_or_else(|| "当前 Flow 没有可修复的试跑失败".to_owned())?;
         if failure.code == "runtime_input_rejected" {
             return Err("应用拒绝了本次运行数据；请更新有效账号或 Secret 后重试，AI 不会修改 Flow 来绕过登录失败。".to_owned());
+        }
+        if matches!(
+            failure.code.as_str(),
+            "source_context_required" | "destination_evidence_unavailable"
+        ) {
+            return Err(
+                "Reactor 缺少起始页或目标页验收证据；请重新采集证据并试跑，Flow Copilot 不会修改正确的 Flow。"
+                    .to_owned(),
+            );
         }
         let context = current
             .context
@@ -2924,6 +3018,35 @@ mod tests {
         .expect("navigation flow has a marker");
         assert!(!proof.verified);
         assert!(proof.source_contains_marker);
+    }
+
+    #[test]
+    fn navigation_source_flow_stops_immediately_before_the_final_navigation() {
+        let mut flow = navigation_flow();
+        flow.setup.insert(0, Step::LaunchApp);
+        flow.setup.insert(
+            1,
+            Step::WaitFor {
+                target: Selector {
+                    text: Some("Home ready".to_owned()),
+                    ..Selector::default()
+                },
+                timeout_ms: 10_000,
+            },
+        );
+
+        let source = navigation_source_flow(&flow).expect("navigation source flow");
+        assert_eq!(source.setup.len(), 2);
+        assert!(matches!(source.setup[0], Step::LaunchApp));
+        assert!(matches!(source.setup[1], Step::WaitFor { .. }));
+        assert_eq!(source.measured, vec![Step::Pause { duration_ms: 1 }]);
+        assert!(source.intent.is_none());
+        assert!(
+            !source
+                .setup
+                .iter()
+                .any(|step| matches!(step, Step::Tap { .. }))
+        );
     }
 
     #[test]

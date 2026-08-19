@@ -1218,7 +1218,7 @@ function App() {
                   {!flowLock && !preparation ? (
                     <button className="secondary-button" disabled={busy || !selectedTarget || !trialDataReady} onClick={onTrial}><Play size={16} />{selectedTarget ? trialPromptReferences.length || trialSecretReferences.length ? "数据就绪后试跑" : "在目标试跑" : "等待测试目标"}</button>
                   ) : !flowLock && preparation?.failure ? (
-                    preparation.failure.code === "runtime_input_rejected" ? trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />使用新数据重新试跑</button> : <button className="primary-button" disabled={busy} onClick={() => document.querySelector(".trial-prompt-panel")?.scrollIntoView({ behavior: "smooth", block: "center" })}><RefreshCw size={16} />重新填写运行数据</button> : preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />数据就绪，重新试跑</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
+                    preparation.failure.code === "runtime_input_rejected" ? trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />使用新数据重新试跑</button> : <button className="primary-button" disabled={busy} onClick={() => document.querySelector(".trial-prompt-panel")?.scrollIntoView({ behavior: "smooth", block: "center" })}><RefreshCw size={16} />重新填写运行数据</button> : preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : isReactorEvidenceFailure(preparation.failure.code) ? (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && !trialDataReady ? <button className="primary-button" disabled={busy} onClick={() => document.querySelector(".trial-prompt-panel")?.scrollIntoView({ behavior: "smooth", block: "center" })}><RefreshCw size={16} />准备数据后重新采集证据</button> : <button className="primary-button" disabled={busy} onClick={onTrial}><RefreshCw size={16} />重新采集起始页证据并试跑</button> : (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />数据就绪，重新试跑</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
                   ) : !flowLock && preparation?.trial ? (
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
@@ -1245,7 +1245,7 @@ function App() {
                 cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
                 disabled={busy || providerBlocked}
                 locked={Boolean(flowLock)}
-                contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
+                contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" && !isReactorEvidenceFailure(preparation.failure.code) ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
                 failureUiTree={preparation?.failure?.code !== "runtime_input_rejected" ? preparation?.context?.uiTree : undefined}
                 onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
                 onApply={applyCopilotProposal}
@@ -1689,9 +1689,10 @@ function PreparationReview({ preparation }: { preparation: TrialPreparation }) {
   const preview = preparation.context?.preview;
   if (preparation.failure) {
     const runtimeInputRejected = preparation.failure.code === "runtime_input_rejected";
+    const reactorEvidenceFailure = isReactorEvidenceFailure(preparation.failure.code);
     return (
       <div className="preparation-review failed">
-        <div className="review-heading"><ShieldCheck size={17} /><div><b>{runtimeInputRejected ? "运行数据被应用拒绝" : "试跑失败，已保留本地证据"}</b><span>{runtimeInputRejected ? "应用仍停留在登录页；请重新填写能够登录该测试应用的有效账号，并确认 Keychain Secret 正确。" : preparation.failure.message.slice(0, 240)}</span></div></div>
+        <div className="review-heading"><ShieldCheck size={17} /><div><b>{runtimeInputRejected ? "运行数据被应用拒绝" : reactorEvidenceFailure ? "Flow 已执行，Reactor 验收证据不足" : "试跑失败，已保留本地证据"}</b><span>{runtimeInputRejected ? "应用仍停留在登录页；请重新填写能够登录该测试应用的有效账号，并确认 Keychain Secret 正确。" : reactorEvidenceFailure ? "这不是 Flow 执行失败；Reactor 将在重跑前自动执行到导航前页面并采集起始页证据。" : preparation.failure.message.slice(0, 240)}</span></div></div>
         {preview && (
           <div className="privacy-preview">
             <div><b>{preview.elementCount}</b><span>UI 元素</span></div>
@@ -1700,7 +1701,7 @@ function PreparationReview({ preparation }: { preparation: TrialPreparation }) {
             <div><b>0 B</b><span>截图上传</span></div>
           </div>
         )}
-        <p className="privacy-copy">{runtimeInputRejected ? "这是账号或 Secret 数据问题，不是 Flow Selector 问题；Reactor 不会让 AI 修改步骤来绕过登录失败。" : "点击“AI 自愈”只会发送上述脱敏 UI 字段和失败摘要；截图、原始 UI 树与源码保留在本机。"}</p>
+        <p className="privacy-copy">{runtimeInputRejected ? "这是账号或 Secret 数据问题，不是 Flow Selector 问题；Reactor 不会让 AI 修改步骤来绕过登录失败。" : reactorEvidenceFailure ? "这是 Reactor 证据链问题，Flow Copilot 不会参与；重新试跑会自动补采起始页与目标页 UI 证据。" : "点击“AI 自愈”只会发送上述脱敏 UI 字段和失败摘要；截图、原始 UI 树与源码保留在本机。"}</p>
       </div>
     );
   }
@@ -1732,6 +1733,13 @@ function PreparationReview({ preparation }: { preparation: TrialPreparation }) {
       {preparation.auditPath && <p className="privacy-copy">修复审计已保存；正式测量窗口模型调用数固定为 0。</p>}
     </div>
   );
+}
+
+function isReactorEvidenceFailure(code: string) {
+  return [
+    "source_context_required",
+    "destination_evidence_unavailable",
+  ].includes(code);
 }
 
 function trialInputMetadata(reference: string) {
