@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    {
+      "id": 1,
+      "callFrame": {
+        "functionName": "renderCatalog",
+        "url": "index.bundle",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    }
+  ],
+  "samples": [1, 1, 1, 1],
+  "timeDeltas": [2000, 2000, 2000, 2000]
+}

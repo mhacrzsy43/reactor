@@ -1,0 +1,25 @@
+[package]
+name = "reactor-toolchain"
+description = "Pinned, resumable and offline-capable managed tool installer for Reactor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+flate2.workspace = true
+fs2.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+walkdir.workspace = true
+zip.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+appId: com.reactor.bench.flutter
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Reactor ready"

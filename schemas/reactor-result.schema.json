@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reactor.local/schemas/result-v1.json",
+  "title": "Reactor normalized result",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "createdAt", "framework", "platform", "scenario", "adapter", "device", "iterations", "summary", "warnings"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "framework": { "enum": ["react-native", "flutter", "lynx"] },
+    "platform": { "enum": ["android", "ios"] },
+    "scenario": { "enum": ["startup", "list", "update", "animation"] },
+    "adapter": { "type": "string" },
+    "buildMode": { "const": "release" },
+    "device": {
+      "type": "object",
+      "required": ["refreshRate"],
+      "properties": {
+        "refreshRate": { "type": "number", "exclusiveMinimum": 0 },
+        "name": { "type": ["string", "null"] },
+        "osVersion": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "iterations": { "type": "array", "items": { "type": "object" } },
+    "summary": { "type": "object" },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,17 @@
+[package]
+name = "reactor-inspector"
+description = "Cross-platform UI hierarchy parsing and selector stability scoring for Reactor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+csv.workspace = true
+quick-xml.workspace = true
+reactor-protocol = { path = "../reactor-protocol" }
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

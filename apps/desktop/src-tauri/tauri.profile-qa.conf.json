@@ -1,0 +1,21 @@
+{
+  "productName": "Reactor Profile QA",
+  "identifier": "com.reactor.performance.profile-qa",
+  "app": {
+    "windows": [
+      {
+        "title": "Reactor Profile QA",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 960,
+        "minHeight": 700,
+        "center": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["app"]
+  }
+}

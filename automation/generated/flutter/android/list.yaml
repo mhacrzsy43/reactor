@@ -1,0 +1,19 @@
+appId: com.reactor.bench.flutter
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Reactor ready"
+- tapOn: "List scenario"
+- assertVisible: "List ready"
+- repeat:
+    times: 8
+    commands:
+      - swipe:
+          direction: UP
+          duration: 800
+- repeat:
+    times: 2
+    commands:
+      - swipe:
+          direction: DOWN
+          duration: 800

@@ -1,0 +1,9 @@
+{
+  "nodes": [
+    { "id": 1, "callFrame": { "functionName": "renderProductList", "url": "src/components/ProductList.tsx", "lineNumber": 33, "columnNumber": 2 } },
+    { "id": 2, "callFrame": { "functionName": "formatPrice", "url": "src/lib/format.ts", "lineNumber": 11, "columnNumber": 0 } },
+    { "id": 3, "callFrame": { "functionName": "dispatchScroll", "url": "src/screens/CatalogScreen.tsx", "lineNumber": 81, "columnNumber": 4 } }
+  ],
+  "samples": [1, 1, 1, 1, 1, 2, 2, 3],
+  "timeDeltas": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000]
+}

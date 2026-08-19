@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"m9-startup","name":"M9 startup","appId":"com.reactor.bench.reactnative","platform":"android","intent":"Cold launch and wait for Reactor ready","setup":[{"action":"reset_app_state"}],"measured":[{"action":"launch_app"},{"action":"wait_for","target":{"text":"Reactor ready"},"timeout_ms":10000}],"teardown":[]}

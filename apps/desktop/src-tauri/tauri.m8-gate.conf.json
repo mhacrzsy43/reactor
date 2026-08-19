@@ -1,0 +1,21 @@
+{
+  "productName": "Reactor M8 Gate",
+  "identifier": "com.reactor.performance.m8-gate",
+  "app": {
+    "windows": [
+      {
+        "title": "Reactor M8 Gate",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 960,
+        "minHeight": 700,
+        "center": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["app"]
+  }
+}

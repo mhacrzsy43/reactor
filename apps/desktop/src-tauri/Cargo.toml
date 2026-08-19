@@ -1,0 +1,37 @@
+[package]
+name = "reactor-desktop"
+description = "Reactor desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "reactor_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+reactor-ai = { path = "../../../crates/reactor-ai" }
+reactor-analysis = { path = "../../../crates/reactor-analysis" }
+reactor-core = { path = "../../../crates/reactor-core" }
+reactor-inspector = { path = "../../../crates/reactor-inspector" }
+reactor-protocol = { path = "../../../crates/reactor-protocol" }
+reactor-runner = { path = "../../../crates/reactor-runner" }
+reactor-store = { path = "../../../crates/reactor-store" }
+reactor-toolchain = { path = "../../../crates/reactor-toolchain" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,2 @@
+"frame_count","frame_time_mean_ms","frame_time_p50_ms","frame_time_p95_ms","frame_time_p99_ms","jank_frame_count","over_budget_frame_pct"
+120,12.500000,10.000000,22.000000,31.000000,7,8.333333

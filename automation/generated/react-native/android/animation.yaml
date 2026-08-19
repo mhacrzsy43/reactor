@@ -1,0 +1,10 @@
+appId: com.reactor.bench.reactnative
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Reactor ready"
+- tapOn: "Animation scenario"
+- assertVisible: "Animation ready"
+- extendedWaitUntil:
+    visible: "Animation complete"
+    timeout: 12000

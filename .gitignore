@@ -1,0 +1,15 @@
+.reactor/
+results/
+node_modules/
+target/
+.build/
+.temp-templates/
+.DS_Store
+**/build/
+**/dist/
+**/.bundle/
+**/.dart_tool/
+**/.gradle/
+**/Pods/
+**/DerivedData/
+**/.rspeedy/

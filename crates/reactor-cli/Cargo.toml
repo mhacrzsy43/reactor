@@ -1,0 +1,25 @@
+[package]
+name = "reactor-cli"
+description = "Command-line interface for Reactor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "reactor"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+reactor-ai = { path = "../reactor-ai" }
+reactor-analysis = { path = "../reactor-analysis" }
+reactor-core = { path = "../reactor-core" }
+reactor-protocol = { path = "../reactor-protocol" }
+reactor-runner = { path = "../reactor-runner" }
+reactor-toolchain = { path = "../reactor-toolchain" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

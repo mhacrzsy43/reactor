@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "mode": "android_target",
+  "passed": true,
+  "flowHash": "79189e762e85120f360b6840b6eeed7373ae1cec5f5f821e218e48837fb933b8",
+  "executedAt": "2026-08-18T11:33:38.011245Z",
+  "deviceId": "emulator-5554",
+  "artifactDir": "./results/trials/436d5519-a3d5-489a-b06b-a00697ed6e2a",
+  "synthetic": false
+}

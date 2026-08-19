@@ -1,0 +1,32 @@
+[package]
+name = "reactor-ai"
+description = "Provider-neutral AI contracts for Reactor Flow generation and repair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+reactor-protocol = { path = "../reactor-protocol" }
+reactor-analysis = { path = "../reactor-analysis" }
+reqwest.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "file": "index.bundle",
+  "sources": ["src/screens/CatalogScreen.tsx"],
+  "names": ["renderCatalog"],
+  "mappings": "AAAAA"
+}

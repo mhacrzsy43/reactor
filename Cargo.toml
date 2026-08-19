@@ -1,0 +1,55 @@
+[workspace]
+members = [
+  "apps/desktop/src-tauri",
+  "crates/reactor-adapters",
+  "crates/reactor-analysis",
+  "crates/reactor-ai",
+  "crates/reactor-cli",
+  "crates/reactor-core",
+  "crates/reactor-inspector",
+  "crates/reactor-protocol",
+  "crates/reactor-runner",
+  "crates/reactor-store",
+  "crates/reactor-toolchain",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Reactor contributors"]
+repository = "https://github.com/reactor-performance/reactor"
+
+[workspace.dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+csv = "1"
+flate2 = "1"
+fs2 = "0.4"
+futures-util = "0.3"
+hex = "0.4"
+keyring = { version = "3.6", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+regex = "1"
+quick-xml = "0.41"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sourcemap = "9"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "time"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+walkdir = "2"
+tar = "0.4"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

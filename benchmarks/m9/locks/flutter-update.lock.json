@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "flowHash": "1a3a6b7c716635445bb30733347faa95091d996d7762d2d3d8b776d136a063eb",
+  "lockedAt": "2026-08-18T11:32:47.028126Z",
+  "compilerVersion": "0.1.0",
+  "generation": {
+    "provider": "reactor-m9-equivalence",
+    "model": "deterministic-v1",
+    "promptTemplateVersion": "reactor-flow-v1"
+  },
+  "trial": {
+    "schemaVersion": 1,
+    "mode": "android_target",
+    "passed": true,
+    "flowHash": "1a3a6b7c716635445bb30733347faa95091d996d7762d2d3d8b776d136a063eb",
+    "executedAt": "2026-08-18T11:32:47.021002Z",
+    "deviceId": "emulator-5554",
+    "artifactDir": "./results/trials/859e9eee-7274-4d19-a9e5-fb03b44c537b",
+    "synthetic": false
+  },
+  "flow": {
+    "schemaVersion": 1,
+    "id": "m9-update",
+    "name": "M9 update",
+    "appId": "com.reactor.bench.flutter",
+    "platform": "android",
+    "intent": "Run the deterministic 500 row update workload for 8 seconds",
+    "setup": [
+      {
+        "action": "reset_app_state"
+      },
+      {
+        "action": "launch_app"
+      },
+      {
+        "action": "wait_for",
+        "target": {
+          "text": "Reactor ready"
+        },
+        "timeout_ms": 10000
+      },
+      {
+        "action": "tap",
+        "target": {
+          "text": "Update scenario"
+        }
+      },
+      {
+        "action": "wait_for",
+        "target": {
+          "text": "Update ready"
+        },
+        "timeout_ms": 10000
+      }
+    ],
+    "measured": [
+      {
+        "action": "wait_for",
+        "target": {
+          "text": "Update complete"
+        },
+        "timeout_ms": 12000
+      }
+    ],
+    "teardown": []
+  }
+}

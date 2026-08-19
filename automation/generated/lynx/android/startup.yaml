@@ -1,0 +1,5 @@
+appId: com.reactor.bench.lynx
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Reactor ready"

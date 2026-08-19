@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "flowHash": "733fa8ad3a8b0d072af0b876acb6913a16e49908abc0d89536059d318e92b389",
+  "lockedAt": "2026-08-18T11:32:12.154010Z",
+  "compilerVersion": "0.1.0",
+  "generation": {
+    "provider": "reactor-m9-equivalence",
+    "model": "deterministic-v1",
+    "promptTemplateVersion": "reactor-flow-v1"
+  },
+  "trial": {
+    "schemaVersion": 1,
+    "mode": "android_target",
+    "passed": true,
+    "flowHash": "733fa8ad3a8b0d072af0b876acb6913a16e49908abc0d89536059d318e92b389",
+    "executedAt": "2026-08-18T11:32:12.147227Z",
+    "deviceId": "emulator-5554",
+    "artifactDir": "./results/trials/26de442d-040e-442d-b2d9-ec1ddfa7895b",
+    "synthetic": false
+  },
+  "flow": {
+    "schemaVersion": 1,
+    "id": "m9-list",
+    "name": "M9 list",
+    "appId": "com.reactor.bench.flutter",
+    "platform": "android",
+    "intent": "Open the 1000 item list, swipe up eight times and down twice",
+    "setup": [
+      {
+        "action": "reset_app_state"
+      },
+      {
+        "action": "launch_app"
+      },
+      {
+        "action": "wait_for",
+        "target": {
+          "text": "Reactor ready"
+        },
+        "timeout_ms": 10000
+      },
+      {
+        "action": "tap",
+        "target": {
+          "text": "List scenario"
+        }
+      },
+      {
+        "action": "wait_for",
+        "target": {
+          "text": "List ready"
+        },
+        "timeout_ms": 10000
+      }
+    ],
+    "measured": [
+      {
+        "action": "repeat",
+        "times": 8,
+        "steps": [
+          {
+            "action": "swipe",
+            "direction": "up",
+            "duration_ms": 800
+          }
+        ]
+      },
+      {
+        "action": "repeat",
+        "times": 2,
+        "steps": [
+          {
+            "action": "swipe",
+            "direction": "down",
+            "duration_ms": 800
+          }
+        ]
+      }
+    ],
+    "teardown": []
+  }
+}

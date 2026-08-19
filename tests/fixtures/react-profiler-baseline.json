@@ -1,0 +1,23 @@
+{
+  "version": 5,
+  "sourceLocations": {
+    "1": { "file": "src/screens/CatalogScreen.tsx", "line": 18, "column": 1 },
+    "2": { "file": "src/components/ProductList.tsx", "line": 34, "column": 3 },
+    "3": { "file": "src/components/ProductCard.tsx", "line": 57, "column": 5 }
+  },
+  "dataForRoots": [
+    {
+      "rootID": 10,
+      "snapshots": [
+        [1, { "id": 1, "displayName": "CatalogScreen", "children": [2], "hocDisplayNames": null, "key": null, "type": 5 }],
+        [2, { "id": 2, "displayName": "ProductList", "children": [3], "hocDisplayNames": null, "key": null, "type": 5 }],
+        [3, { "id": 3, "displayName": "ProductCard", "children": [], "hocDisplayNames": null, "key": null, "type": 5 }]
+      ],
+      "commitData": [
+        { "timestamp": 0, "duration": 7.2, "fiberActualDurations": [[1, 6.0], [2, 4.4], [3, 2.1]], "fiberSelfDurations": [[1, 1.1], [2, 1.4], [3, 2.1]], "changeDescriptions": [[1, { "isFirstMount": true, "context": null, "didHooksChange": false, "props": null, "state": null }]] },
+        { "timestamp": 16, "duration": 6.8, "fiberActualDurations": [[1, 5.7], [2, 4.1], [3, 2.0]], "fiberSelfDurations": [[1, 1.0], [2, 1.3], [3, 2.0]], "changeDescriptions": [[2, { "isFirstMount": false, "context": null, "didHooksChange": false, "props": ["items"], "state": null }]] },
+        { "timestamp": 32, "duration": 6.5, "fiberActualDurations": [[1, 5.5], [2, 3.9], [3, 1.8]], "fiberSelfDurations": [[1, 1.0], [2, 1.2], [3, 1.8]], "changeDescriptions": [[3, { "isFirstMount": false, "context": null, "didHooksChange": false, "props": ["product"], "state": null }]] }
+      ]
+    }
+  ]
+}

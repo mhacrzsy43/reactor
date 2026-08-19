@@ -1,0 +1,10 @@
+appId: com.reactor.bench.lynx
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Reactor ready"
+- tapOn: "Update scenario"
+- assertVisible: "Update ready"
+- extendedWaitUntil:
+    visible: "Update complete"
+    timeout: 12000

@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "flowHash": "79189e762e85120f360b6840b6eeed7373ae1cec5f5f821e218e48837fb933b8",
+  "lockedAt": "2026-08-18T11:33:38.018141Z",
+  "compilerVersion": "0.1.0",
+  "generation": {
+    "provider": "reactor-m9-equivalence",
+    "model": "deterministic-v1",
+    "promptTemplateVersion": "reactor-flow-v1"
+  },
+  "trial": {
+    "schemaVersion": 1,
+    "mode": "android_target",
+    "passed": true,
+    "flowHash": "79189e762e85120f360b6840b6eeed7373ae1cec5f5f821e218e48837fb933b8",
+    "executedAt": "2026-08-18T11:33:38.011245Z",
+    "deviceId": "emulator-5554",
+    "artifactDir": "./results/trials/436d5519-a3d5-489a-b06b-a00697ed6e2a",
+    "synthetic": false
+  },
+  "flow": {
+    "schemaVersion": 1,
+    "id": "m9-list",
+    "name": "M9 list",
+    "appId": "com.reactor.bench.lynx",
+    "platform": "android",
+    "intent": "Open the 1000 item list, swipe up eight times and down twice",
+    "setup": [
+      {
+        "action": "reset_app_state"
+      },
+      {
+        "action": "launch_app"
+      },
+      {
+        "action": "wait_for",
+        "target": {
+          "text": "Reactor ready"
+        },
+        "timeout_ms": 10000
+      },
+      {
+        "action": "tap",
+        "target": {
+          "text": "List scenario"
+        }
+      },
+      {
+        "action": "wait_for",
+        "target": {
+          "text": "List ready"
+        },
+        "timeout_ms": 10000
+      }
+    ],
+    "measured": [
+      {
+        "action": "repeat",
+        "times": 8,
+        "steps": [
+          {
+            "action": "swipe",
+            "direction": "up",
+            "duration_ms": 800
+          }
+        ]
+      },
+      {
+        "action": "repeat",
+        "times": 2,
+        "steps": [
+          {
+            "action": "swipe",
+            "direction": "down",
+            "duration_ms": 800
+          }
+        ]
+      }
+    ],
+    "teardown": []
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "dataSeed": 20260818,
+  "scenarios": {
+    "startup": {
+      "durationMs": 8000,
+      "clearState": true,
+      "readyText": "Reactor ready"
+    },
+    "list": {
+      "durationMs": 18000,
+      "itemCount": 1000,
+      "itemExtent": 96,
+      "upSwipes": 8,
+      "downSwipes": 2,
+      "swipeDurationMs": 800,
+      "entryText": "List scenario",
+      "readyText": "List ready"
+    },
+    "update": {
+      "durationMs": 12000,
+      "itemCount": 500,
+      "updateRatio": 0.1,
+      "intervalMs": 100,
+      "workloadMs": 8000,
+      "entryText": "Update scenario",
+      "readyText": "Update ready",
+      "completeText": "Update complete"
+    },
+    "animation": {
+      "durationMs": 12000,
+      "tileCount": 64,
+      "workloadMs": 8000,
+      "entryText": "Animation scenario",
+      "readyText": "Animation ready",
+      "completeText": "Animation complete"
+    }
+  }
+}

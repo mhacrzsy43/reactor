@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<trace-toc>
+  <run number="1">
+    <info>
+      <target>
+        <device uuid="SIM-FIXTURE" model="Simulated iPhone" name="iPhone 15 Pro" os-version="17.5 (21F79)" platform="iOS Simulator"/>
+      </target>
+      <summary>
+        <duration>2.500000</duration>
+        <instruments-version>26.0 (17C529)</instruments-version>
+        <template-name>Time Profiler</template-name>
+      </summary>
+    </info>
+  </run>
+</trace-toc>

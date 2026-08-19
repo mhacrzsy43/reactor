@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "resultsDir": "results",
+  "durationMs": 18000,
+  "iterationCount": 10,
+  "refreshRate": 60,
+  "scenarioFile": "scenarios/scenarios.json",
+  "maestroVersion": "2.8.0",
+  "maestroOverridePath": null,
+  "maestroSourceRepository": "https://github.com/mobile-dev-inc/Maestro.git",
+  "maestroSourceRef": "cli-2.8.0",
+  "flashlightVersion": "0.18.0",
+  "jreVersion": 21,
+  "androidPlatformTools": {
+    "version": "37.0.1",
+    "baseUrl": "https://dl.google.com/android/repository",
+    "archives": {
+      "darwin": { "file": "platform-tools_r37.0.1-darwin.zip", "sha1": "6ae73f4de6452dc57e62ec02b68eed92a4c21661" },
+      "linux": { "file": "platform-tools_r37.0.1-linux.zip", "sha1": "477254aa5f903c15cf51001717bdf347fb6b53e0" },
+      "win32": { "file": "platform-tools_r37.0.1-win.zip", "sha1": "e03e78b1d80b396f1c3358e31251cb31740e1110" }
+    }
+  },
+  "apps": {
+    "react-native": {
+      "label": "React Native",
+      "androidBundleId": "com.reactor.bench.reactnative",
+      "iosBundleId": "com.reactor.bench.reactnative",
+      "flowDir": "automation/generated/react-native"
+    },
+    "flutter": {
+      "label": "Flutter",
+      "androidBundleId": "com.reactor.bench.flutter",
+      "iosBundleId": "com.reactor.bench.flutter",
+      "flowDir": "automation/generated/flutter"
+    },
+    "lynx": {
+      "label": "Lynx",
+      "androidBundleId": "com.reactor.bench.lynx",
+      "iosBundleId": "com.reactor.bench.lynx",
+      "flowDir": "automation/generated/lynx"
+    }
+  }
+}

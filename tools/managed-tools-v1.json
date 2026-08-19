@@ -1,0 +1,178 @@
+{
+  "schemaVersion": 1,
+  "tools": [
+    {
+      "id": "maestro",
+      "version": "2.8.0",
+      "installDir": "maestro-2.8.0",
+      "executableNames": ["maestro", "maestro.bat"],
+      "assets": {
+        "all": {
+          "url": "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-2.8.0/maestro.zip",
+          "fileName": "maestro-2.8.0.zip",
+          "sha256": "b3e561161904fb391875ca5834d5b22cf0b01c052dd1b408ad83e30d8f8951b3",
+          "sizeBytes": 314743119,
+          "archive": "zip"
+        }
+      }
+    },
+    {
+      "id": "flashlight",
+      "version": "0.18.0",
+      "installDir": "flashlight-0.18.0",
+      "executableNames": ["flashlight", "flashlight-macos", "flashlight-linux", "flashlight-win.exe"],
+      "assets": {
+        "macos-aarch64": {
+          "url": "https://github.com/bamlab/flashlight/releases/download/v0.18.0/flashlight-macos.zip",
+          "fileName": "flashlight-0.18.0-macos.zip",
+          "sha256": "6e4182f7a94eef08c7bcb2526dc83d618008f262bd4052f18c489df680e23656",
+          "sizeBytes": 33031162,
+          "archive": "zip"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/bamlab/flashlight/releases/download/v0.18.0/flashlight-macos.zip",
+          "fileName": "flashlight-0.18.0-macos.zip",
+          "sha256": "6e4182f7a94eef08c7bcb2526dc83d618008f262bd4052f18c489df680e23656",
+          "sizeBytes": 33031162,
+          "archive": "zip"
+        },
+        "linux-x86_64": {
+          "url": "https://github.com/bamlab/flashlight/releases/download/v0.18.0/flashlight-linux.zip",
+          "fileName": "flashlight-0.18.0-linux.zip",
+          "sha256": "5b9faba6254344d78ee5d0326c293807fcbc43918eb53c272f3c1e054557ea68",
+          "sizeBytes": 32947512,
+          "archive": "zip"
+        },
+        "windows-x86_64": {
+          "url": "https://github.com/bamlab/flashlight/releases/download/v0.18.0/flashlight-win.exe.zip",
+          "fileName": "flashlight-0.18.0-win.exe.zip",
+          "sha256": "ee14cab75bb1b8650a5f51585263c61a4efcc686e10f9f80752683b2b0e29345",
+          "sizeBytes": 29563008,
+          "archive": "zip"
+        }
+      }
+    },
+    {
+      "id": "java",
+      "version": "21.0.12+8",
+      "installDir": "jre-21",
+      "executableNames": ["java", "java.exe"],
+      "assets": {
+        "macos-aarch64": {
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12_8.tar.gz",
+          "fileName": "jre-21.tar.gz",
+          "sha256": "36bb71d6fa5184e12a6483e7662783c2cbd383f5dca8034140f0a84dd5aa797d",
+          "sizeBytes": 48155581,
+          "archive": "tar_gz"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_mac_hotspot_21.0.12_8.tar.gz",
+          "fileName": "jre-21-macos-x86_64.tar.gz",
+          "sha256": "539706197baea8189c9a677aea5bf44671b74a71baa42dde436e312f2158fa3a",
+          "sizeBytes": 42130435,
+          "archive": "tar_gz"
+        },
+        "linux-aarch64": {
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_aarch64_linux_hotspot_21.0.12_8.tar.gz",
+          "fileName": "jre-21-linux-aarch64.tar.gz",
+          "sha256": "5f9c96b656827b9d14ebeda7739e25be554fa6d25669b03847c1df6e869c0679",
+          "sizeBytes": 51148555,
+          "archive": "tar_gz"
+        },
+        "linux-x86_64": {
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_linux_hotspot_21.0.12_8.tar.gz",
+          "fileName": "jre-21-linux-x86_64.tar.gz",
+          "sha256": "8a379a67c91a3ae61ffb33d46e0a40c7ba35e70713c4db31cfca30492f792eff",
+          "sizeBytes": 52069757,
+          "archive": "tar_gz"
+        },
+        "windows-x86_64": {
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip",
+          "fileName": "jre-21-windows-x86_64.zip",
+          "sha256": "b8aa18fef5edb69bee8618f99677d66d0873d22cb40d974c15ac9ffcdecf73ba",
+          "sizeBytes": 48993215,
+          "archive": "zip"
+        }
+      }
+    },
+    {
+      "id": "adb",
+      "version": "37.0.1",
+      "installDir": "android-platform-tools-37.0.1",
+      "executableNames": ["adb", "adb.exe"],
+      "assets": {
+        "macos-aarch64": {
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip",
+          "fileName": "platform-tools_r37.0.1-darwin.zip",
+          "sha256": "ee39ad5967e95c2a07f04dbcbde96b1a0c916ba376096db5d2f498b7727a5d1d",
+          "sizeBytes": 16110554,
+          "archive": "zip"
+        },
+        "macos-x86_64": {
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip",
+          "fileName": "platform-tools_r37.0.1-darwin.zip",
+          "sha256": "ee39ad5967e95c2a07f04dbcbde96b1a0c916ba376096db5d2f498b7727a5d1d",
+          "sizeBytes": 16110554,
+          "archive": "zip"
+        },
+        "linux-x86_64": {
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip",
+          "fileName": "platform-tools_r37.0.1-linux.zip",
+          "sha256": "d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1",
+          "sizeBytes": 9054187,
+          "archive": "zip"
+        },
+        "windows-x86_64": {
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-win.zip",
+          "fileName": "platform-tools_r37.0.1-win.zip",
+          "sha256": "45f4d63113e895ebde0c90f194099a4676b6ac653bd28d54314a9e022bbc1a99",
+          "sizeBytes": 8044989,
+          "archive": "zip"
+        }
+      }
+    },
+    {
+      "id": "trace_processor",
+      "version": "57.2",
+      "installDir": "trace-processor-57.2",
+      "executableNames": ["trace_processor_shell", "trace_processor_shell.exe"],
+      "assets": {
+        "macos-aarch64": {
+          "url": "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v57.2/mac-arm64/trace_processor_shell",
+          "fileName": "trace_processor_shell",
+          "sha256": "98a41b80e9f60da0373d64aff6455681f8c26b7c391ae5736324a5b11e3dacc2",
+          "sizeBytes": 12704456,
+          "archive": "binary"
+        },
+        "macos-x86_64": {
+          "url": "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v57.2/mac-amd64/trace_processor_shell",
+          "fileName": "trace_processor_shell",
+          "sha256": "c0f61397901da47cbe1bb9a0843624f7c2038ac92176ce15e3736ce9aa0afef0",
+          "sizeBytes": 13787208,
+          "archive": "binary"
+        },
+        "linux-aarch64": {
+          "url": "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v57.2/linux-arm64/trace_processor_shell",
+          "fileName": "trace_processor_shell",
+          "sha256": "1dcc1d9aaff2eb92e8bc58f1957e4e445600294bd61dbc09345c1018c5ff0868",
+          "sizeBytes": 13297064,
+          "archive": "binary"
+        },
+        "linux-x86_64": {
+          "url": "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v57.2/linux-amd64/trace_processor_shell",
+          "fileName": "trace_processor_shell",
+          "sha256": "55ba613fc6d4f71df81eee2dbfc293020063655c241b3e314bff75345b802684",
+          "sizeBytes": 14008280,
+          "archive": "binary"
+        },
+        "windows-x86_64": {
+          "url": "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v57.2/windows-amd64/trace_processor_shell.exe",
+          "fileName": "trace_processor_shell.exe",
+          "sha256": "100334b6091596fbc97f872556849a5747bf47a7f7190c485ba8cea8d2409c7b",
+          "sizeBytes": 13617152,
+          "archive": "binary"
+        }
+      }
+    }
+  ]
+}
