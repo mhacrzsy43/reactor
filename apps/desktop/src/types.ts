@@ -196,6 +196,15 @@ export interface DeviceInspectorSnapshot {
   warnings: string[];
 }
 
+export interface DeviceReplayFrame {
+  platform: Platform;
+  deviceId: string;
+  screenshotDataUrl: string;
+  screenshotWidth: number;
+  screenshotHeight: number;
+  capturedAt: string;
+}
+
 export interface Bootstrap {
   doctor: DoctorReport;
   devices: Device[];

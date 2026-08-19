@@ -85,6 +85,17 @@ struct DeviceInspectorSnapshot {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceReplayFrame {
+    platform: Platform,
+    device_id: String,
+    screenshot_data_url: String,
+    screenshot_width: u32,
+    screenshot_height: u32,
+    captured_at: DateTime<Utc>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PerformExplorerStepInput {
@@ -1116,6 +1127,32 @@ async fn capture_device_inspector(
     input: CaptureDeviceInspectorInput,
 ) -> Result<DeviceInspectorSnapshot, String> {
     capture_device_inspector_for(input).await
+}
+
+#[tauri::command]
+async fn capture_device_replay_frame(
+    input: CaptureDeviceInspectorInput,
+) -> Result<DeviceReplayFrame, String> {
+    let root = workspace();
+    ensure_inspector_capture_allowed(&root)?;
+    let screenshot = match input.platform {
+        Platform::Android => capture_android_screenshot(&root, &input.device_id).await,
+        Platform::Ios => capture_ios_screenshot(&root, &input.device_id).await,
+    }
+    .map_err(|error| error.to_string())?;
+    ensure_inspector_capture_allowed(&root)?;
+    let (screenshot_width, screenshot_height) = png_dimensions(&screenshot)?;
+    Ok(DeviceReplayFrame {
+        platform: input.platform,
+        device_id: input.device_id,
+        screenshot_data_url: format!(
+            "data:image/png;base64,{}",
+            BASE64_STANDARD.encode(screenshot)
+        ),
+        screenshot_width,
+        screenshot_height,
+        captured_at: Utc::now(),
+    })
 }
 
 async fn capture_device_inspector_for(
@@ -2394,6 +2431,7 @@ pub fn run() {
             probe_flow,
             preview_generation_context,
             capture_device_inspector,
+            capture_device_replay_frame,
             perform_explorer_step,
             doctor_cli_providers,
             doctor_local_model,

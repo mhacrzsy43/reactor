@@ -1,6 +1,6 @@
 import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Braces, Check, Code2, Copy, Crosshair, GitBranch, ListPlus, LockKeyhole, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captureDeviceInspector, compileFlowPreview, confirmFlow, getFlowSecretStatus, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, saveFlowSecret, trialGeneratedFlow } from "./api";
+import { captureDeviceInspector, captureDeviceReplayFrame, compileFlowPreview, confirmFlow, getFlowSecretStatus, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, saveFlowSecret, trialGeneratedFlow } from "./api";
 import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowLock, FlowStep, GeneratedFlow, InputValue, InspectorElement, InspectorSelectorCandidate, RedactedUiContext, TrialPreparation } from "./types";
 
 interface ExplorerGraphNode {
@@ -294,6 +294,40 @@ export function FlowExplorer({
     return () => window.clearInterval(timer);
   }, [activeJobRunning, capture, live]);
 
+  useEffect(() => {
+    if ((!replaying && !gateBusy) || !selectedDevice || activeJobRunning) return undefined;
+    let cancelled = false;
+    let inFlight = false;
+    const refreshFrame = async () => {
+      if (cancelled || inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      try {
+        const frame = await captureDeviceReplayFrame({
+          platform: selectedDevice.platform === "ios" ? "ios" : "android",
+          deviceId: selectedDevice.id,
+        });
+        if (cancelled) return;
+        setSnapshot((current) => current ? {
+          ...current,
+          screenshotDataUrl: frame.screenshotDataUrl,
+          screenshotWidth: frame.screenshotWidth,
+          screenshotHeight: frame.screenshotHeight,
+          capturedAt: frame.capturedAt,
+        } : current);
+      } catch {
+        // The final replay result owns error reporting; a missed preview frame is non-fatal.
+      } finally {
+        inFlight = false;
+      }
+    };
+    void refreshFrame();
+    const timer = window.setInterval(() => void refreshFrame(), 650);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeJobRunning, gateBusy, replaying, selectedDevice]);
+
   const selectedElement = snapshot?.elements.find((element) => element.key === selectedElementKey);
 
   useEffect(() => {
@@ -307,6 +341,10 @@ export function FlowExplorer({
 
   function inspectPoint(event: React.MouseEvent<HTMLDivElement>) {
     if (!snapshot) return;
+    if (replaying || gateBusy) {
+      setError("整体回放期间镜像保持只读；Reactor 正在实时刷新设备画面。");
+      return;
+    }
     const rect = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * snapshot.viewportWidth;
     const y = ((event.clientY - rect.top) / rect.height) * snapshot.viewportHeight;
@@ -553,6 +591,8 @@ export function FlowExplorer({
     }
     setReplaying(true);
     setLive(false);
+    setSelectedElementKey(undefined);
+    setPoint(undefined);
     setEditorError("");
     try {
       await compileFlowPreview(draftReplayFlow);
@@ -825,9 +865,9 @@ export function FlowExplorer({
       <header className="topbar">
         <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10</p><h1>看见页面，逐步录成 Flow</h1></div>
         <div className="top-actions">
-          <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : interacting ? "正在执行并等待页面稳定" : live ? "低频同步中 · 3 秒" : mode === "record" ? "录制/交互模式" : "审查模式"}</span>
-          <button className="secondary-button" disabled={!selectedDevice || loading || interacting || activeJobRunning} onClick={() => void capture()}>{loading ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}刷新画面</button>
-          <button className="secondary-button" disabled={!selectedDevice || interacting || activeJobRunning} onClick={() => setLive((value) => !value)}>{live ? <Pause size={16} /> : <Play size={16} />}{live ? "暂停同步" : "开始同步"}</button>
+          <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : replaying || gateBusy ? "Maestro 回放中 · 实时镜像" : interacting ? "正在执行并等待页面稳定" : live ? "低频同步中 · 3 秒" : mode === "record" ? "录制/交互模式" : "审查模式"}</span>
+          <button className="secondary-button" disabled={!selectedDevice || loading || interacting || replaying || gateBusy || activeJobRunning} onClick={() => void capture()}>{loading ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}刷新画面</button>
+          <button className="secondary-button" disabled={!selectedDevice || interacting || replaying || gateBusy || activeJobRunning} onClick={() => setLive((value) => !value)}>{live ? <Pause size={16} /> : <Play size={16} />}{live ? "暂停同步" : "开始同步"}</button>
         </div>
       </header>
 
@@ -869,7 +909,7 @@ export function FlowExplorer({
       ) : (
         <div className="explorer-grid">
           <section className="card explorer-device-card">
-            <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
+            <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{replaying || gateBusy ? "Maestro 正在真实执行；镜像约每 650 ms 刷新一次。" : mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
             <div className="device-mirror-stage">
               {snapshot ? (
                 <div
@@ -883,6 +923,7 @@ export function FlowExplorer({
                   <img src={snapshot.screenshotDataUrl} alt={`${selectedDevice?.name ?? selectedDevice?.id} 当前画面`} draggable={false} />
                   {selectedElement && <span className="element-highlight" style={highlightStyle(selectedElement, snapshot)}><span>{elementName(selectedElement)}</span></span>}
                   {point && <span className="inspection-point" style={{ left: `${(point.x / snapshot.viewportWidth) * 100}%`, top: `${(point.y / snapshot.viewportHeight) * 100}%` }} />}
+                  {(replaying || gateBusy) && <span className="mirror-replay-indicator"><RefreshCw size={12} className="spin" />Maestro 实时回放</span>}
                   {interacting && <span className="mirror-interaction-overlay"><RefreshCw size={22} className="spin" /><b>{interactingLabel}</b><small>正在操作设备并等待下一页面稳定</small></span>}
                 </div>
               ) : (

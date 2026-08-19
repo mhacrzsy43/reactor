@@ -8,6 +8,7 @@ import type {
   DemoOutput,
   DiagnosticProfileReport,
   DeviceInspectorSnapshot,
+  DeviceReplayFrame,
   Flow,
   FlowLock,
   FlowStep,
@@ -168,6 +169,14 @@ export async function captureDeviceInspector(input: {
 }): Promise<DeviceInspectorSnapshot> {
   if (!inTauri) throw new Error("Flow Explorer 请在 Reactor 桌面应用中使用");
   return invoke("capture_device_inspector", { input });
+}
+
+export async function captureDeviceReplayFrame(input: {
+  platform: Platform;
+  deviceId: string;
+}): Promise<DeviceReplayFrame> {
+  if (!inTauri) throw new Error("设备回放预览请在 Reactor 桌面应用中使用");
+  return invoke("capture_device_replay_frame", { input });
 }
 
 export async function performExplorerStep(input: {
