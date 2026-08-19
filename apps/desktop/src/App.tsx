@@ -1174,7 +1174,10 @@ function App() {
                 {(trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && !flowLock && (
                   <section className="trial-prompt-panel">
                     <div><LockKeyhole size={15} /><span><b>试跑数据准备 · {trialPromptReferences.length + trialSecretReferences.length} 项</b><small>仅在 Flow 声明输入引用时显示；一次性值不落盘，Secret/TOTP只保存到系统凭据库，均不会发送给 AI。</small></span></div>
-                    {trialPromptReferences.map((reference) => <label key={reference}><span>{reference}<small>本次输入</small></span><input type="password" autoComplete="off" value={trialPromptValues[reference] ?? ""} onChange={(event) => setTrialPromptValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={`输入 ${reference} 的本次值`} /></label>)}
+                    {trialPromptReferences.map((reference) => {
+                      const metadata = trialInputMetadata(reference);
+                      return <label key={reference}><span>{metadata.label}<small>{reference} · {metadata.detail}</small></span><input type={metadata.sensitive ? "password" : "text"} autoComplete="off" value={trialPromptValues[reference] ?? ""} onChange={(event) => setTrialPromptValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={metadata.placeholder} /></label>;
+                    })}
                     {trialSecretReferences.map(({ reference, kind }) => <label className="trial-secret-row" key={reference}><span>{reference}<small>{kind === "totp" ? "TOTP 密钥" : "系统 Secret"} · {trialSecretStatus[reference] ? "已就绪" : "未配置"}</small></span><input type="password" autoComplete="off" value={trialSecretValues[reference] ?? ""} onChange={(event) => setTrialSecretValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={trialSecretStatus[reference] ? "已安全保存；输入新值可覆盖" : kind === "totp" ? "输入 Base32 TOTP 密钥" : "输入后保存到系统凭据库"} /><button className="secondary-button" disabled={savingTrialSecret === reference || !trialSecretValues[reference]?.trim()} onClick={() => void saveTrialSecret(reference)}>{savingTrialSecret === reference ? "保存中" : trialSecretStatus[reference] ? "更新" : "安全保存"}</button></label>)}
                   </section>
                 )}
@@ -1186,7 +1189,7 @@ function App() {
                   {!flowLock && !preparation ? (
                     <button className="secondary-button" disabled={busy || !selectedTarget || !trialDataReady} onClick={onTrial}><Play size={16} />{selectedTarget ? trialPromptReferences.length || trialSecretReferences.length ? "数据就绪后试跑" : "在目标试跑" : "等待测试目标"}</button>
                   ) : !flowLock && preparation?.failure ? (
-                    preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />数据就绪，重新试跑</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
+                    preparation.failure.code === "runtime_input_rejected" ? trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />使用新数据重新试跑</button> : <button className="primary-button" disabled={busy} onClick={() => document.querySelector(".trial-prompt-panel")?.scrollIntoView({ behavior: "smooth", block: "center" })}><RefreshCw size={16} />重新填写运行数据</button> : preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />数据就绪，重新试跑</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
                   ) : !flowLock && preparation?.trial ? (
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
@@ -1213,8 +1216,8 @@ function App() {
                 cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
                 disabled={busy || providerBlocked}
                 locked={Boolean(flowLock)}
-                contextHint={preparation?.failure ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
-                failureUiTree={preparation?.context?.uiTree}
+                contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
+                failureUiTree={preparation?.failure?.code !== "runtime_input_rejected" ? preparation?.context?.uiTree : undefined}
                 onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
                 onApply={applyCopilotProposal}
               />
@@ -1656,9 +1659,10 @@ function RunStatus({
 function PreparationReview({ preparation }: { preparation: TrialPreparation }) {
   const preview = preparation.context?.preview;
   if (preparation.failure) {
+    const runtimeInputRejected = preparation.failure.code === "runtime_input_rejected";
     return (
       <div className="preparation-review failed">
-        <div className="review-heading"><ShieldCheck size={17} /><div><b>试跑失败，已保留本地证据</b><span>{preparation.failure.message.slice(0, 240)}</span></div></div>
+        <div className="review-heading"><ShieldCheck size={17} /><div><b>{runtimeInputRejected ? "运行数据被应用拒绝" : "试跑失败，已保留本地证据"}</b><span>{runtimeInputRejected ? "应用仍停留在登录页；请重新填写能够登录该测试应用的有效账号，并确认 Keychain Secret 正确。" : preparation.failure.message.slice(0, 240)}</span></div></div>
         {preview && (
           <div className="privacy-preview">
             <div><b>{preview.elementCount}</b><span>UI 元素</span></div>
@@ -1667,7 +1671,7 @@ function PreparationReview({ preparation }: { preparation: TrialPreparation }) {
             <div><b>0 B</b><span>截图上传</span></div>
           </div>
         )}
-        <p className="privacy-copy">点击“AI 自愈”只会发送上述脱敏 UI 字段和失败摘要；截图、原始 UI 树与源码保留在本机。</p>
+        <p className="privacy-copy">{runtimeInputRejected ? "这是账号或 Secret 数据问题，不是 Flow Selector 问题；Reactor 不会让 AI 修改步骤来绕过登录失败。" : "点击“AI 自愈”只会发送上述脱敏 UI 字段和失败摘要；截图、原始 UI 树与源码保留在本机。"}</p>
       </div>
     );
   }
@@ -1699,6 +1703,24 @@ function PreparationReview({ preparation }: { preparation: TrialPreparation }) {
       {preparation.auditPath && <p className="privacy-copy">修复审计已保存；正式测量窗口模型调用数固定为 0。</p>}
     </div>
   );
+}
+
+function trialInputMetadata(reference: string) {
+  const normalized = reference.toLowerCase();
+  const invalid = normalized.includes("invalid") || normalized.includes("wrong");
+  const username = normalized.includes("username") || normalized.includes("account") || normalized.includes("email");
+  const sensitive = normalized.includes("password") || normalized.includes("token") || normalized.includes("secret") || normalized.includes("code");
+  if (username) {
+    return invalid
+      ? { label: "无效账号", detail: "用于验证失败路径", placeholder: "输入一个确认无法登录的测试账号", sensitive: false }
+      : { label: "有效账号", detail: "必须能够登录", placeholder: "输入该测试应用可登录的账号", sensitive: false };
+  }
+  if (sensitive) {
+    return invalid
+      ? { label: "无效密码", detail: "用于验证失败路径", placeholder: "输入一个确认错误的测试密码", sensitive: true }
+      : { label: reference, detail: "仅本次使用", placeholder: `输入 ${reference} 的本次值`, sensitive: true };
+  }
+  return { label: reference, detail: "仅本次使用", placeholder: `输入 ${reference} 的本次值`, sensitive: true };
 }
 
 function compactValue(value: unknown) {

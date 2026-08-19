@@ -1811,13 +1811,27 @@ async fn finish_failed_trial(
             .as_deref()
             .map(|tree| redact_ui_tree(tree, usize::from(evidence.screenshot_path.is_some())))
     });
+    let rejected_marker = captured
+        .as_ref()
+        .and_then(|evidence| evidence.ui_tree.as_deref())
+        .and_then(|tree| runtime_input_rejection_marker(&generated.flow, &message, tree));
+    let (code, failure_message) = if let Some(marker) = rejected_marker {
+        (
+            "runtime_input_rejected",
+            format!(
+                "应用仍显示“{marker}”，本次有效账号或 Secret 被应用拒绝。请更新运行数据后重试，不要修改 Flow Selector。"
+            ),
+        )
+    } else {
+        ("automation_trial_failed", message.as_str().to_owned())
+    };
     Ok(TrialPreparation {
         generated,
         trial: None,
         failure: Some(DryRunFailure {
             step_path: "trial".to_owned(),
-            code: "automation_trial_failed".to_owned(),
-            message,
+            code: code.to_owned(),
+            message: failure_message,
         }),
         evidence: captured.as_ref().map(FailureEvidenceView::from),
         context,
@@ -1828,6 +1842,48 @@ async fn finish_failed_trial(
         model_calls: 0,
         audit_path: None,
     })
+}
+
+fn runtime_input_rejection_marker<'a>(
+    flow: &'a Flow,
+    failure_message: &str,
+    ui_tree: &str,
+) -> Option<&'a str> {
+    let failed_index = flow.setup.iter().rposition(|step| {
+        assertion_target(step)
+            .and_then(selector_primary_value)
+            .is_some_and(|value| failure_message.contains(value))
+    })?;
+    flow.setup[..failed_index]
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(marker_index, step)| {
+            let marker = assertion_target(step).and_then(selector_primary_value)?;
+            let later_steps = &flow.setup[marker_index + 1..failed_index];
+            let has_input = later_steps
+                .iter()
+                .any(|step| matches!(step, Step::InputText { .. }));
+            let has_submit = later_steps
+                .iter()
+                .any(|step| matches!(step, Step::Tap { .. }));
+            (has_input && has_submit && ui_tree.contains(marker)).then_some(marker)
+        })
+}
+
+fn assertion_target(step: &Step) -> Option<&Selector> {
+    match step {
+        Step::WaitFor { target, .. } | Step::AssertVisible { target } => Some(target),
+        _ => None,
+    }
+}
+
+fn selector_primary_value(selector: &Selector) -> Option<&str> {
+    selector
+        .accessibility_id
+        .as_deref()
+        .or(selector.semantic_id.as_deref())
+        .or(selector.text.as_deref())
 }
 
 async fn read_trial_destination_context(trial: &FlowTrialEvidence) -> Option<RedactedUiContext> {
@@ -1965,6 +2021,9 @@ where
             .failure
             .clone()
             .ok_or_else(|| "当前 Flow 没有可修复的试跑失败".to_owned())?;
+        if failure.code == "runtime_input_rejected" {
+            return Err("应用拒绝了本次运行数据；请更新有效账号或 Secret 后重试，AI 不会修改 Flow 来绕过登录失败。".to_owned());
+        }
         let context = current
             .context
             .as_ref()
@@ -2745,6 +2804,96 @@ mod tests {
             }],
             teardown: vec![],
         }
+    }
+
+    fn login_flow() -> Flow {
+        Flow {
+            schema_version: 1,
+            id: "login".to_owned(),
+            name: "Login".to_owned(),
+            app_id: "com.example.login".to_owned(),
+            platform: Platform::Android,
+            intent: Some("先验证失败登录，再使用有效账号登录".to_owned()),
+            setup: vec![
+                Step::WaitFor {
+                    target: Selector {
+                        text: Some("Username".to_owned()),
+                        ..Selector::default()
+                    },
+                    timeout_ms: 10_000,
+                },
+                Step::InputText {
+                    target: Selector {
+                        text: Some("Username".to_owned()),
+                        ..Selector::default()
+                    },
+                    value: InputValue::PromptRef(reactor_protocol::PromptInputReference {
+                        prompt_ref: "invalid_username".to_owned(),
+                    }),
+                    clear_before: true,
+                },
+                Step::Tap {
+                    target: Selector {
+                        text: Some("Sign in".to_owned()),
+                        ..Selector::default()
+                    },
+                },
+                Step::WaitFor {
+                    target: Selector {
+                        text: Some("Invalid username or password".to_owned()),
+                        ..Selector::default()
+                    },
+                    timeout_ms: 10_000,
+                },
+                Step::InputText {
+                    target: Selector {
+                        text: Some("Username".to_owned()),
+                        ..Selector::default()
+                    },
+                    value: InputValue::PromptRef(reactor_protocol::PromptInputReference {
+                        prompt_ref: "valid_username".to_owned(),
+                    }),
+                    clear_before: true,
+                },
+                Step::Tap {
+                    target: Selector {
+                        text: Some("Sign in".to_owned()),
+                        ..Selector::default()
+                    },
+                },
+                Step::WaitFor {
+                    target: Selector {
+                        text: Some("Home ready".to_owned()),
+                        ..Selector::default()
+                    },
+                    timeout_ms: 10_000,
+                },
+            ],
+            measured: vec![Step::Pause { duration_ms: 1 }],
+            teardown: vec![],
+        }
+    }
+
+    #[test]
+    fn retained_rejection_marker_is_classified_as_runtime_input_failure() {
+        let flow = login_flow();
+        let marker = runtime_input_rejection_marker(
+            &flow,
+            "Assertion is false: Home ready is visible",
+            r#"<node text="Invalid username or password" /><node text="Username" />"#,
+        );
+        assert_eq!(marker, Some("Invalid username or password"));
+    }
+
+    #[test]
+    fn missing_rejection_marker_keeps_automation_failure_repairable() {
+        let flow = login_flow();
+        let marker = runtime_input_rejection_marker(
+            &flow,
+            "Assertion is false: Home ready is visible",
+            r#"<node text="Unexpected screen" />"#,
+        );
+        assert_eq!(marker, None);
     }
 
     #[test]
