@@ -1,9 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use reactor_ai::{
-    FlowAiProvider, FlowGenerationRequest, OfflineFlowComposer, OpenAiCompatibleProvider,
-};
+use reactor_ai::{FlowAiProvider, FlowGenerationRequest, OpenAiCompatibleProvider};
 use reactor_analysis::{
     CiReport, RegressionPolicy, analyze_pair, analyze_profile_json, apply_source_map_json,
     diff_profile_reports, render_ci_html, render_ci_junit,
@@ -98,7 +96,7 @@ enum Command {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
-    /// Generate a Flow from natural language, with offline fallback before AI is configured.
+    /// Generate a Flow from natural language with a configured AI provider.
     GenerateFlow {
         #[arg(long)]
         intent: String,
@@ -303,14 +301,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui_tree: None,
                 screenshot_artifact_ids: vec![],
             };
-            let generated =
-                if let Some(key) = api_key.or_else(|| std::env::var("REACTOR_AI_API_KEY").ok()) {
-                    OpenAiCompatibleProvider::new(endpoint, key, model)
-                        .generate(request)
-                        .await?
-                } else {
-                    OfflineFlowComposer.generate(request).await?
-                };
+            let key = api_key
+                .or_else(|| std::env::var("REACTOR_AI_API_KEY").ok())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Flow generation requires --api-key or REACTOR_AI_API_KEY; offline rule generation was removed",
+                    )
+                })?;
+            let generated = OpenAiCompatibleProvider::new(endpoint, key, model)
+                .generate(request)
+                .await?;
             write_json(&output, &generated.flow)?;
             println!("{}", output.display());
         }

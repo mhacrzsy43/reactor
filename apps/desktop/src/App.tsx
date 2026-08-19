@@ -56,6 +56,7 @@ type Stage = "compose" | "generated" | "locked" | "results";
 type Page = "flow" | "explorer" | "devices" | "history" | "analysis" | "diagnostics" | "settings";
 type Framework = "react-native" | "flutter" | "lynx";
 type ProviderMode = "offline" | "local" | "codex" | "claude" | "cloud";
+type FlowProviderMode = Exclude<ProviderMode, "offline">;
 type FlowView = "steps" | "json" | "maestro";
 
 interface PersistedFlowDraft {
@@ -64,7 +65,7 @@ interface PersistedFlowDraft {
   appId: string;
   framework: Framework;
   platform: Platform;
-  providerMode: ProviderMode;
+  providerMode: FlowProviderMode;
   generated?: GeneratedFlow;
   compiledFlow?: CompiledFlow;
   preparation?: TrialPreparation;
@@ -81,7 +82,7 @@ const frameworkNames: Record<string, string> = {
 };
 
 const providerNames: Record<ProviderMode, string> = {
-  offline: "Reactor Offline",
+  offline: "规则总结（非 AI）",
   local: "Local Model",
   codex: "Codex CLI",
   claude: "Claude Code CLI",
@@ -122,7 +123,7 @@ function App() {
   const [platform, setPlatform] = useState<Platform>("android");
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [providerOpen, setProviderOpen] = useState(false);
-  const [providerMode, setProviderMode] = useState<ProviderMode>("offline");
+  const [providerMode, setProviderMode] = useState<FlowProviderMode>("codex");
   const [apiKey, setApiKey] = useState("");
   const [saveApiKey, setSaveApiKey] = useState(false);
   const [useSavedApiKey, setUseSavedApiKey] = useState(false);
@@ -416,7 +417,7 @@ function App() {
   }
 
   async function onExploreFlow() {
-    if (!selectedTarget || !generationContext || !includeGenerationContext || providerMode === "offline") return;
+    if (!selectedTarget || !generationContext || !includeGenerationContext) return;
     setBusy(true);
     setError("");
     setActiveJob(undefined);
@@ -932,7 +933,7 @@ function App() {
               <div className="card-heading">
                 <div className="heading-icon purple"><Bot size={19} /></div>
                 <div><h2>测试指令</h2><p>描述用户路径和你关心的性能目标</p></div>
-                <span className="local-badge">{providerMode === "offline" ? "Reactor Offline · 非大模型" : providerNames[providerMode]}</span>
+                <span className="local-badge">{providerNames[providerMode]}</span>
               </div>
               <textarea value={intent} disabled={busy} onChange={(event) => { setIntent(event.target.value); invalidateGeneratedFlow(); }} placeholder="例如：启动应用，进入商品列表，连续滚动并打开详情页……" />
               <div className="composer-options">
@@ -953,8 +954,7 @@ function App() {
                   </div>
                 </div>
               </div>
-              {providerMode !== "offline" && (
-                <div className="generation-context-card">
+              <div className="generation-context-card">
                   <div className="generation-context-heading">
                     <div>
                       <b>目标界面上下文</b>
@@ -985,9 +985,7 @@ function App() {
                     <p>未提供界面上下文时，AI 可能不知道“列表页”等入口的真实控件名称；试跑只能验证命令是否执行。</p>
                   )}
                 </div>
-              )}
               <div className="provider-mode provider-mode-select" role="group" aria-label="选择 Flow 生成器">
-                <button type="button" className={providerMode === "offline" ? "active" : ""} aria-pressed={providerMode === "offline"} onClick={() => setProviderMode("offline")}>Reactor Offline</button>
                 <button type="button" className={providerMode === "local" ? "active" : ""} aria-pressed={providerMode === "local"} onClick={() => setProviderMode("local")}>Local Model</button>
                 <button type="button" className={providerMode === "codex" ? "active" : ""} aria-pressed={providerMode === "codex"} onClick={() => setProviderMode("codex")}>Codex CLI</button>
                 <button type="button" className={providerMode === "claude" ? "active" : ""} aria-pressed={providerMode === "claude"} onClick={() => setProviderMode("claude")}>Claude Code</button>
@@ -998,9 +996,7 @@ function App() {
               </button>
               {providerOpen && (
                 <div className="provider-panel">
-                  {providerMode === "offline" ? (
-                    <div className="provider-offline wide"><ShieldCheck size={16} /><div><b>内置规则生成器</b><span>不调用模型、不需要 API Key；适合零配置体验和确定性模板。复杂自然语言请选择 Cloud AI。</span></div></div>
-                  ) : providerMode === "local" ? (
+                  {providerMode === "local" ? (
                     <>
                       <div className={`provider-offline wide ${localModelStatus?.available ? "ready" : "warning"}`}>
                         <Cpu size={16} />
@@ -1036,13 +1032,13 @@ function App() {
               <div className="composer-footer">
                 <p><ShieldCheck size={14} />生成发生在测量前；正式运行只执行锁定 Flow</p>
                 <div className="composer-actions">
-                  {providerMode !== "offline" && generationContext && includeGenerationContext && (
+                  {generationContext && includeGenerationContext && (
                     <button className="secondary-button" disabled={busy || !selectedTarget || providerBlocked || !intent.trim() || !appId.trim()} onClick={() => void onExploreFlow()} title="在准备阶段生成、真实试跑，并在失败时使用脱敏界面证据最多修复两次">
                       {busy ? <RefreshCw size={17} className="spin" /> : <Smartphone size={17} />}AI 探索并试跑
                     </button>
                   )}
                   <button className="primary-button" disabled={busy || !intent.trim() || !appId.trim() || providerBlocked} onClick={onGenerate}>
-                    {busy ? <RefreshCw size={17} className="spin" /> : <WandSparkles size={17} />}{providerMode === "offline" ? "生成 Offline Flow" : `使用 ${providerNames[providerMode]} 生成`}
+                    {busy ? <RefreshCw size={17} className="spin" /> : <WandSparkles size={17} />}使用 {providerNames[providerMode]} 生成
                   </button>
                 </div>
               </div>
@@ -1061,7 +1057,7 @@ function App() {
               <div className="flow-card card">
                 <div className="card-heading">
                   <div className="heading-icon green"><FlaskConical size={19} /></div>
-                  <div><h2>{generated.flow.name}</h2><p>{generated.provider === "reactor" ? "Reactor Offline（规则生成，非大模型）" : generated.provider} · {generated.model}</p></div>
+                  <div><h2>{generated.flow.name}</h2><p>{generated.provider} · {generated.model}</p></div>
                   <div className="flow-card-tools">
                     <span className="schema-badge">FLOW v{generated.flow.schemaVersion}</span>
                     <div className="flow-view-tabs" role="tablist" aria-label="Flow 内容视图">
@@ -1106,7 +1102,7 @@ function App() {
                   {!flowLock && !preparation ? (
                     <button className="secondary-button" disabled={busy || !selectedTarget} onClick={onTrial}><Play size={16} />{selectedTarget ? "在目标试跑" : "等待测试目标"}</button>
                   ) : !flowLock && preparation?.failure ? (
-                    preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : <button className="primary-button" disabled={busy || providerMode === "offline" || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
+                    preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
                   ) : !flowLock && preparation?.trial ? (
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
@@ -1631,16 +1627,28 @@ function loadFlowDraft(): PersistedFlowDraft | undefined {
     const raw = window.localStorage.getItem(FLOW_DRAFT_KEY);
     if (!raw) return undefined;
     const value = JSON.parse(raw) as Partial<PersistedFlowDraft>;
+    const storedProvider = (value as { providerMode?: string }).providerMode;
     if (
       value.version !== 1
       || typeof value.intent !== "string"
       || typeof value.appId !== "string"
       || !["react-native", "flutter", "lynx"].includes(value.framework ?? "")
       || !["android", "ios"].includes(value.platform ?? "")
-      || !["offline", "codex", "claude", "cloud"].includes(value.providerMode ?? "")
+      || !["offline", "local", "codex", "claude", "cloud"].includes(storedProvider ?? "")
       || !["quick", "standard"].includes(value.runPreset ?? "")
     ) return undefined;
-    return value as PersistedFlowDraft;
+    const draft = value as unknown as PersistedFlowDraft;
+    if (storedProvider !== "offline") return draft;
+    const generatedByRemovedRules = draft.generated?.provider === "reactor"
+      || draft.generated?.model === "offline-intent-composer-v1";
+    return {
+      ...draft,
+      providerMode: "codex",
+      generated: generatedByRemovedRules ? undefined : draft.generated,
+      compiledFlow: generatedByRemovedRules ? undefined : draft.compiledFlow,
+      preparation: generatedByRemovedRules ? undefined : draft.preparation,
+      flowLock: generatedByRemovedRules ? undefined : draft.flowLock,
+    };
   } catch {
     return undefined;
   }

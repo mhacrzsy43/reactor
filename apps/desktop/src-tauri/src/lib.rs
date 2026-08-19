@@ -16,8 +16,8 @@ use reactor_ai::{
     CliProviderKind, CliProviderStatus, CredentialStore, DryRunFailure, FlowAiProvider, FlowChange,
     FlowGenerationRequest, FlowModificationRequest, FlowProbeRequest, FlowRepairRequest,
     GeneratedFlow, LocalModelStatus, MAX_FLOW_REPAIR_ATTEMPTS, OfflineAnalysisExplainer,
-    OfflineFlowComposer, OpenAiCompatibleProvider, RedactedUiContext, SystemCredentialStore,
-    diff_flows, doctor_cli_provider, doctor_local_model as check_local_model, redact_ui_tree,
+    OpenAiCompatibleProvider, RedactedUiContext, SystemCredentialStore, diff_flows,
+    doctor_cli_provider, doctor_local_model as check_local_model, redact_ui_tree,
 };
 use reactor_analysis::{
     AnalysisReport, DiagnosticProfileReport, ProfileDiffReport, RegressionPolicy, analyze_pair,
@@ -1022,21 +1022,13 @@ async fn generate_flow(input: GenerateInput) -> Result<GeneratedFlow, String> {
         ui_tree: input.ui_tree.map(|tree| redact_ui_tree(&tree, 0).ui_tree),
         screenshot_artifact_ids: vec![],
     };
-    let provider = input.provider.as_deref().unwrap_or_else(|| {
-        if input.api_key.is_some() || input.use_saved_api_key {
-            "cloud"
-        } else {
-            "offline"
-        }
-    });
-    if provider != "offline" {
-        ensure_model_calls_allowed()?;
-    }
+    let provider = input
+        .provider
+        .as_deref()
+        .ok_or_else(|| "请选择 Local Model、Codex CLI、Claude Code 或 Cloud AI".to_owned())?;
+    ensure_model_calls_allowed()?;
     match provider {
-        "offline" => OfflineFlowComposer
-            .generate(request)
-            .await
-            .map_err(|error| error.to_string()),
+        "offline" => Err("Reactor Offline Flow 生成已移除，请选择真实 AI Provider".to_owned()),
         "cloud" => {
             let api_key =
                 resolve_api_key(input.api_key, input.save_api_key, input.use_saved_api_key)?
@@ -1167,10 +1159,10 @@ async fn probe_flow(input: GenerateInput) -> Result<GeneratedFlow, String> {
         )
         .ui_tree,
     };
-    let provider = input.provider.as_deref().unwrap_or("offline");
-    if provider == "offline" {
-        return Err("Reactor Offline 不支持逐步 AI 探索，请选择 AI Provider".to_owned());
-    }
+    let provider = input
+        .provider
+        .as_deref()
+        .ok_or_else(|| "请选择用于逐步探索的 AI Provider".to_owned())?;
     ensure_model_calls_allowed()?;
     match provider {
         "cloud" => {
@@ -2878,16 +2870,13 @@ mod tests {
 
     #[tokio::test]
     async fn injected_provider_cannot_exceed_two_repair_attempts() {
-        let generated = OfflineFlowComposer
-            .generate(FlowGenerationRequest {
-                intent: "打开列表并滚动".to_owned(),
-                app_id: "com.reactor.test".to_owned(),
-                platform: Platform::Android,
-                ui_tree: None,
-                screenshot_artifact_ids: vec![],
-            })
-            .await
-            .unwrap();
+        let generated = GeneratedFlow {
+            flow: navigation_flow(),
+            provider: "test-double".to_owned(),
+            model: "deterministic-test-double".to_owned(),
+            prompt_template_version: "test-v1".to_owned(),
+            notes: vec![],
+        };
         let provider = MockRepairProvider {
             calls: AtomicU32::new(0),
         };

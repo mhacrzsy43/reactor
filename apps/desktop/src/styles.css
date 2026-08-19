@@ -124,7 +124,7 @@ input, select { height: 36px; padding: 0 10px; border: 1px solid var(--line); bo
 .provider-toggle svg.rotated { transform: rotate(180deg); }
 .provider-panel { margin-top: 12px; padding: 13px; display: grid; grid-template-columns: 1fr 150px; gap: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-raised); }
 .provider-panel .wide { grid-column: 1 / -1; }
-.provider-mode { min-height: 38px; padding: 3px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.provider-mode { min-height: 38px; padding: 3px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .provider-mode-select { margin-top: 14px; }
 .provider-mode button { border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
 .provider-mode button.active { color: white; background: var(--purple-strong); }

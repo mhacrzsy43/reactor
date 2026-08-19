@@ -34,7 +34,7 @@ export interface GenerateInput {
   saveApiKey?: boolean;
   useSavedApiKey?: boolean;
   model?: string;
-  provider?: "offline" | "local" | "codex" | "claude" | "cloud";
+  provider: "local" | "codex" | "claude" | "cloud";
   cliExecutable?: string;
 }
 
@@ -152,7 +152,7 @@ export async function bootstrap(): Promise<Bootstrap> {
 
 export async function generateFlow(input: GenerateInput): Promise<GeneratedFlow> {
   if (inTauri) return invoke("generate_flow", { input });
-  return browserPreviewFlow(input);
+  throw new Error("AI Flow 生成请在 Reactor 桌面应用中使用");
 }
 
 export async function modifyFlow(input: {
@@ -163,7 +163,7 @@ export async function modifyFlow(input: {
   saveApiKey: boolean;
   useSavedApiKey: boolean;
   model?: string;
-  provider: "offline" | "local" | "codex" | "claude" | "cloud";
+  provider: "local" | "codex" | "claude" | "cloud";
   cliExecutable?: string;
 }): Promise<FlowModificationProposal> {
   if (!inTauri) throw new Error("自然语言修改 Flow 请在 Reactor 桌面应用中使用");
@@ -297,7 +297,7 @@ export async function repairFlow(input: {
   useSavedApiKey: boolean;
   model: string;
   allowModelContext: boolean;
-  provider?: "offline" | "local" | "codex" | "claude" | "cloud";
+  provider: "local" | "codex" | "claude" | "cloud";
   cliExecutable?: string;
 }): Promise<TrialPreparation> {
   if (!inTauri) throw new Error("AI 自愈请在 Reactor 桌面应用中使用");
@@ -527,54 +527,6 @@ async function waitForJob(
     }
     await new Promise((resolve) => window.setTimeout(resolve, JOB_POLL_INTERVAL_MS));
   }
-}
-
-function browserPreviewFlow(input: GenerateInput): GeneratedFlow {
-  const lower = input.intent.toLowerCase();
-  const isList = ["list", "scroll", "列表", "滚动"].some((word) => lower.includes(word));
-  const isUpdate = ["update", "更新", "刷新"].some((word) => lower.includes(word));
-  const isAnimation = ["animation", "动画"].some((word) => lower.includes(word));
-  const kind = isList ? "list" : isUpdate ? "update" : isAnimation ? "animation" : "startup";
-  const measured: FlowStep[] = [{ action: "launch_app" }];
-  const labels: Record<string, [string, string, string?]> = {
-    list: ["List scenario", "List ready"],
-    update: ["Update scenario", "Update ready", "Update complete"],
-    animation: ["Animation scenario", "Animation ready", "Animation complete"],
-  };
-  if (kind !== "startup") {
-    measured.push({ action: "wait_for", target: { text: "Reactor ready" }, timeout_ms: 10_000 });
-    measured.push({ action: "tap", target: { text: labels[kind][0] } });
-    measured.push({ action: "wait_for", target: { text: labels[kind][1] }, timeout_ms: 10_000 });
-  } else {
-    measured.push({ action: "wait_for", target: { text: "Reactor ready" }, timeout_ms: 10_000 });
-  }
-  if (kind === "list") {
-    const count = Math.min(30, Math.max(1, Number(lower.match(/\d+/)?.[0] ?? 8)));
-    measured.push({ action: "repeat", times: count, steps: [{ action: "swipe", direction: "up", duration_ms: 800 }] });
-  }
-  if (labels[kind]?.[2]) measured.push({ action: "wait_for", target: { text: labels[kind][2] }, timeout_ms: 12_000 });
-  const flow: Flow = {
-    schemaVersion: 1,
-    id: `${kind}-generated`,
-    name: `${kind[0].toUpperCase()}${kind.slice(1)} performance flow`,
-    appId: input.appId,
-    platform: input.platform,
-    intent: input.intent,
-    setup: [{ action: "reset_app_state" }],
-    measured,
-    teardown: [],
-  };
-  return {
-    flow,
-    provider: input.provider === "codex" ? "codex-cli-preview"
-      : input.provider === "claude" ? "claude-code-cli-preview"
-      : input.apiKey ? "openai-compatible-preview" : "reactor",
-    model: input.provider === "offline" || !input.provider
-      ? "offline-intent-composer-v1"
-      : input.model ?? "CLI 默认模型",
-    promptTemplateVersion: "reactor-flow-v1",
-    notes: ["Browser preview; the Tauri app uses the Rust implementation"],
-  };
 }
 
 function demoResult(

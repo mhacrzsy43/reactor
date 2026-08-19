@@ -42,15 +42,14 @@
 
 ### 2.1 Flow Copilot
 
-Reactor 统一支持五类 AI Provider，用户可按本机条件选择：
+Reactor 统一支持四类真实 AI Provider，用户可按本机条件选择：
 
-1. `Reactor Offline`：内置确定性离线 Composer/Mock，用于零配置演示、测试和故障回放，不冒充通用大模型。
-2. `Local Model`：连接用户本机的 Ollama、LM Studio 或其他 OpenAI-compatible 本地端点，实现无需云端 API Key 的真实模型体验。
-3. `Codex CLI`：调用用户本机已有的 `codex exec`，复用 CLI 已保存的登录态，不读取、复制或保存其凭据。
-4. `Claude Code CLI`：调用用户本机已有的非交互命令，复用 CLI 已保存的登录态，不读取、复制或保存其凭据。
-5. `Cloud API`：连接 OpenAI-compatible 云端端点，API Key 仅存系统钥匙串。
+1. `Local Model`：连接用户本机的 Ollama、LM Studio 或其他 OpenAI-compatible 本地端点，实现无需云端 API Key 的真实模型体验。
+2. `Codex CLI`：调用用户本机已有的 `codex exec`，复用 CLI 已保存的登录态，不读取、复制或保存其凭据。
+3. `Claude Code CLI`：调用用户本机已有的非交互命令，复用 CLI 已保存的登录态，不读取、复制或保存其凭据。
+4. `Cloud API`：连接 OpenAI-compatible 云端端点，API Key 仅存系统钥匙串。
 
-桌面端必须显式显示当前生成器。`Reactor Offline` 不得以通用 AI 冒充：按钮和结果应注明“规则生成、非大模型、无需 Key”；选择 `Cloud API` 后必须提供 API Key 或明确使用钥匙串中的已保存 Key 才能生成。
+2026-08-19 决策：删除 Reactor Offline Flow 生成和关键词下一步建议，因为面对任意 App 容易产生格式正确但语义不准确的 Flow。确定性规则只保留在结果判定、校验器和测试夹具中，不再作为 Flow Provider。选择 `Cloud API` 后必须提供 API Key 或明确使用钥匙串中的已保存 Key 才能生成。
 
 OpenAI-compatible 配置接受 Base URL（例如 `https://provider.example/v1`）或完整端点。Base URL 自动尝试 Responses API，再在路由不兼容时回退 Chat Completions；错误必须标注最终请求端点和 HTTP 状态，但清除查询参数并禁止输出 API Key。
 
@@ -115,7 +114,7 @@ M8.10B 安全输入门禁：Flow 输入值已升级为 `literal | variableRef | 
 
 M8.10B 编辑与回放门禁：录制工作台提供步骤 / 完整 Flow JSON / Rust 编译后的 Maestro YAML 三视图，支持复制、删除、同 section 重排、一步撤销、JSON 插入或修改 Selector，以及显式选择 setup/measured 边界；跨 section 误拖会被拒绝。新录制默认加入可见的 `launch_app` 起点，避免从未知页面回放。逐步回放不重复写入 Flow；整体回放把 setup/measured/teardown 交给同一 Maestro 进程，Prompt 值必须本次重新输入。Android Emulator 实测 `launch_app → tap List scenario → measured swipe UP`：JSON 经 Rust 校验后生成三段实际 YAML，整体回放成功返回列表并完成滑动，刷新 UI 树为 65 个元素。第一次缺少启动起点的失败被明确显示且未冒充通过，随后据此补齐起点约束。
 
-M8.10C AI 状态图门禁：Flow Explorer 复用 Flow Studio 的 Reactor Offline、Local Model、Codex CLI、Claude Code 与 Cloud AI Provider 配置；只把脱敏后的可见文本、resource ID、交互属性和 bounds 作为模型上下文，不发送截图、输入值或 Secret。建议默认只展示，危险目标禁止执行，未知目标拒绝盲点，坐标降级要求再次确认。状态图只登记包含真实 UI 元素的页面，并把 Android 低延迟动作产生的空树瞬态延迟到完整 UI 树后再登记转移。Android Emulator 实测 Offline 从 RN 首页建议 `List scenario`，人工确认后以当前真实控件中心执行、Flow 自动加入 `launch_app + tap`，最终准确得到 2 个真实状态和 1 条转移；建议生成前后均未自动操作设备。
+M8.10C AI 状态图门禁：Flow Explorer 复用 Flow Studio 的 Local Model、Codex CLI、Claude Code 与 Cloud AI Provider 配置；只把脱敏后的可见文本、resource ID、交互属性和 bounds 作为模型上下文，不发送截图、输入值或 Secret。建议默认只展示，危险目标禁止执行，未知目标拒绝盲点，坐标降级要求再次确认。状态图只登记包含真实 UI 元素的页面，并把 Android 低延迟动作产生的空树瞬态延迟到完整 UI 树后再登记转移。早期 Offline 关键词建议门禁已被 2026-08-19 的删除决策取代，不再作为产品能力。
 
 M8.10D Assertion/Performance Handoff 门禁：目标页可点选稳定元素生成“元素可见、文本完全匹配、启用状态与当前一致”三类断言；状态断言编译为 Maestro selector 的 `enabled` 条件，坐标不能作为目标页证明。断言自动放在 measured 边界之前；危险人工操作必须在首次点选后再次明确确认，AI 建议仍不能执行危险动作。Android Emulator 实测从 RN 首页保存 18 元素起始证据，进入列表后选择 `List ready`，形成 `launch_app → tap → assert_visible → measured swipe`；受管 Maestro 整体回放证明标记在起始页不存在、目标页存在（18→59 elements），锁定哈希 `f44177b31775…`。一键交给 Flow Studio 后完成快速真实性能任务 `8f598dd2…`：P95 18.6 ms、Jank 4.1%、冷启动 143 ms、PSS 57.8 MB、CPU 2.7%，原始证据与 HTML 报告已生成。M8.10 完成，下一必选项为 M10.5。
 
@@ -316,7 +315,7 @@ AI Provider    Maestro      Perfetto / xctrace
 交付：
 
 - Provider-neutral AI 接口，支持云端和本地模型扩展。
-- 接入 Reactor Offline 与 OpenAI-compatible API 两种 MVP Provider，并保留统一 Provider 扩展接口。
+- 接入 OpenAI-compatible、Local Model、Codex CLI 与 Claude Code CLI，并保留统一 Provider 扩展接口。
 - Provider 能力探测、可执行文件路径选择、版本/登录诊断、结构化输出校验、取消、超时和进程组清理。
 - API Key 存入系统钥匙串，不进入配置、日志和数据库。
 - 自然语言 → Reactor Flow 结构化生成。
@@ -325,7 +324,7 @@ AI Provider    Maestro      Perfetto / xctrace
 - Flow diff、人工确认、锁定清单和审计记录。
 - Flow 产物三视图、完整内容复制、JSON 编辑、Rust 重校验/YAML 重编译与旧证据失效。
 
-验收：至少 10 个代表性任务中，AI 能生成 schema-valid Flow；Reactor Offline 始终可演示；失败时不会无限重试；测量阶段审计日志中模型调用数必须为 0。
+验收：至少 10 个代表性任务中，真实 AI Provider 能生成 schema-valid Flow；失败时不会无限重试；测量阶段审计日志中模型调用数必须为 0。
 
 ### M5：Android 原生采集
 
@@ -372,24 +371,24 @@ AI Provider    Maestro      Perfetto / xctrace
 
 | 子项 | 状态 | 交付与验收 | 预计剩余 |
 |---|---|---|---|
-| M8.1 Provider 注册表 | ✅ 完成 | Reactor Offline、Codex CLI、Claude Code CLI 必过门禁通过；Local Model/Cloud 作为可选 Provider，配置、能力诊断、Schema 与安全测试均完成 | 0 日 |
+| M8.1 Provider 注册表 | ✅ 完成 | Codex CLI、Claude Code CLI 必过门禁通过；Local Model/Cloud 作为可选 Provider，配置、能力诊断、Schema 与安全测试均完成；Offline Flow 生成已删除 | 0 日 |
 | M8.2 证据包与基线兼容 | ✅ 完成 | 版本化 evidence bundle；硬拒绝模拟器/物理机、平台、Flow、指标定义不兼容；原始 trace 引用完整 | 0 日 |
 | M8.3 确定性回归规则 | ✅ 完成 | 帧、Jank、启动、CPU、内存、FPS 阈值比较；无 AI 也能判定并引用证据；注入回归测试通过 | 0 日 |
 | M8.4 结果分析中心 | ✅ 完成 | 自动推荐兼容基线、任务选择、兼容性提示、指标 diff、回归卡片、证据下钻已通过真实桌面验收 | 0 日 |
-| M8.5 AI 结果解释 | ✅ 完成 | 五种 Provider 已接入统一接口；事实/推测分区、引用校验、判定不可改写完成；Offline、真实 Codex CLI 与真实 Claude Code CLI 门禁通过 | 0 日 |
+| M8.5 AI 结果解释 | ✅ 完成 | 真实 AI Provider 已接入统一接口；事实/推测分区、引用校验、判定不可改写完成；确定性规则总结作为非 AI 工具保留 | 0 日 |
 | M8.6 统一性能诊断与 RN 深度分析 | ✅ 完成 | “性能诊断”一级入口、RN/Flutter/Lynx 框架切换、黑盒性能总览；RN 提供 Render、重复渲染、Hermes、时间线/火焰图、Profile Diff、Source Map，并支持指标/规则异常下钻 | 0 日 |
 | M8.7 重复渲染与 Profile Diff | ✅ 完成 | 无 AI 规则已定位无变化重复 Render、父组件级联、具体 Commit 与源码；构造基线/回归样例显示 3 个组件回归 | 0 日 |
 | M8.8 CI 与最终门禁 | ✅ 完成 | `analysis.json`/JUnit/HTML、退出码 0/2/3、全量测试、clippy、格式检查、Release/DMG 与诊断中心桌面门禁均已通过 | 0 日 |
 
-M8 已完成。Local Model 与 Cloud API 属于可选 Provider：无本地模型服务或 API Key 时不阻塞 Reactor 的离线、Codex CLI、Claude Code CLI、规则分析、诊断和 CI 完整体验。
+M8 已完成。Local Model 与 Cloud API 属于可选 Provider；Codex CLI 或 Claude Code CLI 可复用已有登录态。规则分析、诊断和 CI 不依赖 AI。
 
-真实验收：桌面端自动选择同一 Flow 的 Android Emulator 运行 `8bad7514… → f01c9166…`，兼容性检查通过；规则层检测到 P95 帧耗时 +52.2%、Jank +200.5%、冷启动 +22.6%，每条结论均带基线和当前 evidence 引用。不同 Flow 的 `f01c9166… → 32e24fc1…` 被硬拒绝为不兼容。RN Profile 门禁导入 3 个组件、24 次 Render、8 个 Commit，发现 5 条重复渲染/级联规则，并在 Diff 中定位 CatalogScreen、ProductList、ProductCard 三项回归；Hermes Profile 与 Source Map 在正式 Release 中把 `index.bundle:1:1` 映射到 `src/screens/CatalogScreen.tsx:1:1`。Reactor Offline 桌面、真实 Codex CLI 与真实 Claude Code CLI 的 Flow 生成/结果解释门禁均已通过，规则 verdict 保持不变，未知 evidence 引用会被拒绝。
+真实验收：桌面端自动选择同一 Flow 的 Android Emulator 运行 `8bad7514… → f01c9166…`，兼容性检查通过；规则层检测到 P95 帧耗时 +52.2%、Jank +200.5%、冷启动 +22.6%，每条结论均带基线和当前 evidence 引用。不同 Flow 的 `f01c9166… → 32e24fc1…` 被硬拒绝为不兼容。RN Profile 门禁导入 3 个组件、24 次 Render、8 个 Commit，发现 5 条重复渲染/级联规则，并在 Diff 中定位 CatalogScreen、ProductList、ProductCard 三项回归；Hermes Profile 与 Source Map 在正式 Release 中把 `index.bundle:1:1` 映射到 `src/screens/CatalogScreen.tsx:1:1`。真实 Codex CLI 与真实 Claude Code CLI 的 Flow 生成/结果解释门禁均已通过，规则 verdict 保持不变，未知 evidence 引用会被拒绝。
 
 交付：
 
 - 基线选择、兼容性检查、分布比较和回归阈值。
 - AI 基于结构化 evidence bundle 解释数据。
-- Flow 生成与结果分析复用同一 Provider 注册表，用户可分别为两类任务选择 Reactor Offline、Local Model、Codex CLI、Claude Code CLI 或 Cloud API。
+- Flow 生成支持 Local Model、Codex CLI、Claude Code CLI 或 Cloud API；结果中心另保留明确标注为非 AI 的确定性规则总结。
 - 接入 Local Model、Codex CLI 和 Claude Code CLI Provider；复用用户已有安装/登录态，并完成能力探测、可执行文件路径选择、版本/登录诊断、结构化输出校验、取消、超时和进程组清理。
 - 每条结论附指标引用；推测与事实分区。
 - CI 生成机器可读退出码、JSON/JUnit 摘要和静态 HTML。

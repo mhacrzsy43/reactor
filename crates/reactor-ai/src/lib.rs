@@ -13,7 +13,9 @@ use std::os::unix::process::CommandExt as _;
 
 use async_trait::async_trait;
 use reactor_analysis::{AnalysisReport, AnalysisVerdict};
-use reactor_protocol::{Flow, Platform, Selector, Step, SwipeDirection, validate_flow};
+use reactor_protocol::{Flow, Platform, validate_flow};
+#[cfg(test)]
+use reactor_protocol::{Selector, Step, SwipeDirection};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1794,10 +1796,12 @@ impl AnalysisAiProvider for OpenAiCompatibleProvider {
     }
 }
 
-/// Deterministic offline composer for exploring the app before configuring a model.
+/// Test-only deterministic composer for schema and repair fixtures.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct OfflineFlowComposer;
 
+#[cfg(test)]
 #[async_trait]
 impl FlowAiProvider for OfflineFlowComposer {
     fn id(&self) -> &'static str {
@@ -1893,6 +1897,7 @@ impl FlowAiProvider for OfflineFlowComposer {
     }
 }
 
+#[cfg(test)]
 fn wait_for(text: &str, timeout_ms: u64) -> Step {
     Step::WaitFor {
         target: text_selector(text),
@@ -1900,6 +1905,7 @@ fn wait_for(text: &str, timeout_ms: u64) -> Step {
     }
 }
 
+#[cfg(test)]
 fn text_selector(text: &str) -> Selector {
     Selector {
         text: Some(text.to_owned()),
@@ -1907,16 +1913,19 @@ fn text_selector(text: &str) -> Selector {
     }
 }
 
+#[cfg(test)]
 fn contains_any(value: &str, candidates: &[&str]) -> bool {
     candidates.iter().any(|candidate| value.contains(candidate))
 }
 
+#[cfg(test)]
 fn extract_repeat(value: &str) -> Option<u32> {
     value
         .split(|character: char| !character.is_ascii_digit())
         .find_map(|part| (!part.is_empty()).then(|| part.parse().ok()).flatten())
 }
 
+#[cfg(test)]
 fn title(value: &str) -> String {
     let mut chars = value.chars();
     chars.next().map_or_else(String::new, |first| {

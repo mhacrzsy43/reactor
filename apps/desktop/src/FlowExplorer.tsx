@@ -44,7 +44,7 @@ interface FlowExplorerProps {
   appId: string;
   goal: string;
   ai: {
-    provider: "offline" | "local" | "codex" | "claude" | "cloud";
+    provider: "local" | "codex" | "claude" | "cloud";
     endpoint: string;
     model: string;
     apiKey?: string;
@@ -781,12 +781,6 @@ export function FlowExplorer({
     setSuggestionConfirmed(false);
     setEditorError("");
     try {
-      if (ai.provider === "offline") {
-        const offline = offlineNextSuggestion(snapshot, goal);
-        if (!offline) throw new Error("当前页面没有可安全建议的语义控件");
-        setSuggestion(offline);
-        return;
-      }
       const generated = await probeFlow({
         intent: goal,
         appId: appId.trim(),
@@ -896,8 +890,8 @@ export function FlowExplorer({
     try {
       const generated: GeneratedFlow = {
         flow: explorerFlow,
-        provider: ai.provider === "offline" ? "reactor-explorer" : ai.provider,
-        model: ai.provider === "offline" ? "human-ai-state-graph-v1" : ai.model || "provider-default",
+        provider: ai.provider,
+        model: ai.model || "provider-default",
         promptTemplateVersion: "interactive-explorer-v1",
         notes: ["Built from real device states, human-confirmed actions, and a selected destination assertion"],
       };
@@ -1360,37 +1354,8 @@ function isDangerousSelector(selector: InspectorSelectorCandidate["selector"]): 
   return ["delete", "remove account", "pay", "purchase", "checkout", "transfer", "submit", "authorize", "permissioncontroller", "allow permission", "删除", "支付", "购买", "下单", "转账", "授权", "允许访问", "提交", "注销"].some((keyword) => value.includes(keyword));
 }
 
-function providerLabel(provider: "offline" | "local" | "codex" | "claude" | "cloud"): string {
-  return { offline: "Reactor Offline", local: "Local Model", codex: "Codex CLI", claude: "Claude Code", cloud: "Cloud AI" }[provider];
-}
-
-function offlineNextSuggestion(snapshot: DeviceInspectorSnapshot, goal: string): ExplorerSuggestion | undefined {
-  const keywords = goal.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 2);
-  const candidates = snapshot.elements
-    .filter((element) => element.enabled && element.clickable && element.candidates.length > 0 && !isDangerousElement(element))
-    .map((element) => {
-      const label = elementName(element);
-      const lower = label.toLowerCase();
-      const relevance = keywords.reduce((score, keyword) => score + (lower.includes(keyword) ? 20 : 0), 0);
-      return { element, label, score: relevance + element.candidates[0].score };
-    })
-    .sort((left, right) => right.score - left.score);
-  const best = candidates[0];
-  if (!best) return undefined;
-  const step: FlowStep = { action: "tap", target: best.element.candidates[0].selector };
-  return {
-    step,
-    label: best.label,
-    provider: "reactor-safe-rules",
-    model: "deterministic-next-action-v1",
-    knownTarget: true,
-    dangerous: false,
-    coordinateFallback: Boolean(best.element.candidates[0].selector.coordinate),
-    executionPoint: {
-      x: best.element.bounds.x + best.element.bounds.width / 2,
-      y: best.element.bounds.y + best.element.bounds.height / 2,
-    },
-  };
+function providerLabel(provider: "local" | "codex" | "claude" | "cloud"): string {
+  return { local: "Local Model", codex: "Codex CLI", claude: "Claude Code", cloud: "Cloud AI" }[provider];
 }
 
 function formatBounds(element: InspectorElement): string {

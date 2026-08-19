@@ -4,7 +4,7 @@ import { modifyFlow } from "./api";
 import type { FlowModificationProposal } from "./api";
 import type { Flow } from "./types";
 
-type ProviderMode = "offline" | "local" | "codex" | "claude" | "cloud";
+type ProviderMode = "local" | "codex" | "claude" | "cloud";
 
 interface FlowCopilotProps {
   flow: Flow;
@@ -46,7 +46,7 @@ export function FlowCopilot({
   const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
 
   async function propose() {
-    if (!instruction.trim() || provider === "offline") return;
+    if (!instruction.trim()) return;
     setBusy(true);
     setError("");
     setProposal(undefined);
@@ -104,8 +104,8 @@ export function FlowCopilot({
       </div>
       {proposal && <div className="ai-flow-proposal"><div><b>修改提案 · {proposal.changes.length} 处差异</b><span>{proposal.generated.provider} · {proposal.generated.model}</span></div><ol>{proposal.changes.slice(0, 12).map((change) => <li key={change.path}><code>{change.path}</code><span><del>{summarizeChangeValue(change.before)}</del><ArrowRight size={11} /><ins>{summarizeChangeValue(change.after)}</ins></span></li>)}</ol>{proposal.changes.length > 12 && <small>另有 {proposal.changes.length - 12} 处差异，应用后可查看完整 JSON。</small>}<div className="ai-flow-proposal-actions"><button className="secondary-button" disabled={busy} onClick={() => setProposal(undefined)}>放弃</button><button className="primary-button" disabled={busy} onClick={() => void apply()}><Check size={14} />确认并应用</button></div></div>}
       {error && <div className="flow-editor-error">{error}</div>}
-      <textarea disabled={locked} maxLength={4000} value={instruction} onChange={(event) => { setInstruction(event.target.value); setProposal(undefined); setError(""); }} placeholder={locked ? "先复制为新草稿，再用自然语言修改" : provider === "offline" ? "请先选择 Local Model、Codex CLI、Claude Code 或 Cloud AI" : "告诉 AI 如何修改当前 Flow…"} />
-      <button className="primary-button flow-copilot-send" disabled={locked || disabled || busy || provider === "offline" || !instruction.trim()} onClick={() => void propose()}>{busy ? <RefreshCw size={14} className="spin" /> : <WandSparkles size={14} />}{busy ? "处理中" : "生成修改提案"}</button>
+      <textarea disabled={locked} maxLength={4000} value={instruction} onChange={(event) => { setInstruction(event.target.value); setProposal(undefined); setError(""); }} placeholder={locked ? "先复制为新草稿，再用自然语言修改" : "告诉 AI 如何修改当前 Flow…"} />
+      <button className="primary-button flow-copilot-send" disabled={locked || disabled || busy || !instruction.trim()} onClick={() => void propose()}>{busy ? <RefreshCw size={14} className="spin" /> : <WandSparkles size={14} />}{busy ? "处理中" : "生成修改提案"}</button>
       <p>AI 只生成提案；appId、平台、Secret 和测量边界受 Rust 规则保护。</p>
     </aside>
   );

@@ -12,7 +12,6 @@ Reactor 自带受管 Maestro 与所需 Java 运行时，用户不需要另外安
 
 1. 打开 **Flow Studio**，输入测试目标、应用包名、框架和平台。
 2. 选择 Flow 生成器：
-   - **Reactor Offline**：规则生成，非大模型，无需 API Key。
    - **Local Model**：连接已运行的 Ollama、LM Studio 或兼容本地服务，无需云端 Key。
    - **Codex CLI / Claude Code CLI**：复用本机已有安装和登录态，Reactor 不读取凭据。
    - **Cloud API**：只有显式选择并提供当前会话 Key 或钥匙串 Key 后才能调用。
@@ -30,10 +29,7 @@ Reactor 自带受管 Maestro 与所需 Java 运行时，用户不需要另外安
 
 ## 不连接设备的快速体验
 
-1. 在 Flow Studio 选择 **Reactor Offline**。
-2. 输入“启动应用，进入列表，向上滚动 10 次并测量滚动性能”。
-3. 生成并查看三种 Flow 表示，按需修改 JSON。
-4. 运行产品导览，体验独立 Runner、任务状态、三框架布局和 HTML 报告。
+可运行“三框架模拟导览”，体验独立 Runner、任务状态、三框架布局和 HTML 报告。自然语言 Flow 生成必须选择 Local Model、Codex CLI、Claude Code CLI 或 Cloud API，不再用离线关键词模板模拟 AI 结果。
 
 产品导览数据带有 `SIMULATED` 标记，只用于体验工作流，不会进入真实性能结论。
 

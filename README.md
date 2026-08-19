@@ -6,7 +6,7 @@ Runner 中执行，AI 不进入测量窗口。
 
 当前可体验能力：
 
-- Reactor Offline、Local Model、Codex CLI、Claude Code CLI、Cloud API 五种 Flow Provider。
+- Local Model、Codex CLI、Claude Code CLI、Cloud API 四种真实 AI Flow Provider。
 - Android/iOS Simulator 的 Flow 试跑、失败证据、自愈、人工确认和 SHA-256 锁定。
 - Android Emulator 的 Maestro、Flashlight、Perfetto、冷启动、PSS、CPU 与热状态采集。
 - iOS Simulator 的 Maestro 与 xctrace Time Profiler。
