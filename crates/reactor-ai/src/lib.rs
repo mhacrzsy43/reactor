@@ -1199,12 +1199,14 @@ impl FlowAiProvider for CliFlowProvider {
     ) -> Result<GeneratedFlow, AiProviderError> {
         let flow = serde_json::to_string_pretty(&request.flow)
             .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
+        let observed_selectors = observed_selector_inventory(request.ui_tree.as_deref());
         self.complete_with_system(
             MODIFY_SYSTEM_PROMPT,
             format!(
-                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nObserved selector values (exact; never translate or change case): {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
                 request.instruction,
                 truncate(request.failure_context.as_deref().unwrap_or("not provided"), 4_000),
+                observed_selectors,
                 truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
                 flow
             ),
@@ -1771,12 +1773,14 @@ impl FlowAiProvider for OpenAiCompatibleProvider {
     ) -> Result<GeneratedFlow, AiProviderError> {
         let flow = serde_json::to_string_pretty(&request.flow)
             .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
+        let observed_selectors = observed_selector_inventory(request.ui_tree.as_deref());
         self.complete_with_system(
             MODIFY_SYSTEM_PROMPT,
             format!(
-                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nObserved selector values (exact; never translate or change case): {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
                 request.instruction,
                 truncate(request.failure_context.as_deref().unwrap_or("not provided"), 4_000),
+                observed_selectors,
                 truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
                 flow
             ),
@@ -1947,6 +1951,35 @@ fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+fn observed_selector_inventory(ui_tree: Option<&str>) -> String {
+    let Some(ui_tree) = ui_tree else {
+        return "not provided".to_owned();
+    };
+    let quoted =
+        Regex::new(r#"(?i)(?:text|content-desc|accessibilityText|label|resource-id)=\"([^\"]+)\""#)
+            .expect("static selector inventory regex is valid");
+    let compact =
+        Regex::new(r#"(?i)\b(?:text|accessibilityText|label|resource-id)=([^;,\r\n\"]+)"#)
+            .expect("static compact selector inventory regex is valid");
+    let mut values = std::collections::BTreeSet::new();
+    for captures in quoted
+        .captures_iter(ui_tree)
+        .chain(compact.captures_iter(ui_tree))
+    {
+        let Some(value) = captures.get(1).map(|value| value.as_str().trim()) else {
+            continue;
+        };
+        if !value.is_empty() && !value.starts_with("[REDACTED_") {
+            values.insert(value.to_owned());
+        }
+        if values.len() >= 80 {
+            break;
+        }
+    }
+    serde_json::to_string(&values.into_iter().collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".to_owned())
+}
+
 const SYSTEM_PROMPT: &str = r"You generate Reactor Flow v1 as one JSON object and no markdown.
 Required fields: schemaVersion=1, id, name, appId, platform (android|ios), optional intent,
 setup[], measured[], teardown[]. Supported actions are reset_app_state, launch_app, tap,
@@ -1989,7 +2022,8 @@ claim a destination is reached without an existing stable assertion. Never add d
 financial, account-removal, logout, permission-grant, or other sensitive actions. If the request
 cannot be represented safely with Reactor Flow v1, return the original Flow unchanged. When trial
 failure evidence is supplied, repair the concrete failing step using only selectors present in the
-redacted UI tree. A missing promptRef runtime value is not a Flow defect: preserve the promptRef so
+redacted UI tree. Selector text is case-sensitive and language-sensitive: copy an exact observed
+value and never translate it from the user's instruction. A missing promptRef runtime value is not a Flow defect: preserve the promptRef so
 Reactor can request its one-time value before replay.";
 
 const ANALYSIS_SYSTEM_PROMPT: &str = r"You explain an immutable Reactor performance report as JSON only.
@@ -2431,6 +2465,19 @@ exit 1"#,
             "{\"ok\":true}"
         );
         assert_eq!(strip_markdown_fence(" {\"ok\":true} "), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn selector_inventory_preserves_exact_language_and_case() {
+        let inventory = observed_selector_inventory(Some(
+            r#"<node text="Sign in" content-desc=""/><node text="Username"/><node accessibilityText=Password;password=true/>"#,
+        ));
+        let values: Vec<String> = serde_json::from_str(&inventory).unwrap();
+
+        assert!(values.contains(&"Sign in".to_owned()));
+        assert!(values.contains(&"Username".to_owned()));
+        assert!(values.contains(&"Password".to_owned()));
+        assert!(!values.contains(&"登录".to_owned()));
     }
 
     #[tokio::test]

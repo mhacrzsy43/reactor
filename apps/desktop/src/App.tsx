@@ -1213,7 +1213,7 @@ function App() {
                 cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
                 disabled={busy || providerBlocked}
                 locked={Boolean(flowLock)}
-                contextHint={preparation?.failure ? `${preparation.failure.code}：${preparation.failure.message}` : undefined}
+                contextHint={preparation?.failure ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
                 failureUiTree={preparation?.context?.uiTree}
                 onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
                 onApply={applyCopilotProposal}
