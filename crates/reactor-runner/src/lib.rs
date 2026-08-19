@@ -937,14 +937,15 @@ pub async fn capture_ios_screenshot(
     )
 }
 
-/// Executes one reviewed Flow Explorer step against the current screen without launching or
-/// resetting the application. The ephemeral Maestro document is removed after execution and is
-/// never indexed as benchmark evidence.
+/// Executes one reviewed Flow Explorer step against the current screen. Launch is handled by the
+/// platform bridge, low-latency Android gestures use ADB, and semantic/assertion steps use an
+/// ephemeral Maestro document that is removed after execution and never indexed as benchmark
+/// evidence. Clearing app data remains whole-flow only because it is destructive.
 ///
 /// # Errors
 ///
-/// Returns an error when the step is not an interactive recorder action, validation fails, the
-/// managed automation runtime is unavailable, or the device command fails.
+/// Returns an error when the step clears application data, validation fails, the managed
+/// automation runtime is unavailable, or the device command fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_explorer_step(
     workspace: &Path,
@@ -956,15 +957,9 @@ pub async fn execute_explorer_step(
     viewport_size: Option<(f64, f64)>,
     prompt_values: Option<BTreeMap<String, Zeroizing<String>>>,
 ) -> Result<(), RunnerError> {
-    if !matches!(
-        &step,
-        Step::Tap { .. } | Step::InputText { .. } | Step::Swipe { .. } | Step::Pause { .. }
-    ) {
-        return Err(RunnerError::CommandFailed {
-            command: "Flow Explorer interaction".to_owned(),
-            output: "only tap, input_text, swipe, and pause are interactive recorder actions"
-                .to_owned(),
-        });
+    validate_explorer_single_step(&step)?;
+    if matches!(&step, Step::LaunchApp) {
+        return relaunch_explorer_app(workspace, platform, device_id, app_id).await;
     }
     if platform == reactor_protocol::Platform::Android
         && matches!(
@@ -988,8 +983,9 @@ pub async fn execute_explorer_step(
         app_id: app_id.to_owned(),
         platform,
         intent: None,
-        setup: vec![],
-        measured: vec![step],
+        setup: vec![step],
+        // The protocol requires a measured section, but single-step replay executes only setup.
+        measured: vec![Step::Pause { duration_ms: 1 }],
         teardown: vec![],
     };
     let compiled = compile_maestro(&flow)?;
@@ -1003,7 +999,7 @@ pub async fn execute_explorer_step(
         .join(uuid::Uuid::new_v4().to_string());
     fs::create_dir_all(&directory).await?;
     let path = directory.join("step.yaml");
-    fs::write(&path, compiled.measured).await?;
+    fs::write(&path, compiled.setup).await?;
     let result = match platform {
         reactor_protocol::Platform::Android => {
             let adb = tools.adb.ok_or(RunnerError::MissingTool("adb"))?;
@@ -1023,6 +1019,71 @@ pub async fn execute_explorer_step(
     };
     let _ = fs::remove_dir_all(&directory).await;
     result
+}
+
+async fn relaunch_explorer_app(
+    workspace: &Path,
+    platform: reactor_protocol::Platform,
+    device_id: &str,
+    app_id: &str,
+) -> Result<(), RunnerError> {
+    match platform {
+        reactor_protocol::Platform::Android => {
+            let adb = resolve_tools(workspace)
+                .adb
+                .ok_or(RunnerError::MissingTool("adb"))?;
+            let adb = adb.to_string_lossy();
+            command_text(
+                &adb,
+                &["-s", device_id, "shell", "am", "force-stop", app_id],
+                "stop Android app for Flow Explorer relaunch",
+                Duration::from_secs(10),
+            )
+            .await?;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            command_text(
+                &adb,
+                &[
+                    "-s",
+                    device_id,
+                    "shell",
+                    "monkey",
+                    "-p",
+                    app_id,
+                    "-c",
+                    "android.intent.category.LAUNCHER",
+                    "1",
+                ],
+                "launch Android app for Flow Explorer replay",
+                Duration::from_secs(15),
+            )
+            .await
+            .map(|_| ())
+        }
+        reactor_protocol::Platform::Ios => {
+            let _ = command_text(
+                "xcrun",
+                &["simctl", "terminate", device_id, app_id],
+                "terminate iOS app for Flow Explorer relaunch",
+                Duration::from_secs(10),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            ensure_ios_app_running(device_id, app_id).await
+        }
+    }
+}
+
+fn validate_explorer_single_step(step: &Step) -> Result<(), RunnerError> {
+    if matches!(step, Step::ResetAppState) {
+        return Err(RunnerError::CommandFailed {
+            command: "Flow Explorer single-step replay".to_owned(),
+            output:
+                "reset_app_state clears application data and requires explicit whole-flow replay"
+                    .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Replays a complete edited Flow outside the measurement window with one Maestro process. The
@@ -3637,6 +3698,21 @@ fn quote_shell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_step_replay_allows_launch_and_assertion_but_rejects_data_reset() {
+        assert!(validate_explorer_single_step(&Step::LaunchApp).is_ok());
+        assert!(
+            validate_explorer_single_step(&Step::AssertVisible {
+                target: reactor_protocol::Selector {
+                    text: Some("List ready".to_owned()),
+                    ..reactor_protocol::Selector::default()
+                },
+            })
+            .is_ok()
+        );
+        assert!(validate_explorer_single_step(&Step::ResetAppState).is_err());
+    }
 
     #[test]
     fn builds_bounded_android_explorer_input_commands() {

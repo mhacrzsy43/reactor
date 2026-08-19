@@ -89,6 +89,7 @@ export function FlowExplorer({
   const [editorError, setEditorError] = useState("");
   const [editorUndo, setEditorUndo] = useState<{ steps: FlowStep[]; measurementStart?: number; teardownStart: number }>();
   const [replaying, setReplaying] = useState(false);
+  const [replayKind, setReplayKind] = useState<"step" | "whole">();
   const [promptValues, setPromptValues] = useState<Record<string, string>>({});
   const [graphNodes, setGraphNodes] = useState<ExplorerGraphNode[]>([]);
   const [graphTransitions, setGraphTransitions] = useState<ExplorerGraphTransition[]>([]);
@@ -589,6 +590,7 @@ export function FlowExplorer({
       window.setTimeout(() => editorErrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
       return;
     }
+    setReplayKind("whole");
     setReplaying(true);
     setLive(false);
     setSelectedElementKey(undefined);
@@ -611,6 +613,7 @@ export function FlowExplorer({
       window.setTimeout(() => editorErrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
     } finally {
       setReplaying(false);
+      setReplayKind(undefined);
     }
   }
 
@@ -640,6 +643,7 @@ export function FlowExplorer({
       }
       executionPoint = { x: hitElement.bounds.x + hitElement.bounds.width / 2, y: hitElement.bounds.y + hitElement.bounds.height / 2 };
     }
+    setReplayKind("step");
     setReplaying(true);
     setEditorError("");
     try {
@@ -653,6 +657,10 @@ export function FlowExplorer({
         viewportHeight: snapshotRef.current?.viewportHeight,
         runtimeInput,
       });
+      if (next.elements.length === 0) {
+        pendingGraphStepRef.current = step;
+        setSelectorRefreshAttempt(0);
+      }
       setSnapshot(next);
       observeSnapshot(next, step);
       if (promptReference) setPromptValues((values) => ({ ...values, [promptReference]: "" }));
@@ -660,6 +668,7 @@ export function FlowExplorer({
       setEditorError(`逐步回放失败：${cleanError(reason)}`);
     } finally {
       setReplaying(false);
+      setReplayKind(undefined);
     }
   }
 
@@ -865,7 +874,7 @@ export function FlowExplorer({
       <header className="topbar">
         <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10</p><h1>看见页面，逐步录成 Flow</h1></div>
         <div className="top-actions">
-          <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : replaying || gateBusy ? "Maestro 回放中 · 实时镜像" : interacting ? "正在执行并等待页面稳定" : live ? "低频同步中 · 3 秒" : mode === "record" ? "录制/交互模式" : "审查模式"}</span>
+          <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : gateBusy || replayKind === "whole" ? "Maestro 回放中 · 实时镜像" : replayKind === "step" ? "逐步回放中 · 实时镜像" : interacting ? "正在执行并等待页面稳定" : live ? "低频同步中 · 3 秒" : mode === "record" ? "录制/交互模式" : "审查模式"}</span>
           <button className="secondary-button" disabled={!selectedDevice || loading || interacting || replaying || gateBusy || activeJobRunning} onClick={() => void capture()}>{loading ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}刷新画面</button>
           <button className="secondary-button" disabled={!selectedDevice || interacting || replaying || gateBusy || activeJobRunning} onClick={() => setLive((value) => !value)}>{live ? <Pause size={16} /> : <Play size={16} />}{live ? "暂停同步" : "开始同步"}</button>
         </div>
@@ -885,7 +894,7 @@ export function FlowExplorer({
             {devices.map((device) => <option key={`${device.platform}:${device.id}`} value={`${device.platform}:${device.id}`}>{device.platform === "ios" ? "iOS" : "Android"} · {device.name ?? device.id} · {device.physical ? "真机" : "模拟器"}</option>)}
           </select>
         </label>
-        <div className="explorer-toolbar-summary"><Smartphone size={16} /><div><b>{selectedDevice?.id ?? "等待连接"}</b><span>{snapshot ? `${snapshot.screenshotWidth} × ${snapshot.screenshotHeight} PNG · ${snapshot.elements.length} 个 UI 元素` : "画面和 UI 树只保存在当前内存中"}</span></div></div>
+        <div className="explorer-toolbar-summary"><Smartphone size={16} /><div><b>{selectedDevice?.id ?? "等待连接"}</b><span>{snapshot ? `${snapshot.screenshotWidth} × ${snapshot.screenshotHeight} PNG · ${snapshot.elements.length} 个 UI 元素 · ${selectedDevice?.platform === "android" ? "ADB 直连镜像" : "simctl 直连镜像"}` : "画面和 UI 树只保存在当前内存中"}</span></div></div>
         <button className="secondary-button" onClick={onRefreshDevices}><RefreshCw size={15} />刷新设备列表</button>
       </section>
 
@@ -909,7 +918,7 @@ export function FlowExplorer({
       ) : (
         <div className="explorer-grid">
           <section className="card explorer-device-card">
-            <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{replaying || gateBusy ? "Maestro 正在真实执行；镜像约每 650 ms 刷新一次。" : mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
+            <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{replaying || gateBusy ? `${replayKind === "step" ? "当前步骤" : "Maestro"}正在真实执行；镜像约每 650 ms 刷新一次。` : mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
             <div className="device-mirror-stage">
               {snapshot ? (
                 <div
@@ -923,7 +932,7 @@ export function FlowExplorer({
                   <img src={snapshot.screenshotDataUrl} alt={`${selectedDevice?.name ?? selectedDevice?.id} 当前画面`} draggable={false} />
                   {selectedElement && <span className="element-highlight" style={highlightStyle(selectedElement, snapshot)}><span>{elementName(selectedElement)}</span></span>}
                   {point && <span className="inspection-point" style={{ left: `${(point.x / snapshot.viewportWidth) * 100}%`, top: `${(point.y / snapshot.viewportHeight) * 100}%` }} />}
-                  {(replaying || gateBusy) && <span className="mirror-replay-indicator"><RefreshCw size={12} className="spin" />Maestro 实时回放</span>}
+                  {(replaying || gateBusy) && <span className="mirror-replay-indicator"><RefreshCw size={12} className="spin" />{replayKind === "step" ? "步骤实时回放" : "Maestro 实时回放"}</span>}
                   {interacting && <span className="mirror-interaction-overlay"><RefreshCw size={22} className="spin" /><b>{interactingLabel}</b><small>正在操作设备并等待下一页面稳定</small></span>}
                 </div>
               ) : (
@@ -959,7 +968,7 @@ export function FlowExplorer({
                       <li key={`${step.action}-${index}`}>
                         <span>{index + 1}</span>
                         <div><b>{flowStepName(step)} <small>{stepSection(index, measurementStart, teardownStart)}</small></b><code>{flowStepDetail(step)}</code></div>
-                        <div className="recorded-step-actions"><button title="逐步回放" disabled={replaying} onClick={() => void replayOneStep(step)}><Play size={12} /></button><button title="上移" onClick={() => moveRecordedStep(index, -1)}><ArrowUp size={12} /></button><button title="下移" onClick={() => moveRecordedStep(index, 1)}><ArrowDown size={12} /></button><button title="删除" onClick={() => removeRecordedStep(index)}><Trash2 size={12} /></button></div>
+                        <div className="recorded-step-actions"><button title={step.action === "reset_app_state" ? "清除应用数据属于破坏性操作，只能通过整体回放执行" : "逐步回放"} disabled={replaying || step.action === "reset_app_state"} onClick={() => void replayOneStep(step)}><Play size={12} /></button><button title="上移" onClick={() => moveRecordedStep(index, -1)}><ArrowUp size={12} /></button><button title="下移" onClick={() => moveRecordedStep(index, 1)}><ArrowDown size={12} /></button><button title="删除" onClick={() => removeRecordedStep(index)}><Trash2 size={12} /></button></div>
                       </li>
                     ))}
                   </ol>
@@ -971,7 +980,7 @@ export function FlowExplorer({
                 {promptReferences.length > 0 && <div className="replay-prompts"><b>本次回放输入（不写入 Flow）</b>{promptReferences.map((reference) => <label key={reference}><span>{reference}</span><input type="password" autoComplete="off" value={promptValues[reference] ?? ""} onChange={(event) => setPromptValues((values) => ({ ...values, [reference]: event.target.value }))} /></label>)}</div>}
                 {editorError && <div ref={editorErrorRef} className="flow-editor-error">{editorError}</div>}
                 {!editorError && replayBlockedReason && <div className="flow-editor-error">整体回放暂不可用：{replayBlockedReason}</div>}
-                <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? "整体回放中" : "整体回放（草稿）"}</button></div>
+                <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? replayKind === "step" ? "单步回放中" : "整体回放中" : "整体回放（草稿）"}</button></div>
               </section>
             )}
             <section className="state-graph-panel" aria-label="AI 状态图探索">
