@@ -329,6 +329,17 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .explorer-error { margin-top: 0; }
 .explorer-grid { max-width: 1390px; margin: 0 auto; display: grid; grid-template-columns: minmax(360px, 1.05fr) minmax(330px, .95fr); gap: 18px; align-items: start; }
 .explorer-device-card, .selector-inspector-card { min-height: 620px; padding: 20px; }
+.selector-inspector-card { display: flex; flex-direction: column; }
+.selector-inspector-card > .card-heading { order: 0; }
+.selector-inspector-card > .current-selector-heading { order: 1; }
+.selector-inspector-card > .element-summary, .selector-inspector-card > .selector-empty { order: 2; }
+.selector-inspector-card > .input-step-editor { order: 2; margin-top: 0; }
+.selector-inspector-card > .element-summary:has(+ .input-step-editor) { order: 3; margin-top: 12px; }
+.selector-inspector-card > .inspector-execute-button { order: 3; }
+.selector-inspector-card > .selector-candidates { order: 4; }
+.selector-inspector-card > .recorded-flow-panel { order: 5; margin-top: 18px; }
+.selector-inspector-card > .state-graph-panel { order: 6; }
+.selector-inspector-card > .assertion-builder-panel { order: 7; }
 .device-mirror-stage { min-height: 492px; padding: 18px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #07080b; }
 .device-mirror { position: relative; width: min(100%, 360px); overflow: visible; cursor: crosshair; user-select: none; overscroll-behavior: contain; touch-action: none; box-shadow: 0 18px 55px rgba(0,0,0,.48); }
 .device-mirror.record { cursor: pointer; box-shadow: 0 0 0 2px color-mix(in srgb, var(--purple) 52%, transparent), 0 18px 55px rgba(0,0,0,.48); }
