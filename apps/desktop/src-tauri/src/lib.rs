@@ -12,12 +12,12 @@ use std::os::unix::process::CommandExt as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use reactor_ai::{
-    AnalysisAiProvider, AnalysisExplanation, AnalysisExplanationRequest, CliFlowProvider,
-    CliProviderKind, CliProviderStatus, CredentialStore, DryRunFailure, FlowAiProvider, FlowChange,
-    FlowGenerationRequest, FlowModificationRequest, FlowProbeRequest, FlowRepairRequest,
-    GeneratedFlow, LocalModelStatus, MAX_FLOW_REPAIR_ATTEMPTS, OfflineAnalysisExplainer,
-    OpenAiCompatibleProvider, RedactedUiContext, SystemCredentialStore, diff_flows,
-    doctor_cli_provider, doctor_local_model as check_local_model, redact_ui_tree,
+    AiProviderError, AnalysisAiProvider, AnalysisExplanation, AnalysisExplanationRequest,
+    CliFlowProvider, CliProviderKind, CliProviderStatus, CredentialStore, DryRunFailure,
+    FlowAiProvider, FlowChange, FlowGenerationRequest, FlowModificationRequest, FlowProbeRequest,
+    FlowRepairRequest, GeneratedFlow, LocalModelStatus, MAX_FLOW_REPAIR_ATTEMPTS,
+    OfflineAnalysisExplainer, OpenAiCompatibleProvider, RedactedUiContext, SystemCredentialStore,
+    diff_flows, doctor_cli_provider, doctor_local_model as check_local_model, redact_ui_tree,
 };
 use reactor_analysis::{
     AnalysisReport, DiagnosticProfileReport, ProfileDiffReport, RegressionPolicy, analyze_pair,
@@ -1096,45 +1096,39 @@ async fn modify_flow(input: ModifyFlowInput) -> Result<FlowModificationProposal,
         failure_context: input.failure_context,
         ui_tree: input.ui_tree.map(|tree| redact_ui_tree(&tree, 0).ui_tree),
     };
-    let mut generated = match input.provider.as_str() {
+    let provider: Box<dyn FlowAiProvider> = match input.provider.as_str() {
         "cloud" => {
             let api_key =
                 resolve_api_key(input.api_key, input.save_api_key, input.use_saved_api_key)?
                     .ok_or_else(|| "Cloud AI 需要 API Key，密钥可选保存到系统钥匙串".to_owned())?;
-            OpenAiCompatibleProvider::new(
+            Box::new(OpenAiCompatibleProvider::new(
                 input
                     .endpoint
                     .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
                 api_key,
                 input.model.unwrap_or_else(|| "gpt-5-mini".to_owned()),
-            )
-            .modify(request)
-            .await
+            ))
         }
-        "local" => {
-            OpenAiCompatibleProvider::new_local(
-                input
-                    .endpoint
-                    .unwrap_or_else(|| "http://127.0.0.1:11434".to_owned()),
-                input.model.unwrap_or_else(|| "qwen2.5:7b".to_owned()),
-            )
-            .modify(request)
-            .await
-        }
+        "local" => Box::new(OpenAiCompatibleProvider::new_local(
+            input
+                .endpoint
+                .unwrap_or_else(|| "http://127.0.0.1:11434".to_owned()),
+            input.model.unwrap_or_else(|| "qwen2.5:7b".to_owned()),
+        )),
         "codex" | "claude" => {
             let kind = if input.provider == "codex" {
                 CliProviderKind::Codex
             } else {
                 CliProviderKind::ClaudeCode
             };
-            CliFlowProvider::new(kind, input.cli_executable.as_deref(), input.model)
-                .map_err(|error| error.to_string())?
-                .modify(request)
-                .await
+            Box::new(
+                CliFlowProvider::new(kind, input.cli_executable.as_deref(), input.model)
+                    .map_err(|error| error.to_string())?,
+            )
         }
         other => return Err(format!("未知 Flow Provider: {other}")),
-    }
-    .map_err(|error| error.to_string())?;
+    };
+    let mut generated = modify_with_schema_retry(provider.as_ref(), request).await?;
     if generated.flow.app_id != input.flow.app_id {
         return Err("AI 修改试图改变 appId，Reactor 已拒绝该提案".to_owned());
     }
@@ -1148,6 +1142,29 @@ async fn modify_flow(input: ModifyFlowInput) -> Result<FlowModificationProposal,
         .notes
         .push("Natural-language Flow modification proposed and validated".to_owned());
     Ok(FlowModificationProposal { generated, changes })
+}
+
+async fn modify_with_schema_retry(
+    provider: &dyn FlowAiProvider,
+    request: FlowModificationRequest,
+) -> Result<GeneratedFlow, String> {
+    match provider.modify(request.clone()).await {
+        Ok(generated) => Ok(generated),
+        Err(AiProviderError::InvalidResponse(validation_error)) => {
+            let mut retry = request;
+            retry.instruction = format!(
+                "{}\n\nYour previous proposal was rejected by Reactor validation: {}. Return the complete corrected Flow. Fix only that validation defect, preserve the requested behavior and all unrelated steps, and use only non-empty selectors observed in the supplied redacted UI tree.",
+                retry.instruction,
+                validation_error.chars().take(2_000).collect::<String>()
+            );
+            provider.modify(retry).await.map_err(|retry_error| {
+                format!(
+                    "AI 提案两次未通过 Reactor 校验；当前 Flow 未改变。首次错误：{validation_error}；纠错错误：{retry_error}"
+                )
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -2657,6 +2674,27 @@ mod tests {
                 notes: vec![],
             })
         }
+
+        async fn modify(
+            &self,
+            request: FlowModificationRequest,
+        ) -> Result<GeneratedFlow, reactor_ai::AiProviderError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                return Err(reactor_ai::AiProviderError::InvalidResponse(
+                    "setup[2]: selector must not be empty".to_owned(),
+                ));
+            }
+            let mut flow = request.flow;
+            flow.name = "Schema-corrected modification".to_owned();
+            Ok(GeneratedFlow {
+                flow,
+                provider: self.id().to_owned(),
+                model: "deterministic-test-double".to_owned(),
+                prompt_template_version: "reactor-flow-v1".to_owned(),
+                notes: vec![],
+            })
+        }
     }
 
     fn failed_preparation(generated: GeneratedFlow) -> TrialPreparation {
@@ -2941,5 +2979,26 @@ mod tests {
         assert!(result.failure.is_some());
         assert!(result.trial.is_none());
         assert_eq!(audit.len(), MAX_FLOW_REPAIR_ATTEMPTS as usize);
+    }
+
+    #[tokio::test]
+    async fn invalid_modification_gets_one_bounded_schema_correction() {
+        let provider = MockRepairProvider {
+            calls: AtomicU32::new(0),
+        };
+        let generated = modify_with_schema_retry(
+            &provider,
+            FlowModificationRequest {
+                flow: navigation_flow(),
+                instruction: "repair the observed failure".to_owned(),
+                failure_context: Some("selector_not_found".to_owned()),
+                ui_tree: Some("text=List scenario".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(generated.flow.name, "Schema-corrected modification");
     }
 }
