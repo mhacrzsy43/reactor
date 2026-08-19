@@ -28,7 +28,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, stageUpdate, trialGeneratedFlow } from "./api";
+import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, saveFlowSecret, stageUpdate, trialGeneratedFlow } from "./api";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
 import { FlowCopilot } from "./FlowCopilot";
@@ -149,6 +149,10 @@ function App() {
   const [flowJsonDraft, setFlowJsonDraft] = useState("");
   const [flowEditError, setFlowEditError] = useState("");
   const [flowEditNotice, setFlowEditNotice] = useState("");
+  const [trialPromptValues, setTrialPromptValues] = useState<Record<string, string>>({});
+  const [trialSecretValues, setTrialSecretValues] = useState<Record<string, string>>({});
+  const [trialSecretStatus, setTrialSecretStatus] = useState<Record<string, boolean>>({});
+  const [savingTrialSecret, setSavingTrialSecret] = useState("");
   const [flowLock, setFlowLock] = useState<FlowLock>();
   const [preparation, setPreparation] = useState<TrialPreparation>();
   const [results, setResults] = useState<NormalizedResult[]>([]);
@@ -301,6 +305,32 @@ function App() {
   const providerBlocked = (providerMode === "cloud" && !apiKey && !useSavedApiKey)
     || (providerMode === "local" && (!localModelStatus?.available || !localModel.trim()))
     || ((providerMode === "codex" || providerMode === "claude") && (!selectedCliStatus?.available || !selectedCliStatus.authenticated));
+  const trialPromptReferences = useMemo(
+    () => generated ? collectPromptReferences(generated.flow) : [],
+    [generated],
+  );
+  const trialSecretReferences = useMemo(
+    () => generated ? collectSecretReferences(generated.flow) : [],
+    [generated],
+  );
+  const trialDataReady = trialPromptReferences.every((reference) => trialPromptValues[reference]?.trim())
+    && trialSecretReferences.every(({ reference }) => trialSecretStatus[reference]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (trialSecretReferences.length === 0) {
+      setTrialSecretStatus({});
+      return () => { cancelled = true; };
+    }
+    void Promise.all(trialSecretReferences.map(async ({ reference }) => getFlowSecretStatus(reference)))
+      .then((statuses) => {
+        if (!cancelled) setTrialSecretStatus(Object.fromEntries(statuses.map((status) => [status.reference, status.stored])));
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(`读取 Flow Secret 状态失败：${String(reason)}`);
+      });
+    return () => { cancelled = true; };
+  }, [trialSecretReferences]);
 
   useEffect(() => {
     if (!selectedTarget) {
@@ -351,6 +381,8 @@ function App() {
   async function onGenerate() {
     setBusy(true);
     setError("");
+    setTrialPromptValues({});
+    setTrialSecretValues({});
     setActiveJob(undefined);
     try {
       const output = await generateFlow({
@@ -520,14 +552,44 @@ function App() {
       setError(`未检测到 ${platform === "ios" ? "iOS Simulator" : "Android Emulator/设备"}。请先准备 Reactor 内置工具并启动目标；静态校验不能替代上机试跑。`);
       return;
     }
+    const missingSecret = trialSecretReferences.find(({ reference }) => !trialSecretStatus[reference]);
+    if (missingSecret) {
+      setError(`试跑前请先保存 ${missingSecret.reference}；Secret 只进入系统凭据库，不写入 Flow 或发送给 AI。`);
+      return;
+    }
+    const missingPrompt = trialPromptReferences.find((reference) => !trialPromptValues[reference]?.trim());
+    if (missingPrompt) {
+      setError(`试跑前请输入本次交互值：${missingPrompt}。该值只用于本次回放，不写入 Flow、日志或 AI 上下文。`);
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      setPreparation(await trialGeneratedFlow(generated, selectedTarget?.id, generationContext));
+      setPreparation(await trialGeneratedFlow(generated, selectedTarget.id, generationContext, trialPromptValues));
+      setTrialPromptValues({});
     } catch (reason) {
       handleRunFailure(reason);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveTrialSecret(reference: string) {
+    const value = trialSecretValues[reference]?.trim();
+    if (!value) {
+      setError(`请输入 ${reference} 的 Secret 后再保存`);
+      return;
+    }
+    setSavingTrialSecret(reference);
+    setError("");
+    try {
+      await saveFlowSecret(reference, value);
+      setTrialSecretStatus((statuses) => ({ ...statuses, [reference]: true }));
+      setTrialSecretValues((values) => ({ ...values, [reference]: "" }));
+    } catch (reason) {
+      setError(`保存 ${reference} 失败：${String(reason)}`);
+    } finally {
+      setSavingTrialSecret("");
     }
   }
 
@@ -765,17 +827,32 @@ function App() {
   async function applyCopilotProposal(proposal: FlowModificationProposal) {
     try {
       const compiled = await compileFlowPreview(proposal.generated.flow);
+      const nextPromptReferences = collectPromptReferences(proposal.generated.flow);
+      const missingPrompt = nextPromptReferences.find((reference) => !trialPromptValues[reference]?.trim());
+      const nextSecretReferences = collectSecretReferences(proposal.generated.flow);
+      const missingSecret = nextSecretReferences.find(({ reference }) => !trialSecretStatus[reference]);
       setGenerated(proposal.generated);
       setCompiledFlow(compiled);
       setFlowJsonDraft(JSON.stringify(proposal.generated.flow, null, 2));
-      setPreparation(undefined);
+      let nextPreparation: TrialPreparation | undefined;
+      if (selectedTarget && !missingPrompt && !missingSecret) {
+        nextPreparation = await trialGeneratedFlow(proposal.generated, selectedTarget.id, generationContext, trialPromptValues);
+      }
+      setPreparation(nextPreparation);
       setFlowLock(undefined);
       setResults([]);
       setReportPath("");
       setStage("generated");
       setFlowEditing(false);
       setFlowView("steps");
-      setFlowEditNotice(`AI 修改已应用并通过 Rust 校验；${proposal.changes.length} 处差异，旧试跑、锁定和结果已失效。`);
+      setFlowEditNotice(missingPrompt || missingSecret
+        ? `AI 修复已应用并通过 Rust 校验；请准备 ${missingPrompt ?? missingSecret?.reference} 后重新试跑。`
+        : nextPreparation?.trial
+          ? `AI 修复已应用，并已在目标上重新试跑成功；请检查差异后锁定。`
+          : nextPreparation?.failure
+            ? `AI 修复已应用，但自动重新试跑仍失败：${nextPreparation.failure.message}。失败证据已回传 Copilot，可继续自然语言修复。`
+            : `AI 修改已应用并通过 Rust 校验；${proposal.changes.length} 处差异，请重新试跑。`);
+      if (nextPreparation) setTrialPromptValues({});
       if (saveApiKey && apiKey) {
         setApiKey("");
         setUseSavedApiKey(true);
@@ -1094,15 +1171,22 @@ function App() {
                     onEdit={flowView === "json" ? beginFlowEdit : undefined}
                   />
                 )}
+                {(trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && !flowLock && (
+                  <section className="trial-prompt-panel">
+                    <div><LockKeyhole size={15} /><span><b>试跑数据准备 · {trialPromptReferences.length + trialSecretReferences.length} 项</b><small>仅在 Flow 声明输入引用时显示；一次性值不落盘，Secret/TOTP只保存到系统凭据库，均不会发送给 AI。</small></span></div>
+                    {trialPromptReferences.map((reference) => <label key={reference}><span>{reference}<small>本次输入</small></span><input type="password" autoComplete="off" value={trialPromptValues[reference] ?? ""} onChange={(event) => setTrialPromptValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={`输入 ${reference} 的本次值`} /></label>)}
+                    {trialSecretReferences.map(({ reference, kind }) => <label className="trial-secret-row" key={reference}><span>{reference}<small>{kind === "totp" ? "TOTP 密钥" : "系统 Secret"} · {trialSecretStatus[reference] ? "已就绪" : "未配置"}</small></span><input type="password" autoComplete="off" value={trialSecretValues[reference] ?? ""} onChange={(event) => setTrialSecretValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={trialSecretStatus[reference] ? "已安全保存；输入新值可覆盖" : kind === "totp" ? "输入 Base32 TOTP 密钥" : "输入后保存到系统凭据库"} /><button className="secondary-button" disabled={savingTrialSecret === reference || !trialSecretValues[reference]?.trim()} onClick={() => void saveTrialSecret(reference)}>{savingTrialSecret === reference ? "保存中" : trialSecretStatus[reference] ? "更新" : "安全保存"}</button></label>)}
+                  </section>
+                )}
                 {preparation && <PreparationReview preparation={preparation} />}
                 <div className="flow-actions">
                   {flowLock ? (
                     <div className="hash-block"><LockKeyhole size={16} /><span>已锁定</span><code>{flowLock.flow.appId} · {flowLock.flowHash.slice(0, 12)}…</code></div>
                   ) : <p>{availableTargets.length ? "先在模拟器/设备试跑，通过后生成不可变哈希。" : `先准备 Reactor 内置工具并启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"}；静态校验不能替代上机试跑。`}</p>}
                   {!flowLock && !preparation ? (
-                    <button className="secondary-button" disabled={busy || !selectedTarget} onClick={onTrial}><Play size={16} />{selectedTarget ? "在目标试跑" : "等待测试目标"}</button>
+                    <button className="secondary-button" disabled={busy || !selectedTarget || !trialDataReady} onClick={onTrial}><Play size={16} />{selectedTarget ? trialPromptReferences.length || trialSecretReferences.length ? "数据就绪后试跑" : "在目标试跑" : "等待测试目标"}</button>
                   ) : !flowLock && preparation?.failure ? (
-                    preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
+                    preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />数据就绪，重新试跑</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
                   ) : !flowLock && preparation?.trial ? (
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
@@ -1130,6 +1214,7 @@ function App() {
                 disabled={busy || providerBlocked}
                 locked={Boolean(flowLock)}
                 contextHint={preparation?.failure ? `${preparation.failure.code}：${preparation.failure.message}` : undefined}
+                failureUiTree={preparation?.context?.uiTree}
                 onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
                 onApply={applyCopilotProposal}
               />
@@ -1620,6 +1705,37 @@ function compactValue(value: unknown) {
   if (value === undefined) return "∅";
   const serialized = JSON.stringify(value);
   return serialized.length > 72 ? `${serialized.slice(0, 69)}…` : serialized;
+}
+
+function collectPromptReferences(flow: Flow): string[] {
+  const references = new Set<string>();
+  const visit = (steps: FlowStep[]) => {
+    for (const step of steps) {
+      if (step.action === "input_text" && typeof step.value !== "string" && "promptRef" in step.value) references.add(step.value.promptRef);
+      if (step.action === "repeat") visit(step.steps);
+    }
+  };
+  visit(flow.setup);
+  visit(flow.measured);
+  visit(flow.teardown);
+  return [...references].sort();
+}
+
+function collectSecretReferences(flow: Flow): Array<{ reference: string; kind: "secret" | "totp" }> {
+  const references = new Map<string, "secret" | "totp">();
+  const visit = (steps: FlowStep[]) => {
+    for (const step of steps) {
+      if (step.action === "input_text" && typeof step.value !== "string") {
+        if ("secretRef" in step.value) references.set(step.value.secretRef, "secret");
+        if ("totpRef" in step.value) references.set(step.value.totpRef, "totp");
+      }
+      if (step.action === "repeat") visit(step.steps);
+    }
+  };
+  visit(flow.setup);
+  visit(flow.measured);
+  visit(flow.teardown);
+  return [...references].map(([reference, kind]) => ({ reference, kind })).sort((left, right) => left.reference.localeCompare(right.reference));
 }
 
 function loadFlowDraft(): PersistedFlowDraft | undefined {

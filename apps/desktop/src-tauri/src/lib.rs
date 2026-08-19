@@ -324,6 +324,8 @@ struct GenerateInput {
 struct ModifyFlowInput {
     flow: Flow,
     instruction: String,
+    failure_context: Option<String>,
+    ui_tree: Option<String>,
     endpoint: Option<String>,
     api_key: Option<String>,
     #[serde(default)]
@@ -416,6 +418,8 @@ struct TrialGeneratedInput {
     generated: GeneratedFlow,
     device_id: Option<String>,
     source_context: Option<RedactedUiContext>,
+    #[serde(default)]
+    prompt_values: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1089,6 +1093,8 @@ async fn modify_flow(input: ModifyFlowInput) -> Result<FlowModificationProposal,
     let request = FlowModificationRequest {
         flow: input.flow.clone(),
         instruction: instruction.to_owned(),
+        failure_context: input.failure_context,
+        ui_tree: input.ui_tree.map(|tree| redact_ui_tree(&tree, 0).ui_tree),
     };
     let mut generated = match input.provider.as_str() {
         "cloud" => {
@@ -1621,10 +1627,16 @@ fn resolve_api_key(
 
 #[tauri::command]
 async fn trial_generated_flow(input: TrialGeneratedInput) -> Result<TrialPreparation, String> {
+    let prompt_values = input
+        .prompt_values
+        .into_iter()
+        .map(|(reference, value)| (reference, Zeroizing::new(value)))
+        .collect();
     run_preparation(
         input.generated,
         input.device_id.as_deref(),
         input.source_context,
+        prompt_values,
     )
     .await
 }
@@ -1633,6 +1645,7 @@ async fn run_preparation(
     generated: GeneratedFlow,
     device_id: Option<&str>,
     source_context: Option<RedactedUiContext>,
+    prompt_values: std::collections::BTreeMap<String, Zeroizing<String>>,
 ) -> Result<TrialPreparation, String> {
     let Some(device_id) = device_id else {
         let platform = match generated.flow.platform {
@@ -1660,8 +1673,24 @@ async fn run_preparation(
         });
     };
     let trial = match generated.flow.platform {
-        Platform::Android => trial_android(&workspace(), &generated.flow, device_id).await,
-        Platform::Ios => trial_ios_simulator(&workspace(), &generated.flow, device_id).await,
+        Platform::Android => {
+            trial_android(
+                &workspace(),
+                &generated.flow,
+                device_id,
+                Some(prompt_values),
+            )
+            .await
+        }
+        Platform::Ios => {
+            trial_ios_simulator(
+                &workspace(),
+                &generated.flow,
+                device_id,
+                Some(prompt_values),
+            )
+            .await
+        }
     };
     match trial {
         Ok(trial) => finish_successful_trial(generated, trial, source_context).await,
@@ -1885,7 +1914,15 @@ async fn repair_flow(input: RepairFlowInput) -> Result<TrialPreparation, String>
         provider.as_ref(),
         |repaired, source_context| {
             let device_id = device_id.clone();
-            async move { run_preparation(repaired, Some(&device_id), source_context).await }
+            async move {
+                run_preparation(
+                    repaired,
+                    Some(&device_id),
+                    source_context,
+                    std::collections::BTreeMap::default(),
+                )
+                .await
+            }
         },
     )
     .await?;

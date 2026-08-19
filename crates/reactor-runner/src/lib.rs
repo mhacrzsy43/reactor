@@ -2927,10 +2927,12 @@ pub async fn trial_android(
     workspace: &Path,
     flow: &Flow,
     device_id: &str,
+    prompt_values: Option<BTreeMap<String, Zeroizing<String>>>,
 ) -> Result<FlowTrialEvidence, RunnerError> {
     let flow_hash = canonical_flow_hash(flow)?;
     let compiled = compile_maestro(flow)?;
-    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
+    let input_environment =
+        resolve_input_environment(&compiled.input_bindings, prompt_values.as_ref())?;
     let tools = resolve_tools(workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;
@@ -3006,10 +3008,12 @@ pub async fn trial_ios_simulator(
     workspace: &Path,
     flow: &Flow,
     simulator_id: &str,
+    prompt_values: Option<BTreeMap<String, Zeroizing<String>>>,
 ) -> Result<FlowTrialEvidence, RunnerError> {
     let flow_hash = canonical_flow_hash(flow)?;
     let compiled = compile_maestro(flow)?;
-    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
+    let input_environment =
+        resolve_input_environment(&compiled.input_bindings, prompt_values.as_ref())?;
     let tools = resolve_tools(workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let java = tools.java.ok_or(RunnerError::MissingTool("java"))?;

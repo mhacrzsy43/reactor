@@ -65,6 +65,10 @@ pub struct FlowRepairRequest {
 pub struct FlowModificationRequest {
     pub flow: Flow,
     pub instruction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_tree: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1198,8 +1202,11 @@ impl FlowAiProvider for CliFlowProvider {
         self.complete_with_system(
             MODIFY_SYSTEM_PROMPT,
             format!(
-                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nCurrent Flow:\n{}",
-                request.instruction, flow
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                request.instruction,
+                truncate(request.failure_context.as_deref().unwrap_or("not provided"), 4_000),
+                truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+                flow
             ),
             "reactor-flow-modify-v1",
         )
@@ -1767,8 +1774,11 @@ impl FlowAiProvider for OpenAiCompatibleProvider {
         self.complete_with_system(
             MODIFY_SYSTEM_PROMPT,
             format!(
-                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nCurrent Flow:\n{}",
-                request.instruction, flow
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                request.instruction,
+                truncate(request.failure_context.as_deref().unwrap_or("not provided"), 4_000),
+                truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+                flow
             ),
             "reactor-flow-modify-v1",
         )
@@ -1977,7 +1987,10 @@ destination assertions in setup. measured must remain non-empty and contain only
 performance actions; never add wait_for or assert_visible to measured. Do not invent selectors or
 claim a destination is reached without an existing stable assertion. Never add destructive,
 financial, account-removal, logout, permission-grant, or other sensitive actions. If the request
-cannot be represented safely with Reactor Flow v1, return the original Flow unchanged.";
+cannot be represented safely with Reactor Flow v1, return the original Flow unchanged. When trial
+failure evidence is supplied, repair the concrete failing step using only selectors present in the
+redacted UI tree. A missing promptRef runtime value is not a Flow defect: preserve the promptRef so
+Reactor can request its one-time value before replay.";
 
 const ANALYSIS_SYSTEM_PROMPT: &str = r"You explain an immutable Reactor performance report as JSON only.
 The verdict, compatibility result, metric values, thresholds, and rule findings are facts and must
@@ -2221,6 +2234,8 @@ exit 1"#,
                 flow,
                 instruction: "Keep the launch measurement and add a 500 ms pause after it"
                     .to_owned(),
+                failure_context: None,
+                ui_tree: None,
             })
             .await
             .unwrap();

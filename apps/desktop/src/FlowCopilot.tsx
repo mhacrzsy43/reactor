@@ -19,6 +19,7 @@ interface FlowCopilotProps {
   disabled?: boolean;
   locked?: boolean;
   contextHint?: string;
+  failureUiTree?: string;
   onCloneDraft?: () => void;
   onApply: (proposal: FlowModificationProposal) => Promise<void>;
 }
@@ -36,6 +37,7 @@ export function FlowCopilot({
   disabled = false,
   locked = false,
   contextHint,
+  failureUiTree,
   onCloneDraft,
   onApply,
 }: FlowCopilotProps) {
@@ -45,17 +47,19 @@ export function FlowCopilot({
   const [error, setError] = useState("");
   const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
 
-  async function propose() {
-    if (!instruction.trim()) return;
+  async function propose(requestOverride?: string) {
+    const request = requestOverride?.trim() || instruction.trim();
+    if (!request) return;
     setBusy(true);
     setError("");
     setProposal(undefined);
-    const request = instruction.trim();
     setMessages((current) => [...current, { role: "user", text: request }]);
     try {
       const next = await modifyFlow({
         flow,
         instruction: request,
+        failureContext: contextHint,
+        uiTree: failureUiTree,
         provider,
         endpoint,
         apiKey,
@@ -64,7 +68,12 @@ export function FlowCopilot({
         model,
         cliExecutable,
       });
-      if (next.changes.length === 0) throw new Error("AI 返回的 Flow 与当前版本没有差异，请把要求描述得更具体");
+      if (next.changes.length === 0 && contextHint?.includes("promptRef")) {
+        setMessages((current) => [...current, { role: "assistant", text: "这个失败不需要修改 Flow：promptRef 必须保留。请在 Flow 左侧填写本次交互值，然后重新试跑。" }]);
+        setInstruction("");
+        return;
+      }
+      if (next.changes.length === 0) throw new Error("AI 没有产生可验证的修复差异；请明确要修改的失败步骤，或使用下方自动修复。");
       setProposal(next);
       setMessages((current) => [...current, { role: "assistant", text: `已生成 ${next.changes.length} 处修改提案；确认前不会改变 Flow。` }]);
     } catch (reason) {
@@ -105,6 +114,7 @@ export function FlowCopilot({
       {proposal && <div className="ai-flow-proposal"><div><b>修改提案 · {proposal.changes.length} 处差异</b><span>{proposal.generated.provider} · {proposal.generated.model}</span></div><ol>{proposal.changes.slice(0, 12).map((change) => <li key={change.path}><code>{change.path}</code><span><del>{summarizeChangeValue(change.before)}</del><ArrowRight size={11} /><ins>{summarizeChangeValue(change.after)}</ins></span></li>)}</ol>{proposal.changes.length > 12 && <small>另有 {proposal.changes.length - 12} 处差异，应用后可查看完整 JSON。</small>}<div className="ai-flow-proposal-actions"><button className="secondary-button" disabled={busy} onClick={() => setProposal(undefined)}>放弃</button><button className="primary-button" disabled={busy} onClick={() => void apply()}><Check size={14} />确认并应用</button></div></div>}
       {error && <div className="flow-editor-error">{error}</div>}
       <textarea disabled={locked} maxLength={4000} value={instruction} onChange={(event) => { setInstruction(event.target.value); setProposal(undefined); setError(""); }} placeholder={locked ? "先复制为新草稿，再用自然语言修改" : "告诉 AI 如何修改当前 Flow…"} />
+      {contextHint && !locked && <button className="secondary-button flow-copilot-send" disabled={disabled || busy} onClick={() => void propose("根据试跑失败步骤和当前脱敏 UI 树修复 Flow，保持原测试意图；只修改导致失败的最小必要部分。")}><WandSparkles size={14} />根据失败证据自动修复</button>}
       <button className="primary-button flow-copilot-send" disabled={locked || disabled || busy || !instruction.trim()} onClick={() => void propose()}>{busy ? <RefreshCw size={14} className="spin" /> : <WandSparkles size={14} />}{busy ? "处理中" : "生成修改提案"}</button>
       <p>AI 只生成提案；appId、平台、Secret 和测量边界受 Rust 规则保护。</p>
     </aside>

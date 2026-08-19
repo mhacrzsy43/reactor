@@ -158,6 +158,8 @@ export async function generateFlow(input: GenerateInput): Promise<GeneratedFlow>
 export async function modifyFlow(input: {
   flow: Flow;
   instruction: string;
+  failureContext?: string;
+  uiTree?: string;
   endpoint?: string;
   apiKey?: string;
   saveApiKey: boolean;
@@ -267,8 +269,8 @@ export async function compileFlowPreview(flow: Flow): Promise<CompiledFlow> {
   };
 }
 
-export async function trialGeneratedFlow(generated: GeneratedFlow, deviceId?: string, sourceContext?: RedactedUiContext): Promise<TrialPreparation> {
-  if (inTauri) return invoke("trial_generated_flow", { input: { generated, deviceId, sourceContext } });
+export async function trialGeneratedFlow(generated: GeneratedFlow, deviceId?: string, sourceContext?: RedactedUiContext, promptValues: Record<string, string> = {}): Promise<TrialPreparation> {
+  if (inTauri) return invoke("trial_generated_flow", { input: { generated, deviceId, sourceContext, promptValues } });
   const bytes = new TextEncoder().encode(JSON.stringify(generated.flow));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const flowHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");

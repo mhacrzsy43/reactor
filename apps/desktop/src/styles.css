@@ -237,6 +237,16 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .flow-step small { display: block; max-width: 190px; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 9px; white-space: nowrap; text-overflow: ellipsis; }
 .repeat-badge { margin-left: auto; padding: 3px 6px; border-radius: 5px; color: var(--purple); background: color-mix(in srgb, var(--purple) 10%, transparent); font: 9px DM Mono, monospace; }
 .flow-actions { padding-top: 15px; border-top: 1px solid var(--line); }
+.trial-prompt-panel { margin-top: 13px; padding: 12px; display: grid; gap: 9px; border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--orange) 5%, var(--surface-raised)); }
+.trial-prompt-panel > div { display: flex; align-items: center; gap: 8px; color: var(--orange); }
+.trial-prompt-panel > div span, .trial-prompt-panel b, .trial-prompt-panel small { display: block; }
+.trial-prompt-panel b { color: var(--text); font-size: 9px; }
+.trial-prompt-panel small { margin-top: 3px; color: var(--muted); font-size: 7px; }
+.trial-prompt-panel label { display: grid; grid-template-columns: minmax(120px, .45fr) 1fr; align-items: center; gap: 8px; }
+.trial-prompt-panel label > span { color: var(--muted); font: 8px DM Mono, monospace; overflow-wrap: anywhere; }
+.trial-prompt-panel label > span small { margin-top: 3px; color: var(--text-soft); font: 7px Inter, sans-serif; }
+.trial-prompt-panel .trial-secret-row { grid-template-columns: minmax(120px, .45fr) minmax(0, 1fr) auto; }
+.trial-prompt-panel .trial-secret-row .secondary-button { min-height: 34px; padding-inline: 10px; }
 .preparation-review { margin-top: 13px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-raised); }
 .preparation-review.failed { border-color: color-mix(in srgb, var(--danger) 28%, var(--line)); }
 .preparation-review.passed { border-color: color-mix(in srgb, var(--green) 28%, var(--line)); }

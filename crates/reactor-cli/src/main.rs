@@ -328,8 +328,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let flow: Flow = serde_json::from_slice(&fs::read(input)?)?;
             let evidence = if let Some(device) = device {
                 match flow.platform {
-                    Platform::Android => trial_android(&workspace, &flow, &device).await?,
-                    Platform::Ios => trial_ios_simulator(&workspace, &flow, &device).await?,
+                    Platform::Android => trial_android(&workspace, &flow, &device, None).await?,
+                    Platform::Ios => trial_ios_simulator(&workspace, &flow, &device, None).await?,
                 }
             } else {
                 validate_product_tour_flow(&workspace, &flow).await?
