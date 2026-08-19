@@ -18,3 +18,15 @@
 .status { height:40px; padding:10px 16px 0; color:var(--accent); font-size:14px; font-weight:700; }
 .tile-grid { display:flex; flex-direction:row; flex-wrap:wrap; gap:10px; padding:20px; }.tile { width:30px; height:30px; border-radius:8px; animation:pulse 800ms ease-in-out infinite alternate; }.tile-0 { background:var(--accent); }.tile-1 { background:var(--tile); }.tile.stopped { animation:none; opacity:1; transform:translateY(0); }
 @keyframes pulse { from { opacity:.55; transform:translateY(-10px); } to { opacity:1; transform:translateY(10px); } }
+.auth-body { padding:24px; display:flex; flex-direction:column; gap:14px; }
+.auth-hero { padding:32px 24px 8px; display:flex; flex-direction:column; gap:6px; }
+.auth-hero-title { color:var(--text); font-size:36px; font-weight:800; }
+.auth-hero-subtitle { color:var(--accent); font-size:22px; font-weight:700; }
+.auth-tabs { display:flex; flex-direction:row; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.auth-tab { flex:1; height:44px; align-items:center; justify-content:center; background:transparent; }
+.auth-tab.active { background:var(--accent); }
+.auth-tab-text { color:var(--text); font-size:15px; font-weight:700; }
+.auth-tab.active .auth-tab-text { color:var(--accent-text); }
+.auth-input { height:50px; border:1px solid var(--line); border-radius:12px; padding:0 14px; font-size:16px; color:var(--text); background:var(--surface); }
+.auth-error { color:#d33; font-size:14px; font-weight:600; }
+.auth-session { color:var(--accent); font-size:14px; font-weight:700; margin-top:8px; }

@@ -9,13 +9,24 @@ const UPDATE_TICKS = 80
 const UPDATE_BATCH = 50
 const TILE_COUNT = 64
 
+// Deterministic fake credential for the auth benchmark. Disclosed in the repo so
+// Reactor can record and assert on it.
+const DEMO_USERNAME = 'test'
+const DEMO_PASSWORD = 'test'
+
 function deterministicValue(index: number, tick = 0) {
   return ((DATA_SEED + index * 1103515245 + tick * 2654435761) >>> 0) % 10000
 }
 
 export function App(props: { onMounted?: () => void }) {
   const [screen, setScreen] = useState<Screen>('home')
+  const [session, setSession] = useState<string | null>(null)
   useEffect(() => props.onMounted?.(), [props])
+
+  if (!session) {
+    return <AuthScenario onSignedIn={setSession} />
+  }
+
   if (screen === 'list') return <ListScenario onBack={() => setScreen('home')} />
   if (screen === 'update') return <UpdateScenario onBack={() => setScreen('home')} />
   if (screen === 'animation') return <AnimationScenario onBack={() => setScreen('home')} />
@@ -32,10 +43,20 @@ export function App(props: { onMounted?: () => void }) {
       >
         Reactor ready
       </text>
+      <text
+        className="auth-session"
+        id="auth-session"
+        accessibility-element={true}
+        accessibility-label={session}
+        accessibility-traits="text"
+      >
+        {session}
+      </text>
       <view className="button-stack" accessibility-element={false}>
         <BenchButton automationId="list-scenario" text="List scenario" onTap={() => setScreen('list')} />
         <BenchButton automationId="update-scenario" text="Update scenario" onTap={() => setScreen('update')} />
         <BenchButton automationId="animation-scenario" text="Animation scenario" onTap={() => setScreen('animation')} />
+        <BenchButton automationId="auth-sign-out" text="Sign out" onTap={() => { setSession(null); setScreen('home') }} />
       </view>
       <text className="muted caption">Deterministic data · no network · optimized APIs</text>
     </view>
@@ -125,3 +146,50 @@ function AnimationScenario({ onBack }: { onBack: () => void }) {
   const status = complete ? 'Animation complete' : 'Animating 64 tiles'
   return <view className="page" accessibility-element={false}><Header automationId="animation-ready" title="Animation ready" onBack={onBack} /><text className="status" id={complete ? 'animation-complete' : 'animation-running'} accessibility-element={true} accessibility-label={status} accessibility-traits="updating">{status}</text><view className="tile-grid" accessibility-element={false}>{Array.from({ length: TILE_COUNT }, (_, index) => <view key={index} className={`tile tile-${index % 2}${stopClass}`} accessibility-element={false} />)}</view></view>
 }
+
+function AuthScenario({ onSignedIn }: { onSignedIn: (session: string) => void }) {
+  const [tab, setTab] = useState<'signin' | 'signup'>('signin')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const signIn = tab === 'signin'
+  const title = signIn ? 'Sign in' : 'Sign up'
+
+  function submit() {
+    setError(null)
+    if (signIn) {
+      if (username === DEMO_USERNAME && password === DEMO_PASSWORD) {
+        onSignedIn(`Signed in as ${username}`)
+      } else {
+        setError('Invalid username or password')
+      }
+      return
+    }
+    if (!username) { setError('Username required'); return }
+    if (username === DEMO_USERNAME) { setError('Account already exists'); return }
+    if (password !== confirm) { setError('Passwords do not match'); return }
+    onSignedIn(`Account created as ${username}`)
+  }
+
+  return (
+    <view className="page" accessibility-element={false}>
+      <view className="auth-hero" accessibility-element={false}>
+        <text className="auth-hero-title">Reactor</text>
+        <text className="auth-hero-subtitle" id="auth-title" accessibility-element={true} accessibility-label={title} accessibility-traits="header">{title}</text>
+      </view>
+      <view className="auth-body" accessibility-element={false}>
+        <view className="auth-tabs" accessibility-element={false}>
+          <view className={`auth-tab${signIn ? ' active' : ''}`} bindtap={() => { setTab('signin'); setError(null) }} accessibility-element={true} accessibility-label="Sign in" accessibility-traits="button"><text className="auth-tab-text">Sign in</text></view>
+          <view className={`auth-tab${!signIn ? ' active' : ''}`} bindtap={() => { setTab('signup'); setError(null) }} accessibility-element={true} accessibility-label="Sign up" accessibility-traits="button"><text className="auth-tab-text">Sign up</text></view>
+        </view>
+        <input className="auth-input" id="auth-username" placeholder="Username" value={username} bindinput={(e) => setUsername(e.detail.value)} accessibility-element={true} accessibility-label="Username" />
+        <input className="auth-input" id="auth-password" placeholder="Password" value={password} bindinput={(e) => setPassword(e.detail.value)} accessibility-element={true} accessibility-label="Password" />
+        {!signIn && <input className="auth-input" id="auth-confirm" placeholder="Confirm password" value={confirm} bindinput={(e) => setConfirm(e.detail.value)} accessibility-element={true} accessibility-label="Confirm password" />}
+        {error && <text className="auth-error" id="auth-error" accessibility-element={true} accessibility-label={error} accessibility-traits="text">{error}</text>}
+        <BenchButton automationId={signIn ? 'auth-submit-signin' : 'auth-submit-signup'} text={signIn ? 'Sign in' : 'Create account'} onTap={submit} />
+      </view>
+    </view>
+  )
+}
+

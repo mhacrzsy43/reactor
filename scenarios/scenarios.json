@@ -34,6 +34,24 @@
       "entryText": "Animation scenario",
       "readyText": "Animation ready",
       "completeText": "Animation complete"
+    },
+    "auth": {
+      "durationMs": 12000,
+      "entryText": "Auth scenario",
+      "readyText": "Sign in",
+      "usernameField": "Username",
+      "passwordField": "Password",
+      "confirmPasswordField": "Confirm password",
+      "signInTabText": "Sign in",
+      "signUpTabText": "Sign up",
+      "signInSubmitText": "Sign in",
+      "signUpSubmitText": "Create account",
+      "signedInTextPrefix": "Signed in as ",
+      "signedUpTextPrefix": "Account created as ",
+      "signOutText": "Sign out",
+      "defaultUsername": "test",
+      "defaultPassword": "test",
+      "credentialSecretRef": "test-account.password"
     }
   }
 }

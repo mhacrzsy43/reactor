@@ -6,6 +6,7 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   useColorScheme,
   View,
 } from 'react-native';
@@ -23,6 +24,13 @@ const UPDATE_COUNT = 500;
 const UPDATE_TICKS = 80;
 const UPDATE_BATCH = 50;
 const TILE_COUNT = 64;
+
+// Deterministic fake credential used by the auth benchmark scenario. The value is
+// intentionally weak and disclosed in the repo so Reactor has something stable to
+// record and assert on, while still exercising wrong-password and account-exists
+// branches.
+export const DEMO_USERNAME = 'test';
+export const DEMO_PASSWORD = 'test';
 
 function paletteFor(dark: boolean) {
   return dark
@@ -48,10 +56,20 @@ function App() {
 function BenchApp({palette}: {palette: Palette}) {
   const insets = useSafeAreaInsets();
   const [screen, setScreen] = useState<Screen>('home');
+  const [session, setSession] = useState<string | undefined>();
   const common = {palette, onBack: () => setScreen('home')};
+
+  if (!session) {
+    return (
+      <View style={[styles.root, {paddingTop: insets.top, paddingBottom: insets.bottom, backgroundColor: palette.background}]}>
+        <AuthScenario palette={palette} onSignedIn={setSession} />
+      </View>
+    );
+  }
+
   return (
     <View style={[styles.root, {paddingTop: insets.top, paddingBottom: insets.bottom, backgroundColor: palette.background}]}>
-      {screen === 'home' && <Home palette={palette} onSelect={setScreen} />}
+      {screen === 'home' && <Home palette={palette} session={session} onSignOut={() => { setSession(undefined); setScreen('home'); }} onSelect={setScreen} />}
       {screen === 'list' && <ListScenario {...common} />}
       {screen === 'update' && <UpdateScenario {...common} />}
       {screen === 'animation' && <AnimationScenario {...common} />}
@@ -69,16 +87,18 @@ function Header({title, palette, onBack}: {title: string; palette: Palette; onBa
   );
 }
 
-function Home({palette, onSelect}: {palette: Palette; onSelect: (screen: Screen) => void}) {
+function Home({palette, session, onSignOut, onSelect}: {palette: Palette; session: string; onSignOut: () => void; onSelect: (screen: Screen) => void}) {
   return (
     <View style={styles.home}>
       <Text style={[styles.eyebrow, {color: palette.accent}]}>React Native · Release benchmark</Text>
       <Text style={[styles.title, {color: palette.text}]}>Reactor</Text>
       <Text accessibilityRole="text" style={[styles.ready, {color: palette.muted}]}>Reactor ready</Text>
+      <Text accessibilityRole="text" style={[styles.ready, {color: palette.accent}]}>{session}</Text>
       <View style={styles.buttonStack}>
         <BenchButton text="List scenario" palette={palette} onPress={() => onSelect('list')} />
         <BenchButton text="Update scenario" palette={palette} onPress={() => onSelect('update')} />
         <BenchButton text="Animation scenario" palette={palette} onPress={() => onSelect('animation')} />
+        <BenchButton text="Sign out" palette={palette} onPress={onSignOut} />
       </View>
       <Text style={[styles.caption, {color: palette.muted}]}>Deterministic data · no network · optimized APIs</Text>
     </View>
@@ -157,6 +177,53 @@ function UpdateScenario({palette, onBack}: {palette: Palette; onBack: () => void
   );
 }
 
+function AuthScenario({palette, onSignedIn}: {palette: Palette; onSignedIn: (session: string) => void}) {
+  const [tab, setTab] = useState<'signin' | 'signup'>('signin');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState<string | undefined>();
+  const title = tab === 'signin' ? 'Sign in' : 'Sign up';
+
+  function submit() {
+    setError(undefined);
+    if (tab === 'signin') {
+      if (username === DEMO_USERNAME && password === DEMO_PASSWORD) {
+        onSignedIn(`Signed in as ${username}`);
+      } else {
+        setError('Invalid username or password');
+      }
+      return;
+    }
+    if (!username) { setError('Username required'); return; }
+    if (username === DEMO_USERNAME) { setError('Account already exists'); return; }
+    if (password !== confirm) { setError('Passwords do not match'); return; }
+    onSignedIn(`Account created as ${username}`);
+  }
+
+  return (
+    <View style={styles.fill}>
+      <View style={styles.authHeader}>
+        <Text style={[styles.authHeaderTitle, {color: palette.text}]}>{title}</Text>
+        <Text style={[styles.authHeaderMeta, {color: palette.muted}]}>Reactor · auth benchmark</Text>
+      </View>
+      <View style={styles.authBody}>
+        <View style={[styles.authTabs, {borderColor: palette.line}]}>
+          <Pressable accessibilityRole="button" onPress={() => { setTab('signin'); setError(undefined); }} style={[styles.authTab, tab === 'signin' && {backgroundColor: palette.accent}]}><Text style={[styles.authTabText, {color: tab === 'signin' ? palette.accentText : palette.text}]}>Sign in</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={() => { setTab('signup'); setError(undefined); }} style={[styles.authTab, tab === 'signup' && {backgroundColor: palette.accent}]}><Text style={[styles.authTabText, {color: tab === 'signup' ? palette.accentText : palette.text}]}>Sign up</Text></Pressable>
+        </View>
+        <TextInput accessibilityLabel="Username" placeholder="Username" placeholderTextColor={palette.muted} value={username} onChangeText={setUsername} autoCapitalize="none" style={[styles.input, {borderColor: palette.line, color: palette.text, backgroundColor: palette.surface}]} />
+        <TextInput accessibilityLabel="Password" placeholder="Password" placeholderTextColor={palette.muted} value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none" style={[styles.input, {borderColor: palette.line, color: palette.text, backgroundColor: palette.surface}]} />
+        {tab === 'signup' && (
+          <TextInput accessibilityLabel="Confirm password" placeholder="Confirm password" placeholderTextColor={palette.muted} value={confirm} onChangeText={setConfirm} secureTextEntry autoCapitalize="none" style={[styles.input, {borderColor: palette.line, color: palette.text, backgroundColor: palette.surface}]} />
+        )}
+        {error && <Text accessibilityRole="alert" style={[styles.authError, {color: '#d33'}]}>{error}</Text>}
+        <BenchButton text={tab === 'signin' ? 'Sign in' : 'Create account'} palette={palette} onPress={submit} />
+      </View>
+    </View>
+  );
+}
+
 function AnimationScenario({palette, onBack}: {palette: Palette; onBack: () => void}) {
   const progress = useRef(new Animated.Value(0)).current;
   const [complete, setComplete] = useState(false);
@@ -185,6 +252,16 @@ const styles = StyleSheet.create({
   header: {height: 56, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12}, backButton: {width: 72, paddingVertical: 12}, backText: {fontSize: 15, fontWeight: '700'}, headerTitle: {flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700'},
   row: {height: 88, marginHorizontal: 12, marginTop: 8, borderWidth: 1, borderRadius: 14, padding: 12, flexDirection: 'row', alignItems: 'center'}, avatar: {width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center'}, avatarText: {color: '#ffffff', fontSize: 13, fontWeight: '800'}, rowCopy: {flex: 1, marginLeft: 12}, rowTitle: {fontSize: 15, fontWeight: '700'}, rowMeta: {fontSize: 12, marginTop: 4}, rowValue: {fontSize: 14, fontVariant: ['tabular-nums'], fontWeight: '700'}, status: {height: 40, paddingHorizontal: 16, textAlignVertical: 'center', paddingTop: 10, fontSize: 14, fontWeight: '700'},
   tileGrid: {padding: 20, flexDirection: 'row', flexWrap: 'wrap', gap: 10}, tile: {width: 30, height: 30, borderRadius: 8},
+  authBody: {paddingHorizontal: 24, paddingTop: 24, gap: 14},
+  authHeader: {paddingHorizontal: 24, paddingTop: 20, paddingBottom: 4, alignItems: 'center'},
+  authHeaderTitle: {fontSize: 28, fontWeight: '800'},
+  authHeaderMeta: {fontSize: 13, marginTop: 6, letterSpacing: 0.4, textTransform: 'uppercase'},
+  authError: {fontSize: 14, fontWeight: '600'},
+  authTabs: {flexDirection: 'row', borderWidth: 1, borderRadius: 12, overflow: 'hidden'},
+  authTab: {flex: 1, height: 44, alignItems: 'center', justifyContent: 'center'},
+  authTabText: {fontSize: 15, fontWeight: '700'},
+  input: {height: 50, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, fontSize: 16},
+  authReady: {marginTop: 8, fontSize: 15, fontWeight: '700'},
 });
 
 export default App;
