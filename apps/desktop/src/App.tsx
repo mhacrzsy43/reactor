@@ -26,7 +26,6 @@ import {
   Sun,
   Trash2,
   WandSparkles,
-  Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, stageUpdate, trialGeneratedFlow } from "./api";
@@ -814,7 +813,7 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark"><Zap size={20} strokeWidth={2.4} /></div>
+          <div className="brand-mark"><img src="/favicon.svg" alt="" width={34} height={34} /></div>
           <div><strong>Reactor</strong><span>Performance Lab</span></div>
         </div>
         <nav>
