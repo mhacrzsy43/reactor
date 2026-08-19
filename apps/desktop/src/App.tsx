@@ -315,6 +315,9 @@ function App() {
   );
   const trialDataReady = trialPromptReferences.every((reference) => trialPromptValues[reference]?.trim())
     && trialSecretReferences.every(({ reference }) => trialSecretStatus[reference]);
+  const reactNativeDemoDataAvailable = generated?.flow.appId === "com.reactor.bench.reactnative"
+    && ["invalid_password", "invalid_username", "valid_username"].every((reference) => trialPromptReferences.includes(reference))
+    && trialSecretReferences.some(({ reference }) => reference === "valid_password");
 
   useEffect(() => {
     let cancelled = false;
@@ -588,6 +591,28 @@ function App() {
       setTrialSecretValues((values) => ({ ...values, [reference]: "" }));
     } catch (reason) {
       setError(`保存 ${reference} 失败：${String(reason)}`);
+    } finally {
+      setSavingTrialSecret("");
+    }
+  }
+
+  async function loadReactNativeDemoData() {
+    setSavingTrialSecret("valid_password");
+    setError("");
+    try {
+      await saveFlowSecret("valid_password", "reactor");
+      setTrialPromptValues((values) => ({
+        ...values,
+        invalid_password: "wrong-password",
+        invalid_username: "wrong-user",
+        valid_username: "tester.reactor",
+      }));
+      setTrialSecretStatus((statuses) => ({ ...statuses, valid_password: true }));
+      setTrialSecretValues((values) => ({ ...values, valid_password: "" }));
+      setPreparation(undefined);
+      setFlowEditNotice("已加载内置 RN Demo 示例数据；仅用于 com.reactor.bench.reactnative，不会发送给 AI。");
+    } catch (reason) {
+      setError(`加载 RN Demo 示例数据失败：${String(reason)}`);
     } finally {
       setSavingTrialSecret("");
     }
@@ -1174,11 +1199,15 @@ function App() {
                 {(trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && !flowLock && (
                   <section className="trial-prompt-panel">
                     <div><LockKeyhole size={15} /><span><b>试跑数据准备 · {trialPromptReferences.length + trialSecretReferences.length} 项</b><small>仅在 Flow 声明输入引用时显示；一次性值不落盘，Secret/TOTP只保存到系统凭据库，均不会发送给 AI。</small></span></div>
+                    {reactNativeDemoDataAvailable && <button className="secondary-button" disabled={savingTrialSecret === "valid_password"} onClick={() => void loadReactNativeDemoData()}>{savingTrialSecret === "valid_password" ? "正在加载 Demo 数据…" : "一键加载 RN Demo 示例数据"}</button>}
                     {trialPromptReferences.map((reference) => {
                       const metadata = trialInputMetadata(reference);
                       return <label key={reference}><span>{metadata.label}<small>{reference} · {metadata.detail}</small></span><input type={metadata.sensitive ? "password" : "text"} autoComplete="off" value={trialPromptValues[reference] ?? ""} onChange={(event) => setTrialPromptValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={metadata.placeholder} /></label>;
                     })}
-                    {trialSecretReferences.map(({ reference, kind }) => <label className="trial-secret-row" key={reference}><span>{reference}<small>{kind === "totp" ? "TOTP 密钥" : "系统 Secret"} · {trialSecretStatus[reference] ? "已就绪" : "未配置"}</small></span><input type="password" autoComplete="off" value={trialSecretValues[reference] ?? ""} onChange={(event) => setTrialSecretValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={trialSecretStatus[reference] ? "已安全保存；输入新值可覆盖" : kind === "totp" ? "输入 Base32 TOTP 密钥" : "输入后保存到系统凭据库"} /><button className="secondary-button" disabled={savingTrialSecret === reference || !trialSecretValues[reference]?.trim()} onClick={() => void saveTrialSecret(reference)}>{savingTrialSecret === reference ? "保存中" : trialSecretStatus[reference] ? "更新" : "安全保存"}</button></label>)}
+                    {trialSecretReferences.map(({ reference, kind }) => {
+                      const metadata = trialSecretMetadata(reference, kind);
+                      return <label className="trial-secret-row" key={reference}><span>{metadata.label}<small>{reference} · {metadata.detail} · {trialSecretStatus[reference] ? "已就绪" : "未配置"}</small></span><input type="password" autoComplete="off" value={trialSecretValues[reference] ?? ""} onChange={(event) => setTrialSecretValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={trialSecretStatus[reference] ? "已安全保存；输入新值可覆盖" : metadata.placeholder} /><button className="secondary-button" disabled={savingTrialSecret === reference || !trialSecretValues[reference]?.trim()} onClick={() => void saveTrialSecret(reference)}>{savingTrialSecret === reference ? "保存中" : trialSecretStatus[reference] ? "更新" : "安全保存"}</button></label>;
+                    })}
                   </section>
                 )}
                 {preparation && <PreparationReview preparation={preparation} />}
@@ -1721,6 +1750,15 @@ function trialInputMetadata(reference: string) {
       : { label: reference, detail: "仅本次使用", placeholder: `输入 ${reference} 的本次值`, sensitive: true };
   }
   return { label: reference, detail: "仅本次使用", placeholder: `输入 ${reference} 的本次值`, sensitive: true };
+}
+
+function trialSecretMetadata(reference: string, kind: "secret" | "totp") {
+  if (kind === "totp") return { label: "动态验证码密钥", detail: "TOTP 密钥", placeholder: "输入 Base32 TOTP 密钥" };
+  const normalized = reference.toLowerCase();
+  if (normalized.includes("valid") && normalized.includes("password")) {
+    return { label: "有效密码", detail: "必须与有效账号匹配的系统 Secret", placeholder: "输入该测试账号的有效密码" };
+  }
+  return { label: reference, detail: "系统 Secret", placeholder: "输入后保存到系统凭据库" };
 }
 
 function compactValue(value: unknown) {
