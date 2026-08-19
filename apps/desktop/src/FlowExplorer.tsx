@@ -112,6 +112,7 @@ export function FlowExplorer({
   const [clearBeforeInput, setClearBeforeInput] = useState(true);
   const [inputBusy, setInputBusy] = useState(false);
   const [secretStored, setSecretStored] = useState(false);
+  const [selectorRefreshAttempt, setSelectorRefreshAttempt] = useState(0);
   const captureInFlight = useRef(false);
   const interactionInFlight = useRef(false);
   const snapshotRef = useRef<DeviceInspectorSnapshot | undefined>(undefined);
@@ -119,6 +120,7 @@ export function FlowExplorer({
   const lastWheelGestureAt = useRef(0);
   const teardownStartRef = useRef(0);
   const currentGraphStateRef = useRef<string | undefined>(undefined);
+  const editorErrorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     snapshotRef.current = snapshot;
@@ -177,6 +179,18 @@ export function FlowExplorer({
   }, [appId, goal, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
 
   const promptReferences = useMemo(() => collectPromptReferences(explorerFlow), [explorerFlow]);
+  const missingReplayPrompt = promptReferences.find((reference) => !promptValues[reference]);
+  const replayBlockedReason = activeJobRunning
+    ? "性能任务运行期间不能操作设备"
+    : jsonDirty
+      ? "完整 Flow JSON 尚未应用，请先校验并应用或放弃编辑"
+      : explorerFlow.measured.length === 0
+        ? "请在“测量窗口”中指定至少一个 measured 步骤"
+        : !compiledFlow
+          ? "Flow 正在校验，或尚未通过 Rust 校验"
+          : missingReplayPrompt
+            ? `请先填写本次回放输入：${missingReplayPrompt}`
+            : undefined;
 
   useEffect(() => {
     if (!jsonDirty) setJsonDraft(JSON.stringify(explorerFlow, null, 2));
@@ -218,7 +232,10 @@ export function FlowExplorer({
       setSnapshot(next);
       const pendingStep = pendingGraphStepRef.current;
       observeSnapshot(next, pendingStep);
-      if (next.elements.length > 0) pendingGraphStepRef.current = undefined;
+      if (next.elements.length > 0) {
+        pendingGraphStepRef.current = undefined;
+        setSelectorRefreshAttempt(0);
+      }
       if (next.elements.length > 0 && !sourceContextRef.current && appId.trim()) {
         try {
           const context = await previewGenerationContext({
@@ -243,11 +260,20 @@ export function FlowExplorer({
   }, [activeJobRunning, appId, selectedDevice]);
 
   useEffect(() => {
+    if (!snapshot || snapshot.elements.length > 0 || !pendingGraphStepRef.current || activeJobRunning || selectorRefreshAttempt >= 5) return undefined;
+    const timer = window.setTimeout(() => {
+      void capture().finally(() => setSelectorRefreshAttempt((attempt) => attempt + 1));
+    }, 300 + selectorRefreshAttempt * 250);
+    return () => window.clearTimeout(timer);
+  }, [activeJobRunning, capture, selectorRefreshAttempt, snapshot?.capturedAt, snapshot?.elements.length]);
+
+  useEffect(() => {
     setSnapshot(undefined);
     setSelectedElementKey(undefined);
     setPoint(undefined);
     setError("");
     setLive(false);
+    setSelectorRefreshAttempt(0);
     if (selectedDevice && !activeJobRunning) void capture();
   }, [activeJobRunning, capture, selectedDevice?.id, selectedDevice?.platform]);
 
@@ -427,7 +453,10 @@ export function FlowExplorer({
       });
       setSnapshot(next);
       if (next.elements.length > 0) observeSnapshot(next, step);
-      else pendingGraphStepRef.current = step;
+      else {
+        pendingGraphStepRef.current = step;
+        setSelectorRefreshAttempt(0);
+      }
       setSelectedElementKey(undefined);
       setPoint(undefined);
       if (next.platform === "android" && next.elements.length === 0) {
@@ -510,6 +539,7 @@ export function FlowExplorer({
     const missingPrompt = promptReferences.find((reference) => !promptValues[reference]);
     if (missingPrompt) {
       setEditorError(`整体回放前请输入本次验证码：${missingPrompt}`);
+      window.setTimeout(() => editorErrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
       return;
     }
     setReplaying(true);
@@ -528,6 +558,7 @@ export function FlowExplorer({
       setSelectedElementKey(undefined);
     } catch (reason) {
       setEditorError(`整体回放失败：${cleanError(reason)}`);
+      window.setTimeout(() => editorErrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
     } finally {
       setReplaying(false);
     }
@@ -651,6 +682,10 @@ export function FlowExplorer({
   function addTargetPageAssertion(element: InspectorElement) {
     if (targetAssertion) {
       setGateError("当前 Flow 已有目标页断言；如需替换，请先在步骤或 JSON 视图删除原断言。");
+      return;
+    }
+    if (!recordedSteps.some((step) => step.action === "tap" || step.action === "input_text")) {
+      setGateError("请先在录制/交互模式完成至少一个进入目标页的操作，再选择目标页标记；否则 Reactor 无法证明它属于导航后的页面。");
       return;
     }
     const candidate = element.candidates.find((item) => isStableSelector(item.selector));
@@ -839,6 +874,12 @@ export function FlowExplorer({
               )}
             </div>
             {snapshot?.warnings.map((warning) => <div className="explorer-warning" key={warning}>{warning}</div>)}
+            {snapshot && snapshot.elements.length === 0 && pendingGraphStepRef.current && (
+              <div className="explorer-warning">
+                {selectorRefreshAttempt < 5 ? `正在恢复 Selector 索引（${selectorRefreshAttempt + 1}/5），完成后即可点选目标页标记。` : "Selector 索引自动恢复未成功；请确认页面已稳定后手动刷新。"}
+                <button className="secondary-button" disabled={loading || captureInFlight.current} onClick={() => { setSelectorRefreshAttempt(0); void capture(); }}><RefreshCw size={13} className={loading ? "spin" : ""} />立即刷新 Selector</button>
+              </div>
+            )}
           </section>
 
           <aside className="card selector-inspector-card">
@@ -871,8 +912,9 @@ export function FlowExplorer({
                 {flowView === "json" && <div className="flow-source-editor"><textarea value={jsonDraft} spellCheck={false} onChange={(event) => { setJsonDraft(event.target.value); setJsonDirty(true); }} /><div><button className="secondary-button" disabled={!jsonDirty} onClick={() => { setJsonDraft(JSON.stringify(explorerFlow, null, 2)); setJsonDirty(false); setEditorError(""); }}><RotateCcw size={13} />放弃编辑</button><button className="primary-button" disabled={!jsonDirty} onClick={() => void applyJsonDraft()}><Check size={13} />校验并应用</button></div></div>}
                 {flowView === "yaml" && <pre className="flow-yaml-preview">{compiledFlow ? maestroPreview(compiledFlow) : "请先指定至少一个 measured 步骤；Rust 校验通过后才会生成实际 Maestro YAML。"}</pre>}
                 {promptReferences.length > 0 && <div className="replay-prompts"><b>本次回放输入（不写入 Flow）</b>{promptReferences.map((reference) => <label key={reference}><span>{reference}</span><input type="password" autoComplete="off" value={promptValues[reference] ?? ""} onChange={(event) => setPromptValues((values) => ({ ...values, [reference]: event.target.value }))} /></label>)}</div>}
-                {editorError && <div className="flow-editor-error">{editorError}</div>}
-                <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={!compiledFlow || replaying || activeJobRunning} title={!compiledFlow && !activeJobRunning ? "在上面的「测量窗口」下拉中选定从哪一步开始 measured，Rust 校验通过后此按钮即变为可用" : undefined} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? "整体回放中" : "整体回放"}</button></div>
+                {editorError && <div ref={editorErrorRef} className="flow-editor-error">{editorError}</div>}
+                {!editorError && replayBlockedReason && <div className="flow-editor-error">整体回放暂不可用：{replayBlockedReason}</div>}
+                <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? "整体回放中" : "整体回放"}</button></div>
               </section>
             )}
             <section className="state-graph-panel" aria-label="AI 状态图探索">
