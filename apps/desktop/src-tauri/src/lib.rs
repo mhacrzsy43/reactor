@@ -1,6 +1,6 @@
 use std::{
     env,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     future::Future,
     io::Write as _,
     path::{Path, PathBuf},
@@ -348,6 +348,8 @@ struct GenerateInput {
     model: Option<String>,
     provider: Option<String>,
     cli_executable: Option<String>,
+    #[serde(default)]
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +368,8 @@ struct ModifyFlowInput {
     model: Option<String>,
     provider: String,
     cli_executable: Option<String>,
+    #[serde(default)]
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -385,6 +389,8 @@ struct FlowAssistantInput {
     model: Option<String>,
     provider: String,
     cli_executable: Option<String>,
+    #[serde(default)]
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -872,6 +878,194 @@ fn workspace() -> PathBuf {
     }
     #[allow(unreachable_code)]
     home_directory().join(".reactor")
+}
+
+const SOURCE_CONTEXT_MAX_FILES: usize = 24;
+const SOURCE_CONTEXT_MAX_FILE_BYTES: u64 = 64 * 1024;
+const SOURCE_CONTEXT_MAX_BYTES: usize = 48 * 1024;
+const SOURCE_CONTEXT_MAX_DEPTH: usize = 8;
+
+/// Builds a deliberately small, user-authorized source index for Flow AI.
+///
+/// This is not a project scanner: callers must pass one absolute directory, and this function
+/// reads only allowlisted text files below it. Sensitive filenames, symlinks, build outputs and
+/// configuration directories are excluded before a file is opened. The resulting text never
+/// contains an absolute path or an unredacted sensitive configuration line.
+fn project_source_context(project_root: Option<&str>) -> Result<Option<String>, String> {
+    let Some(project_root) = project_root.map(str::trim).filter(|root| !root.is_empty()) else {
+        return Ok(None);
+    };
+    let requested_root = Path::new(project_root);
+    if !requested_root.is_absolute() {
+        return Err("项目源码目录必须是绝对路径".to_owned());
+    }
+    let root_metadata = fs::symlink_metadata(requested_root)
+        .map_err(|error| format!("无法读取项目源码目录：{error}"))?;
+    if root_metadata.file_type().is_symlink() {
+        return Err("项目源码目录不能是符号链接".to_owned());
+    }
+    if !root_metadata.is_dir() {
+        return Err("项目源码目录必须是一个文件夹".to_owned());
+    }
+    let root = requested_root
+        .canonicalize()
+        .map_err(|error| format!("无法解析项目源码目录：{error}"))?;
+
+    let mut stack = vec![(root.clone(), PathBuf::new(), 0_usize)];
+    let mut files = Vec::new();
+    while let Some((directory, relative, depth)) = stack.pop() {
+        if files.len() >= SOURCE_CONTEXT_MAX_FILES || depth > SOURCE_CONTEXT_MAX_DEPTH {
+            continue;
+        }
+        let mut entries = fs::read_dir(&directory)
+            .map_err(|error| format!("无法读取项目源码目录：{error}"))?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries.into_iter().rev() {
+            if files.len() >= SOURCE_CONTEXT_MAX_FILES {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let entry_relative = relative.join(entry.file_name());
+            if metadata.is_dir() {
+                if !source_context_skipped_directory(&name) {
+                    stack.push((entry.path(), entry_relative, depth + 1));
+                }
+            } else if metadata.is_file()
+                && metadata.len() <= SOURCE_CONTEXT_MAX_FILE_BYTES
+                && source_context_allowed_file(&name)
+                && !source_context_sensitive_filename(&name)
+            {
+                files.push((entry.path(), entry_relative));
+            }
+        }
+    }
+    files.sort_by(|left, right| left.1.cmp(&right.1));
+
+    let mut context = String::from(
+        "User-bound project source index. All paths are relative; sensitive files and values are excluded. \
+         Source is only a navigation hint: observed device UI remains the selector and destination proof. \
+         Never infer, request, or output credential values from this index.\n",
+    );
+    let mut included_files = 0_usize;
+    for (path, relative) in files {
+        if context.len() >= SOURCE_CONTEXT_MAX_BYTES {
+            break;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let sanitized = sanitize_source_context(&contents);
+        let heading = format!("\n--- {} ---\n", relative.to_string_lossy());
+        let remaining = SOURCE_CONTEXT_MAX_BYTES.saturating_sub(context.len());
+        if remaining <= heading.len() {
+            break;
+        }
+        context.push_str(&heading);
+        context.push_str(&truncate_source_context(
+            &sanitized,
+            remaining - heading.len(),
+        ));
+        included_files += 1;
+    }
+    if included_files == 0 {
+        return Ok(None);
+    }
+    Ok(Some(context))
+}
+
+fn source_context_skipped_directory(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | "build" | "dist" | ".gradle" | "pods" | ".reactor"
+    )
+}
+
+fn source_context_sensitive_filename(name: &str) -> bool {
+    name.contains(".env")
+        || name.contains("secret")
+        || name.contains("token")
+        || name.contains("credential")
+        || name.contains("password")
+        || name.contains("keystore")
+        || Path::new(name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("key"))
+}
+
+fn source_context_allowed_file(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next(),
+        Some(
+            "ts" | "tsx"
+                | "js"
+                | "jsx"
+                | "kt"
+                | "java"
+                | "swift"
+                | "dart"
+                | "json"
+                | "md"
+                | "yaml"
+                | "yml"
+        )
+    )
+}
+
+fn source_context_sensitive_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "credential",
+        "private_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn sanitize_source_context(contents: &str) -> String {
+    let mut redact_continuation = false;
+    contents
+        .lines()
+        .map(|line| {
+            let sensitive = source_context_sensitive_line(line);
+            let redact = sensitive || redact_continuation;
+            let trimmed = line.trim_end();
+            redact_continuation = sensitive
+                && (trimmed.ends_with('=')
+                    || trimmed.ends_with(':')
+                    || trimmed.ends_with('[')
+                    || trimmed.ends_with('('));
+            if redact {
+                "[REDACTED sensitive configuration line]".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_source_context(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[truncated]", &value[..end])
 }
 
 fn home_directory() -> PathBuf {
@@ -1460,6 +1654,7 @@ async fn generate_flow(input: GenerateInput) -> Result<GeneratedFlow, String> {
         platform: input.platform,
         ui_tree: input.ui_tree.map(|tree| redact_ui_tree(&tree, 0).ui_tree),
         screenshot_artifact_ids: vec![],
+        source_context: project_source_context(input.project_root.as_deref())?,
     };
     let provider = input
         .provider
@@ -1551,6 +1746,7 @@ async fn classify_flow_request(input: FlowAssistantInput) -> Result<FlowAssistan
             app_id: input.app_id,
             platform: input.platform,
             ui_tree: input.ui_tree.map(|tree| redact_ui_tree(&tree, 0).ui_tree),
+            source_context: project_source_context(input.project_root.as_deref())?,
         })
         .await
         .map_err(|error| error.to_string())
@@ -1578,6 +1774,7 @@ async fn modify_flow(input: ModifyFlowInput) -> Result<FlowModificationProposal,
         instruction: instruction.to_owned(),
         failure_context: input.failure_context,
         ui_tree: input.ui_tree.map(|tree| redact_ui_tree(&tree, 0).ui_tree),
+        source_context: project_source_context(input.project_root.as_deref())?,
     };
     let provider: Box<dyn FlowAiProvider> = match input.provider.as_str() {
         "cloud" => {
@@ -4128,6 +4325,35 @@ mod tests {
         path
     }
 
+    #[test]
+    fn project_source_context_is_bounded_and_redacts_sensitive_content() {
+        let root = temporary_workspace("project-source-context");
+        std::fs::create_dir_all(root.join("node_modules/example")).unwrap();
+        std::fs::write(
+            root.join("App.tsx"),
+            "const DEMO_PASSWORD = \"source-secret\";\nexport const screen = 'Memory scenario';\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".env"), "PASSWORD=env-secret\n").unwrap();
+        std::fs::write(
+            root.join("node_modules/example/ignored.ts"),
+            "export const screen = 'Ignored scenario';\n",
+        )
+        .unwrap();
+
+        let context = project_source_context(Some(root.to_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        assert!(context.contains("--- App.tsx ---"));
+        assert!(context.contains("Memory scenario"));
+        assert!(context.contains("[REDACTED sensitive configuration line]"));
+        assert!(!context.contains("source-secret"));
+        assert!(!context.contains("env-secret"));
+        assert!(!context.contains("Ignored scenario"));
+        assert!(!context.contains(root.to_string_lossy().as_ref()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     struct MockRepairProvider {
         calls: AtomicU32,
     }
@@ -5067,6 +5293,7 @@ mod tests {
                 instruction: "repair the observed failure".to_owned(),
                 failure_context: Some("selector_not_found".to_owned()),
                 ui_tree: Some("text=List scenario".to_owned()),
+                source_context: None,
             },
         )
         .await

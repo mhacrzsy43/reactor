@@ -47,6 +47,7 @@ export interface GenerateInput {
   model?: string;
   provider: "local" | "codex" | "claude" | "cloud";
   cliExecutable?: string;
+  projectRoot?: string;
 }
 
 export interface FlowModificationProposal {
@@ -223,6 +224,7 @@ export async function modifyFlow(input: {
   model?: string;
   provider: "local" | "codex" | "claude" | "cloud";
   cliExecutable?: string;
+  projectRoot?: string;
 }): Promise<FlowModificationProposal> {
   if (!inTauri) throw new Error("自然语言修改 Flow 请在 Reactor 桌面应用中使用");
   return invoke("modify_flow", { input });

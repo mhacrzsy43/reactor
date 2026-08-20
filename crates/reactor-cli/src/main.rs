@@ -334,6 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 platform: platform.into(),
                 ui_tree: None,
                 screenshot_artifact_ids: vec![],
+                source_context: None,
             };
             let key = api_key
                 .or_else(|| std::env::var("REACTOR_AI_API_KEY").ok())

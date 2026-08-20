@@ -1446,6 +1446,26 @@ pub async fn replay_explorer_flow_with_progress(
     progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
 ) -> Result<(), RunnerError> {
     let compiled = compile_maestro(flow)?;
+    let (maestro_progress, progress_forwarder) = if let Some(progress) = progress {
+        let top_level_steps = maestro_progress_top_level_steps(flow);
+        let (raw_progress, mut raw_progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let forwarder = tokio::spawn(async move {
+            while let Some(completed_command_index) = raw_progress_rx.recv().await {
+                let Some(&completed_top_level_step) = top_level_steps.get(completed_command_index)
+                else {
+                    continue;
+                };
+                if top_level_steps.get(completed_command_index + 1).copied()
+                    != Some(completed_top_level_step)
+                {
+                    let _ = progress.send(completed_top_level_step);
+                }
+            }
+        });
+        (Some(raw_progress), Some(forwarder))
+    } else {
+        (None, None)
+    };
     let input_environment =
         resolve_input_environment(&compiled.input_bindings, prompt_values.as_ref())?;
     let tools = resolve_tools(workspace);
@@ -1478,7 +1498,7 @@ pub async fn replay_explorer_flow_with_progress(
                 &paths,
                 Some(device_id),
                 &input_environment,
-                progress,
+                maestro_progress,
             )
             .await
         }
@@ -1489,13 +1509,41 @@ pub async fn replay_explorer_flow_with_progress(
                 &paths,
                 device_id,
                 &input_environment,
-                progress,
+                maestro_progress,
             )
             .await
         }
     };
+    if let Some(progress_forwarder) = progress_forwarder {
+        let _ = progress_forwarder.await;
+    }
     let _ = fs::remove_dir_all(&directory).await;
     result
+}
+
+fn maestro_progress_top_level_steps(flow: &Flow) -> Vec<usize> {
+    flow.setup
+        .iter()
+        .chain(&flow.measured)
+        .chain(&flow.teardown)
+        .enumerate()
+        .flat_map(|(top_level_index, step)| {
+            std::iter::repeat_n(top_level_index, maestro_observable_completion_count(step))
+        })
+        .collect()
+}
+
+fn maestro_observable_completion_count(step: &Step) -> usize {
+    match step {
+        Step::InputText { clear_before, .. } => usize::from(*clear_before) + 2,
+        Step::Repeat { steps, .. } => {
+            1 + steps
+                .iter()
+                .map(maestro_observable_completion_count)
+                .sum::<usize>()
+        }
+        _ => 1,
+    }
 }
 
 async fn execute_android_explorer_step(
@@ -5577,7 +5625,7 @@ async fn run_maestro_paths_with_inputs_progress(
     input_environment: &[(String, Zeroizing<String>)],
     progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
 ) -> Result<(), RunnerError> {
-    let mut command = Command::new(maestro);
+    let mut command = maestro_test_command(maestro, progress.is_some());
     command.arg("test").args(flows).arg("--no-ansi");
     if let Some(device_id) = device_id {
         command.args(["--udid", device_id]);
@@ -5624,7 +5672,7 @@ async fn run_maestro_ios_paths_with_inputs_progress(
     input_environment: &[(String, Zeroizing<String>)],
     progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
 ) -> Result<(), RunnerError> {
-    let mut command = Command::new(maestro);
+    let mut command = maestro_test_command(maestro, progress.is_some());
     command
         .arg("test")
         .args(flows)
@@ -5638,6 +5686,23 @@ async fn run_maestro_ios_paths_with_inputs_progress(
         progress,
     )
     .await
+}
+
+fn maestro_test_command(maestro: &Path, live_progress: bool) -> Command {
+    #[cfg(target_os = "macos")]
+    if live_progress {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "exec 3>&1; exec /usr/bin/script -q -F /dev/fd/3 \"$@\" >/dev/null",
+                "reactor-maestro",
+            ])
+            .arg(maestro);
+        return command;
+    }
+    let _ = live_progress;
+    Command::new(maestro)
 }
 
 async fn run_maestro_command_with_progress(
@@ -5654,7 +5719,7 @@ async fn run_maestro_command_with_progress(
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let child_id = child.id();
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| RunnerError::CommandFailed {
@@ -5668,29 +5733,7 @@ async fn run_maestro_command_with_progress(
             command: label.to_owned(),
             output: "Maestro stderr unavailable".to_owned(),
         })?;
-    let stdout_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(&mut stdout);
-        let mut bytes = Vec::new();
-        let mut line = Vec::new();
-        let mut completed = 0;
-        loop {
-            line.clear();
-            let count = reader.read_until(b'\n', &mut line).await?;
-            if count == 0 {
-                break;
-            }
-            if line.windows(13).any(|window| window == b"... COMPLETED")
-                || line.windows(10).any(|window| window == b"... FAILED")
-            {
-                if let Some(sender) = &progress {
-                    let _ = sender.send(completed);
-                }
-                completed += 1;
-            }
-            bytes.extend_from_slice(&line);
-        }
-        Ok::<_, std::io::Error>(bytes)
-    });
+    let stdout_task = tokio::spawn(capture_maestro_stdout(stdout, progress));
     let stderr_task = tokio::spawn(async move {
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).await.map(|_| bytes)
@@ -5736,6 +5779,36 @@ async fn run_maestro_command_with_progress(
         command: label.to_owned(),
         output: captured,
     })
+}
+
+async fn capture_maestro_stdout(
+    mut stdout: tokio::process::ChildStdout,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut reader = BufReader::new(&mut stdout);
+    let mut bytes = Vec::new();
+    let mut line = Vec::new();
+    let mut completed = 0;
+    loop {
+        line.clear();
+        let count = reader.read_until(b'\n', &mut line).await?;
+        if count == 0 {
+            break;
+        }
+        if maestro_line_reports_completion(&line) {
+            if let Some(sender) = &progress {
+                let _ = sender.send(completed);
+            }
+            completed += 1;
+        }
+        bytes.extend_from_slice(&line);
+    }
+    Ok(bytes)
+}
+
+fn maestro_line_reports_completion(line: &[u8]) -> bool {
+    line.windows(9).any(|window| window == b"COMPLETED")
+        || line.windows(6).any(|window| window == b"FAILED")
 }
 
 fn apply_input_environment(
@@ -6145,6 +6218,46 @@ fn quote_shell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_maestro_repeat_completions_back_to_the_parent_flow_step() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "progress-repeat".to_owned(),
+            name: "Progress repeat".to_owned(),
+            app_id: "com.example.app".to_owned(),
+            platform: reactor_protocol::Platform::Android,
+            intent: None,
+            setup: vec![Step::LaunchApp],
+            measured: vec![
+                Step::Repeat {
+                    times: 100,
+                    steps: vec![
+                        Step::Pause { duration_ms: 50 },
+                        Step::Pause { duration_ms: 50 },
+                    ],
+                },
+                Step::Swipe {
+                    direction: reactor_protocol::SwipeDirection::Up,
+                    duration_ms: 500,
+                },
+            ],
+            teardown: vec![],
+        };
+
+        assert_eq!(maestro_progress_top_level_steps(&flow), [0, 1, 1, 1, 2]);
+    }
+
+    #[test]
+    fn recognizes_tty_completion_lines_with_terminal_control_bytes() {
+        assert!(maestro_line_reports_completion(
+            b"Wait for animation...\x0c\x1b[2K COMPLETED\r\n"
+        ));
+        assert!(maestro_line_reports_completion(
+            b"Tap on Sign in... FAILED\r\n"
+        ));
+        assert!(!maestro_line_reports_completion(b"Repeat 100 times...\r\n"));
+    }
 
     #[test]
     fn single_step_replay_allows_launch_and_assertion_but_rejects_data_reset() {

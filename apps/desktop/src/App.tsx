@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   CircleGauge,
+  Code2,
   Cpu,
   Database,
   Flame,
@@ -88,6 +89,7 @@ interface PersistedProviderSettings {
   cliModel: string;
   codexExecutable: string;
   claudeExecutable: string;
+  projectRoot: string;
   useSavedApiKey: boolean;
 }
 
@@ -159,6 +161,7 @@ function App() {
   const [cliModel, setCliModel] = useState("");
   const [codexExecutable, setCodexExecutable] = useState("");
   const [claudeExecutable, setClaudeExecutable] = useState("");
+  const [projectRoot, setProjectRoot] = useState("");
   const [cliProviders, setCliProviders] = useState<CliProviderStatus[]>([]);
   const [checkingCli, setCheckingCli] = useState(false);
   const [generationContext, setGenerationContext] = useState<RedactedUiContext>();
@@ -218,6 +221,7 @@ function App() {
       setCliModel(providerSettings.cliModel);
       setCodexExecutable(providerSettings.codexExecutable);
       setClaudeExecutable(providerSettings.claudeExecutable);
+      setProjectRoot(providerSettings.projectRoot);
       setUseSavedApiKey(providerSettings.useSavedApiKey);
     }
     const draft = loadFlowDraft();
@@ -261,10 +265,11 @@ function App() {
       cliModel,
       codexExecutable,
       claudeExecutable,
+      projectRoot,
       useSavedApiKey,
     };
     window.localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(settings));
-  }, [draftHydrated, providerMode, endpoint, model, localEndpoint, localModel, cliModel, codexExecutable, claudeExecutable, useSavedApiKey]);
+  }, [draftHydrated, providerMode, endpoint, model, localEndpoint, localModel, cliModel, codexExecutable, claudeExecutable, projectRoot, useSavedApiKey]);
 
   useEffect(() => {
     if (!draftHydrated) return;
@@ -457,6 +462,7 @@ function App() {
         model: providerMode === "cloud" ? model : providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel || undefined : undefined,
         provider: providerMode,
         cliExecutable: providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined,
+        projectRoot: projectRoot.trim() || undefined,
       });
       const compiled = await compileFlowPreview(output.flow);
       setGenerated(output);
@@ -526,6 +532,7 @@ function App() {
         model: providerMode === "cloud" ? model : providerMode === "local" ? localModel : cliModel || undefined,
         provider: providerMode,
         cliExecutable: providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined,
+        projectRoot: projectRoot.trim() || undefined,
       } as const;
       const probe = await probeFlow(providerInput);
       let probePreparation = await trialGeneratedFlow(probe, selectedTarget.id, generationContext);
@@ -1135,6 +1142,7 @@ function App() {
               saveApiKey: providerMode === "cloud" && saveApiKey,
               useSavedApiKey: providerMode === "cloud" && useSavedApiKey,
               cliExecutable: providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined,
+              projectRoot: projectRoot.trim() || undefined,
             }}
             activeJobRunning={Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.job.state))}
             onGoalChange={setIntent}
@@ -1170,8 +1178,14 @@ function App() {
               {pendingRunMode === "manual" ? <div className="run-preset"><span>手动会话</span><b>最长 5 分钟 · 可随时停止并保存</b></div> : <label className="run-preset"><span>{pendingRunMode === "diagnose" ? "录制预设" : "采集预设"}</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">{pendingRunMode === "diagnose" ? "快速观察 · 1 次 × 5 秒" : "快速验收 · 1 次 × 5 秒"}</option><option value="standard">{pendingRunMode === "diagnose" ? "正式录制 · 3 次 × 18 秒" : "正式基准 · 10 次 × 18 秒"}</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>}
               <button className="secondary-button" disabled={busy} onClick={onDemo}>三框架模拟导览</button>
               <button className="primary-button" disabled={busy || !selectedTarget || flowLock.trial?.synthetic !== false} onClick={onRealRun}>{busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}{selectedTarget ? platform === "ios" ? "iOS xctrace 运行" : pendingRunMode === "manual" ? "Start 手动录制" : pendingRunMode === "diagnose" ? "开始 Diagnose 录制" : "开始 Benchmark" : "等待测试目标"}</button>
-            </div> : <div className="diagnostic-run-empty"><LockKeyhole size={20} /><div><b>正式运行尚未解锁</b><span>回放期间的 CPU、内存和 RN 指标仅用于观察；正式结论从这里启动后生成。</span></div></div>}
-            <div className="diagnostic-history-actions"><button className="secondary-button" onClick={() => navigateTo("history")}>查看 Run 记录</button><button className="secondary-button" onClick={() => navigateTo("diagnostics")}>历史 Flow / Diagnose</button><small>当前 Explorer 草稿自动保存；历史 Flow 加载后仍需重新选择设备和运行输入。</small></div>
+            </div> : <div className="diagnostic-run-empty"><LockKeyhole size={16} /><div><b>正式运行尚未解锁</b><span>回放期间的 CPU、内存和 RN 指标仅用于观察；正式结论从这里启动后生成。</span></div></div>}
+            <div className="explorer-run-footer">
+              <div className="diagnostic-history-actions">
+                <button className="secondary-button" onClick={() => navigateTo("history")}>查看 Run 记录</button>
+                <button className="secondary-button" onClick={() => navigateTo("diagnostics")}>历史 Flow / Diagnose</button>
+              </div>
+              <small>当前 Explorer 草稿自动保存；历史 Flow 加载后仍需重新选择设备和运行输入。</small>
+            </div>
           </section>
           {results.length > 0 && <Results results={results} reportPath={reportPath} />}
           </>
@@ -1232,6 +1246,7 @@ function App() {
             cliModel={cliModel}
             codexExecutable={codexExecutable}
             claudeExecutable={claudeExecutable}
+            projectRoot={projectRoot}
             onProviderMode={setProviderMode}
             onEndpoint={setEndpoint}
             onModel={setModel}
@@ -1243,6 +1258,7 @@ function App() {
             onCliModel={setCliModel}
             onCodexExecutable={setCodexExecutable}
             onClaudeExecutable={setClaudeExecutable}
+            onProjectRoot={setProjectRoot}
             onRefreshCli={refreshCliProviders}
             onRefreshLocal={refreshLocalModel}
             onPrepareTools={onPrepareTools}
@@ -1938,7 +1954,7 @@ function loadProviderSettings(): PersistedProviderSettings | undefined {
       || [value.endpoint, value.model, value.localEndpoint, value.localModel, value.cliModel, value.codexExecutable, value.claudeExecutable].some((entry) => typeof entry !== "string")
       || typeof value.useSavedApiKey !== "boolean"
     ) return undefined;
-    return value as PersistedProviderSettings;
+    return { ...value, projectRoot: typeof value.projectRoot === "string" ? value.projectRoot : "" } as PersistedProviderSettings;
   } catch {
     return undefined;
   }
@@ -2135,6 +2151,7 @@ function SettingsCenter({
   cliModel,
   codexExecutable,
   claudeExecutable,
+  projectRoot,
   onProviderMode,
   onEndpoint,
   onModel,
@@ -2146,6 +2163,7 @@ function SettingsCenter({
   onCliModel,
   onCodexExecutable,
   onClaudeExecutable,
+  onProjectRoot,
   onRefreshCli,
   onRefreshLocal,
   onPrepareTools,
@@ -2167,6 +2185,7 @@ function SettingsCenter({
   cliModel: string;
   codexExecutable: string;
   claudeExecutable: string;
+  projectRoot: string;
   onProviderMode: (value: FlowProviderMode) => void;
   onEndpoint: (value: string) => void;
   onModel: (value: string) => void;
@@ -2178,6 +2197,7 @@ function SettingsCenter({
   onCliModel: (value: string) => void;
   onCodexExecutable: (value: string) => void;
   onClaudeExecutable: (value: string) => void;
+  onProjectRoot: (value: string) => void;
   onRefreshCli: () => void;
   onRefreshLocal: () => void;
   onPrepareTools: () => void;
@@ -2293,6 +2313,10 @@ function SettingsCenter({
         <section className="card"><div className="card-heading"><div className="heading-icon orange"><HardDrive size={18} /></div><div><h2>运行环境</h2><p>{environment?.workspace ?? "正在读取工作区"}</p></div></div>
           <div className="settings-list">{(environment?.doctor.checks ?? []).map((check) => <div key={check.id}><span>{check.label}</span><b className={check.available ? "ok-text" : "muted-text"}>{check.available ? "已就绪" : "缺失"}</b><small>{check.detail ?? (check.managed ? "由 Reactor 管理" : "系统能力")}</small></div>)}</div>
           <button className="secondary-button full-width" onClick={onPrepareTools} disabled={preparingTools}>{preparingTools ? <RefreshCw size={16} className="spin" /> : <HardDrive size={16} />}检查并准备工具链</button>
+        </section>
+        <section className="card"><div className="card-heading"><div className="heading-icon green"><Code2 size={18} /></div><div><h2>Flow AI 项目上下文</h2><p>显式授权一个项目目录，为 AI 提供脱敏源码导航提示。</p></div></div>
+          <div className="analysis-provider-fields"><label><span>项目源码目录（可选，绝对路径）</span><input value={projectRoot} onChange={(event) => onProjectRoot(event.target.value)} placeholder="/Users/you/project" spellCheck={false} /></label></div>
+          <div className="privacy-policy"><ShieldCheck size={16} /><span>只读取少量允许的源码与清单；会跳过 .env、密钥、凭据、依赖和构建目录。源码不作为 Selector 或到达目标页的证据，仍以设备实际 UI 为准。</span></div>
         </section>
         <section className="card"><div className="card-heading"><div className="heading-icon green"><ShieldCheck size={18} /></div><div><h2>发布加固与资源策略</h2><p>所有限制由 Reactor 核心强制，而不是仅作为界面提示。</p></div><button className="icon-button" onClick={() => void refreshMaintenance()} disabled={maintenanceBusy}><RefreshCw size={16} className={maintenanceBusy ? "spin" : ""} /></button></div>
           <div className="settings-list">

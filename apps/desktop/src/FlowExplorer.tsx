@@ -37,6 +37,11 @@ interface ExplorerSuggestion {
   executionPoint?: { x: number; y: number };
 }
 
+interface ReplayFailure {
+  message: string;
+  occurredAt: string;
+}
+
 interface FlowExplorerProps {
   devices: Device[];
   selectedDeviceId: string;
@@ -50,6 +55,7 @@ interface FlowExplorerProps {
     saveApiKey: boolean;
     useSavedApiKey: boolean;
     cliExecutable?: string;
+    projectRoot?: string;
   };
   activeJobRunning: boolean;
   initialFlow?: Flow;
@@ -145,6 +151,8 @@ export function FlowExplorer({
   const [aiBusy, setAiBusy] = useState(false);
   const [aiProposal, setAiProposal] = useState<FlowModificationProposal>();
   const [aiMessages, setAiMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
+  const [replayFailure, setReplayFailure] = useState<ReplayFailure>();
+  const [repairingReplay, setRepairingReplay] = useState(false);
   const [performanceSamples, setPerformanceSamples] = useState<Array<TrialLivePerformanceSample & { step?: number }>>([]);
   const performanceStartedAt = useRef(0);
   const captureInFlight = useRef(false);
@@ -158,6 +166,7 @@ export function FlowExplorer({
   const replayStepRefs = useRef<Array<HTMLLIElement | null>>([]);
   const activeReplayStepRef = useRef<number | undefined>(undefined);
   const importedFlowRef = useRef("");
+  const flowPanelRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     activeReplayStepRef.current = activeReplayStep;
@@ -254,8 +263,14 @@ export function FlowExplorer({
     return () => window.clearTimeout(timer);
   }, [explorerFlow, onDraftChange, recordedSteps.length]);
 
+  function revealCurrentFlow() {
+    setFlowView("steps");
+    window.setTimeout(() => flowPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+  }
+
   async function applyCopilotProposal(proposal: FlowModificationProposal) {
     const next = proposal.generated.flow;
+    const replayAfterApply = Boolean(replayFailure);
     const compiled = await compileFlowPreview(next);
     rememberEditorState();
     setFlowMetadata({ id: next.id, name: next.name });
@@ -273,6 +288,9 @@ export function FlowExplorer({
     setGatePreparation(undefined);
     setGateLock(undefined);
     setSelectingTargetMarker(false);
+    setReplayFailure(undefined);
+    revealCurrentFlow();
+    if (replayAfterApply) void replayWholeFlow(next);
   }
 
   async function applyGeneratedFlow(generated: GeneratedFlow, notice: string) {
@@ -289,6 +307,7 @@ export function FlowExplorer({
     setJsonDraft(JSON.stringify(next, null, 2));
     setJsonDirty(false);
     setEditorError(notice);
+    revealCurrentFlow();
     setTargetAssertion(findDestinationAssertion([...next.setup, ...next.measured]));
     setTargetCheckpoint(undefined);
     setGatePreparation(undefined);
@@ -302,6 +321,7 @@ export function FlowExplorer({
     if (!request || !appId.trim() || !selectedDevice || ai.provider === "local") return;
     setAiBusy(true);
     setAiProposal(undefined);
+    setAiInput("");
     setAiMessages((messages) => [...messages, { role: "user", text: request }]);
     try {
       const context = snapshot ? explorerAiContext(snapshot) : undefined;
@@ -318,10 +338,10 @@ export function FlowExplorer({
         saveApiKey: ai.saveApiKey,
         useSavedApiKey: ai.useSavedApiKey,
         cliExecutable: ai.cliExecutable,
+        projectRoot: ai.projectRoot,
       });
       if (decision.kind === "question") {
         setAiMessages((messages) => [...messages, { role: "assistant", text: decision.answer }]);
-        setAiInput("");
         return;
       }
       if (recordedSteps.length === 0) {
@@ -337,6 +357,7 @@ export function FlowExplorer({
           saveApiKey: ai.saveApiKey,
           useSavedApiKey: ai.useSavedApiKey,
           cliExecutable: ai.cliExecutable,
+          projectRoot: ai.projectRoot,
         });
         await applyGeneratedFlow(generated, "AI 已生成 Flow 草稿；请在真实设备逐步审查、回放并证明目标页。");
         onGoalChange(request);
@@ -353,6 +374,7 @@ export function FlowExplorer({
           saveApiKey: ai.saveApiKey,
           useSavedApiKey: ai.useSavedApiKey,
           cliExecutable: ai.cliExecutable,
+          projectRoot: ai.projectRoot,
         });
         if (proposal.answer && proposal.changes.length === 0) {
           setAiMessages((messages) => [...messages, { role: "assistant", text: proposal.answer! }]);
@@ -363,11 +385,50 @@ export function FlowExplorer({
           setAiMessages((messages) => [...messages, { role: "assistant", text: "当前问题没有产生安全、可验证的 Flow 变更。" }]);
         }
       }
-      setAiInput("");
     } catch (reason) {
       setAiMessages((messages) => [...messages, { role: "assistant", text: `处理失败：${cleanError(reason)}` }]);
     } finally {
       setAiBusy(false);
+    }
+  }
+
+  async function generateReplayRepair(failure: ReplayFailure = replayFailure!) {
+    if (!failure || !selectedDevice || recordedSteps.length === 0 || ai.provider === "local") return;
+    setRepairingReplay(true);
+    setAiProposal(undefined);
+    setEditorError(`回放失败：${failure.message}\n正在读取失败页面并生成最小修复提案…`);
+    try {
+      const context = await previewGenerationContext({
+        appId: appId.trim(),
+        platform: explorerFlow.platform,
+        deviceId: selectedDevice.id,
+      });
+      const proposal = await modifyFlow({
+        flow: explorerFlow,
+        instruction: "修复最近一次整体回放失败。只修改导致失败的最小步骤，保持其他步骤、顺序和测量边界不变；失败 Selector 必须从当前已观察 UI 的精确 Selector 中选择。",
+        failureContext: failure.message,
+        uiTree: context.uiTree,
+        provider: ai.provider,
+        endpoint: ai.endpoint,
+        model: ai.model || undefined,
+        apiKey: ai.apiKey,
+        saveApiKey: ai.saveApiKey,
+        useSavedApiKey: ai.useSavedApiKey,
+        cliExecutable: ai.cliExecutable,
+        projectRoot: ai.projectRoot,
+      });
+      if (proposal.changes.length === 0) {
+        setEditorError(`AI 未能为这次回放失败生成安全修复。原 Flow 保持不变：${failure.message}`);
+        return;
+      }
+      setAiProposal(proposal);
+      setEditorError(`已根据失败步骤和当前 UI 生成 ${proposal.changes.length} 处修复差异；请在 Flow AI 中确认后应用。`);
+      setAiMessages((messages) => [...messages, { role: "assistant", text: `已针对最近一次回放失败生成 ${proposal.changes.length} 处最小修复差异；确认前不会改变 Flow。` }]);
+      window.setTimeout(() => document.querySelector(".explorer-ai-proposal")?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+    } catch (reason) {
+      setEditorError(`生成回放修复提案失败：${cleanError(reason)}。原 Flow 保持不变。`);
+    } finally {
+      setRepairingReplay(false);
     }
   }
 
@@ -874,7 +935,7 @@ export function FlowExplorer({
     }
   }
 
-  async function replayWholeFlow() {
+  async function replayWholeFlow(flowOverride?: Flow) {
     if (!selectedDevice || recordedSteps.length === 0) return;
     const missingPrompt = promptReferences.find((reference) => !promptValues[reference]);
     if (missingPrompt) {
@@ -883,6 +944,7 @@ export function FlowExplorer({
       return;
     }
     performanceStartedAt.current = performance.now();
+    const flowToReplay = flowOverride ? { ...flowOverride, intent: undefined } : draftReplayFlow;
     setPerformanceSamples([]);
     setReplayKind("whole");
     setActiveReplayStep(0);
@@ -891,12 +953,13 @@ export function FlowExplorer({
     setSelectedElementKey(undefined);
     setPoint(undefined);
     setEditorError("");
+    setReplayFailure(undefined);
     try {
-      await compileFlowPreview(draftReplayFlow);
+      await compileFlowPreview(flowToReplay);
       const next = await replayRecordedFlow({
-        platform: draftReplayFlow.platform,
+        platform: flowToReplay.platform,
         deviceId: selectedDevice.id,
-        flow: draftReplayFlow,
+        flow: flowToReplay,
         promptValues,
       }, (completedStepIndex) => {
         setActiveReplayStep(Math.min(completedStepIndex + 1, recordedSteps.length - 1));
@@ -906,7 +969,9 @@ export function FlowExplorer({
       setPromptValues({});
       setSelectedElementKey(undefined);
     } catch (reason) {
-      setEditorError(`整体回放失败：${cleanError(reason)}`);
+      const failure = { message: cleanError(reason), occurredAt: new Date().toISOString() };
+      setReplayFailure(failure);
+      setEditorError(`整体回放失败：${failure.message}`);
       window.setTimeout(() => editorErrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
     } finally {
       setReplaying(false);
@@ -1202,17 +1267,10 @@ export function FlowExplorer({
         </div>
         <label className="recording-app-id"><span>当前 App 包名 / Bundle ID</span><input value={appId} onChange={(event) => onAppIdChange(event.target.value)} placeholder="com.example.app" /></label>
         <div className="recording-progress"><ListPlus size={17} /><div><b>{recordedSteps.length} 个已录制步骤</b><span>{mode === "record" ? "点击画面后 Reactor 使用最佳语义 Selector 真实执行，并等待下一页面稳定。" : "切换到录制/交互模式后才会操作设备。"}</span></div></div>
-        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting || replaying || activeJobRunning} title="真实重启 App，并用新的 launch_app 替换当前草稿；可撤销" onClick={() => void beginRecording(true)}><RotateCcw size={15} />从可信起点重新录制</button>
-        <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => removeRecordedStep(recordedSteps.length - 1)}><Undo2 size={15} />移除记录最后一步</button>
-      </section>
-
-      <section className="explorer-ai-panel card" aria-label="Flow AI">
-        <div className="explorer-ai-heading"><div><Sparkles size={18} /><span><b>Flow AI</b><small>同一个输入框自动处理新建、修改、新增步骤和普通问题</small></span></div><div className="explorer-ai-providers" role="group" aria-label="AI Provider"><button className={ai.provider === "codex" ? "active" : ""} onClick={() => onAiProviderChange("codex")}>Codex CLI</button><button className={ai.provider === "claude" ? "active" : ""} onClick={() => onAiProviderChange("claude")}>Claude Code</button><button className={ai.provider === "cloud" ? "active" : ""} onClick={() => onAiProviderChange("cloud")}>Cloud AI</button></div></div>
-        <label className="explorer-ai-goal"><span>测试目标 / 对话上下文</span><input value={goal} onChange={(event) => onGoalChange(event.target.value)} placeholder="例如：登录后进入列表页，滚动 10 次并观察性能" /></label>
-        {aiMessages.length > 0 && <div className="explorer-ai-messages">{aiMessages.slice(-6).map((message, index) => <div className={message.role} key={`${message.role}-${index}`}>{message.text}</div>)}</div>}
-        {aiProposal && <div className="explorer-ai-proposal"><b>Flow 修改提案 · {aiProposal.changes.length} 处差异</b><div>{aiProposal.changes.slice(0, 8).map((change) => <code key={change.path}>{change.path}</code>)}</div><span>确认前不会改变 Flow，也不会操作设备。</span><div><button className="secondary-button" onClick={() => setAiProposal(undefined)}>放弃</button><button className="primary-button" disabled={aiBusy} onClick={() => void applyCopilotProposal(aiProposal).then(() => { setAiProposal(undefined); setAiMessages((messages) => [...messages, { role: "assistant", text: "修改已应用；请重新回放并证明目标页。" }]); })}><Check size={14} />确认并应用</button></div></div>}
-        <div className="explorer-ai-compose"><textarea maxLength={4000} value={aiInput} onChange={(event) => setAiInput(event.target.value)} placeholder={recordedSteps.length === 0 ? "描述要创建的 Flow，或询问当前页面如何设计测试…" : "直接提问，或说出要修改/新增的 Flow 步骤…"} /><button className="primary-button" disabled={aiBusy || activeJobRunning || !aiInput.trim() || !appId.trim() || ai.provider === "local"} onClick={() => void submitFlowAi()}>{aiBusy ? <RefreshCw size={14} className="spin" /> : <Sparkles size={14} />}{aiBusy ? "AI 正在判断并处理" : "发送"}</button></div>
-        {ai.provider === "local" && <p className="flow-editor-error">Local Model 暂不用于 Flow AI；请选择 Codex CLI、Claude Code 或 Cloud AI。</p>}
+        <div className="recording-actions">
+          <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting || replaying || activeJobRunning} title="真实重启 App，并用新的 launch_app 替换当前草稿；可撤销" onClick={() => void beginRecording(true)}><RotateCcw size={15} />从可信起点重新录制</button>
+          <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => removeRecordedStep(recordedSteps.length - 1)}><Undo2 size={15} />移除记录最后一步</button>
+        </div>
       </section>
 
       {pendingDanger && <div className="explorer-guard danger"><AlertTriangle size={18} /><div><b>检测到潜在敏感操作：{elementName(pendingDanger)}</b><span>这可能触发删除、支付、授权、提交或退出登录。只有你明确再次确认后，Reactor 才会在当前测试目标执行并写入 Flow。</span></div><button className="secondary-button" onClick={() => setPendingDanger(undefined)}>取消</button><button className="danger-confirm-button" disabled={interacting || activeJobRunning} onClick={() => void recordTap(pendingDanger)}>确认风险并执行</button></div>}
@@ -1224,6 +1282,7 @@ export function FlowExplorer({
         <section className="card explorer-empty"><Smartphone size={32} /><h2>启动一个模拟器后开始探索</h2><p>支持 Android Emulator、Android 真机和 iOS Simulator；点击“刷新设备列表”后无需另外安装 Maestro。</p><button className="primary-button" onClick={onRefreshDevices}><RefreshCw size={16} />刷新设备列表</button></section>
       ) : (
         <div className="explorer-grid">
+          <div className="explorer-stage">
           <section className="card explorer-device-card">
             <div className="card-heading"><div className="heading-icon purple"><MousePointer2 size={18} /></div><div><h2>设备画面</h2><p>{replaying || gateBusy ? `${replayKind === "step" ? "当前步骤" : "Maestro"}正在真实执行；镜像约每 650 ms 刷新一次。` : mode === "record" ? "点击控件会真实执行、追加步骤并刷新下一页面。" : "点击只审查控件，不会改变 App。"}</p></div>{snapshot && <span className="schema-badge">{new Date(snapshot.capturedAt).toLocaleTimeString()}</span>}</div>
             <div className="device-mirror-stage">
@@ -1256,11 +1315,48 @@ export function FlowExplorer({
             )}
           </section>
 
+          <section className="explorer-ai-panel card" aria-label="Flow AI">
+            <div className="explorer-ai-heading">
+              <div>
+                <div className="heading-icon purple"><Sparkles size={16} /></div>
+                <span>
+                  <b>Flow AI</b>
+                  <small>同一个输入框处理新建、修改、新增步骤和普通问题</small>
+                </span>
+              </div>
+              <div className="explorer-ai-providers" role="group" aria-label="AI Provider">
+                <button className={ai.provider === "codex" ? "active" : ""} onClick={() => onAiProviderChange("codex")}>Codex CLI</button>
+                <button className={ai.provider === "claude" ? "active" : ""} onClick={() => onAiProviderChange("claude")}>Claude Code</button>
+                <button className={ai.provider === "cloud" ? "active" : ""} onClick={() => onAiProviderChange("cloud")}>Cloud AI</button>
+              </div>
+            </div>
+            <p className="state-graph-privacy">{ai.projectRoot ? "项目上下文已绑定：AI 使用脱敏源码提示 + 实际 UI；凭据和敏感文件会被排除。" : "黑盒模式：AI 仅使用实际 UI；登录后的场景会逐页探索。可在设置中绑定项目源码目录。"}</p>
+            {aiMessages.length > 0 && <div className="explorer-ai-messages">{aiMessages.slice(-6).map((message, index) => <div className={message.role} key={`${message.role}-${index}`}>{message.text}</div>)}</div>}
+            {recordedSteps.length > 0 && <div className="explorer-ai-flow-ready"><span><Check size={14} /><b>当前 Flow 已生成 · {recordedSteps.length} 步</b></span><button className="secondary-button" onClick={revealCurrentFlow}><ListPlus size={14} />查看当前 Flow</button></div>}
+            {aiProposal && <div className="explorer-ai-proposal"><b>Flow 修改提案 · {aiProposal.changes.length} 处差异</b><div>{aiProposal.changes.slice(0, 8).map((change) => <code key={change.path}>{change.path}</code>)}</div><span>确认前不会改变 Flow，也不会操作设备。</span><div><button className="secondary-button" onClick={() => setAiProposal(undefined)}>放弃</button><button className="primary-button" disabled={aiBusy} onClick={() => void applyCopilotProposal(aiProposal).then(() => { setAiProposal(undefined); setAiMessages((messages) => [...messages, { role: "assistant", text: replayFailure ? "修复已应用，正在自动重新回放。" : "修改已应用；请重新回放并证明目标页。" }]); })}><Check size={14} />{replayFailure ? "确认、应用并重跑" : "确认并应用"}</button></div></div>}
+            <div className="explorer-ai-compose">
+              <textarea
+                maxLength={4000}
+                value={aiInput}
+                onChange={(event) => setAiInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    if (!aiBusy && !activeJobRunning && aiInput.trim() && appId.trim() && ai.provider !== "local") void submitFlowAi();
+                  }
+                }}
+                placeholder={recordedSteps.length === 0 ? "描述要创建的 Flow，或询问当前页面如何设计测试…" : "直接提问，或说出要修改/新增的 Flow 步骤…"}
+              />
+              <button className="primary-button" disabled={aiBusy || activeJobRunning || !aiInput.trim() || !appId.trim() || ai.provider === "local"} onClick={() => void submitFlowAi()}>{aiBusy ? <RefreshCw size={14} className="spin" /> : <Sparkles size={14} />}{aiBusy ? "处理中" : "发送"}</button>
+            </div>
+            {ai.provider === "local" && <p className="flow-editor-error">Local Model 暂不用于 Flow AI；请选择 Codex CLI、Claude Code 或 Cloud AI。</p>}
+          </section>
+          </div>
+
           <aside className="card selector-inspector-card">
             <div className="card-heading"><div className="heading-icon green"><Crosshair size={18} /></div><div><h2>Selector Inspector</h2><p>优先语义定位，坐标仅作显式降级。</p></div></div>
             <ExplorerPerformancePanel samples={performanceSamples} active={replaying || gateBusy} activeStep={activeReplayStep} platform={selectedDevice?.platform} />
-            {mode === "record" && (
-              <section className="recorded-flow-panel" aria-label="当前录制 Flow">
+              <section ref={flowPanelRef} className="recorded-flow-panel" aria-label="当前 Flow">
                 <div className="recorded-flow-heading">
                   <div><p className="eyebrow">RECORDED FLOW</p><h3>从本次录制开始的 Step Flow</h3></div>
                   <span>{recordedSteps.length} steps</span>
@@ -1288,10 +1384,10 @@ export function FlowExplorer({
                 {flowView === "yaml" && <pre className="flow-yaml-preview">{compiledFlow ? maestroPreview(compiledFlow) : "请先指定至少一个 measured 步骤；Rust 校验通过后才会生成实际 Maestro YAML。"}</pre>}
                 {promptReferences.length > 0 && <div className="replay-prompts"><b>本次回放输入（不写入 Flow）</b>{promptReferences.map((reference) => <label key={reference}><span>{reference}</span><input type="password" autoComplete="off" value={promptValues[reference] ?? ""} onChange={(event) => setPromptValues((values) => ({ ...values, [reference]: event.target.value }))} /></label>)}</div>}
                 {editorError && <div ref={editorErrorRef} className="flow-editor-error">{editorError}</div>}
+                {replayFailure && <div className="replay-repair-card"><div><AlertTriangle size={15} /><span><b>回放已停止，不是卡在第 1 步</b><small>Reactor 会把失败信息和当前脱敏 UI 树直接交给 Flow 修复，不再经过普通问答分类。</small></span></div><button className="primary-button" disabled={repairingReplay || aiBusy || ai.provider === "local"} onClick={() => void generateReplayRepair()}>{repairingReplay ? <RefreshCw size={13} className="spin" /> : <Sparkles size={13} />}{repairingReplay ? "正在生成修复差异" : "生成 AI 修复提案"}</button></div>}
                 {!editorError && replayBlockedReason && <div className="flow-editor-error">整体回放暂不可用：{replayBlockedReason}</div>}
                 <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? replayKind === "step" ? "单步回放中" : "整体回放中" : "整体回放（草稿）"}</button></div>
               </section>
-            )}
             <section className="state-graph-panel" aria-label="AI 状态图探索">
               <div className="state-graph-heading"><div><p className="eyebrow">AI STATE GRAPH · M8.10C</p><h3>只基于真实观察页面建议下一步</h3></div><GitBranch size={17} /></div>
               <p className="state-graph-goal">目标：{goal}</p>

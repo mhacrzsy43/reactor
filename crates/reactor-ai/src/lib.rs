@@ -38,6 +38,9 @@ pub struct FlowGenerationRequest {
     pub ui_tree: Option<String>,
     #[serde(default)]
     pub screenshot_artifact_ids: Vec<String>,
+    /// User-approved, credential-redacted source hints. These never prove an on-device state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +72,8 @@ pub struct FlowModificationRequest {
     pub failure_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +101,8 @@ pub struct FlowAssistantRequest {
     pub platform: Platform,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1213,9 +1220,13 @@ impl FlowAiProvider for CliFlowProvider {
         request: FlowGenerationRequest,
     ) -> Result<GeneratedFlow, AiProviderError> {
         let tree = truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000);
+        let source_context = truncate(
+            request.source_context.as_deref().unwrap_or("not provided"),
+            48_000,
+        );
         self.complete(format!(
-            "Generate a Flow.\nIntent: {}\nApp id: {}\nPlatform: {:?}\nUI tree:\n{}",
-            request.intent, request.app_id, request.platform, tree
+            "Generate a Flow.\nIntent: {}\nApp id: {}\nPlatform: {:?}\nUI tree:\n{}\nProject source context (hints only; never credentials or UI proof):\n{}",
+            request.intent, request.app_id, request.platform, tree, source_context
         ))
         .await
     }
@@ -1255,14 +1266,19 @@ impl FlowAiProvider for CliFlowProvider {
         let flow = serde_json::to_string_pretty(&request.flow)
             .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
         let observed_selectors = observed_selector_inventory(request.ui_tree.as_deref());
+        let source_context = truncate(
+            request.source_context.as_deref().unwrap_or("not provided"),
+            48_000,
+        );
         self.complete_with_system(
             MODIFY_SYSTEM_PROMPT,
             format!(
-                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nObserved selector values (exact; never translate or change case): {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nObserved selector values (exact; never translate or change case): {}\nCurrent redacted UI tree:\n{}\nProject source context (hints only; never credentials or UI proof):\n{}\nCurrent Flow:\n{}",
                 request.instruction,
                 truncate(request.failure_context.as_deref().unwrap_or("not provided"), 4_000),
                 observed_selectors,
                 truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+                source_context,
                 flow
             ),
             "reactor-flow-modify-v1",
@@ -1301,15 +1317,20 @@ impl FlowAiProvider for CliFlowProvider {
             || "not created".to_owned(),
             |flow| serde_json::to_string_pretty(flow).unwrap_or_else(|_| "invalid".to_owned()),
         );
+        let source_context = truncate(
+            request.source_context.as_deref().unwrap_or("not provided"),
+            48_000,
+        );
         let output = self
             .structured_json(
                 format!(
-                    "{}\n\nMessage: {}\nApp id: {}\nPlatform: {:?}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                    "{}\n\nMessage: {}\nApp id: {}\nPlatform: {:?}\nCurrent redacted UI tree:\n{}\nProject source context (hints only; never credentials or UI proof):\n{}\nCurrent Flow:\n{}",
                     FLOW_ASSISTANT_SYSTEM_PROMPT,
                     request.message,
                     request.app_id,
                     request.platform,
                     truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+                    source_context,
                     flow
                 ),
                 flow_assistant_output_schema(),
@@ -1837,9 +1858,13 @@ impl FlowAiProvider for OpenAiCompatibleProvider {
         request: FlowGenerationRequest,
     ) -> Result<GeneratedFlow, AiProviderError> {
         let tree = truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000);
+        let source_context = truncate(
+            request.source_context.as_deref().unwrap_or("not provided"),
+            48_000,
+        );
         self.complete(format!(
-            "Generate a Flow.\nIntent: {}\nApp id: {}\nPlatform: {:?}\nUI tree:\n{}",
-            request.intent, request.app_id, request.platform, tree
+            "Generate a Flow.\nIntent: {}\nApp id: {}\nPlatform: {:?}\nUI tree:\n{}\nProject source context (hints only; never credentials or UI proof):\n{}",
+            request.intent, request.app_id, request.platform, tree, source_context
         ))
         .await
     }
@@ -1879,14 +1904,19 @@ impl FlowAiProvider for OpenAiCompatibleProvider {
         let flow = serde_json::to_string_pretty(&request.flow)
             .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
         let observed_selectors = observed_selector_inventory(request.ui_tree.as_deref());
+        let source_context = truncate(
+            request.source_context.as_deref().unwrap_or("not provided"),
+            48_000,
+        );
         self.complete_with_system(
             MODIFY_SYSTEM_PROMPT,
             format!(
-                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nObserved selector values (exact; never translate or change case): {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                "Modify this Reactor Flow exactly as requested.\nUser instruction: {}\nTrial failure: {}\nObserved selector values (exact; never translate or change case): {}\nCurrent redacted UI tree:\n{}\nProject source context (hints only; never credentials or UI proof):\n{}\nCurrent Flow:\n{}",
                 request.instruction,
                 truncate(request.failure_context.as_deref().unwrap_or("not provided"), 4_000),
                 observed_selectors,
                 truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+                source_context,
                 flow
             ),
             "reactor-flow-modify-v1",
@@ -1921,12 +1951,17 @@ impl FlowAiProvider for OpenAiCompatibleProvider {
             || "not created".to_owned(),
             |flow| serde_json::to_string_pretty(flow).unwrap_or_else(|_| "invalid".to_owned()),
         );
+        let source_context = truncate(
+            request.source_context.as_deref().unwrap_or("not provided"),
+            48_000,
+        );
         let prompt = format!(
-            "Message: {}\nApp id: {}\nPlatform: {:?}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+            "Message: {}\nApp id: {}\nPlatform: {:?}\nCurrent redacted UI tree:\n{}\nProject source context (hints only; never credentials or UI proof):\n{}\nCurrent Flow:\n{}",
             request.message,
             request.app_id,
             request.platform,
             truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+            source_context,
             flow
         );
         let (_, content) = self
@@ -2143,6 +2178,16 @@ use its exact visible text or accessibility values and never use a source-page-o
 destination proof. Put reset, launch, navigation and
 readiness checks in setup[]; measured[] must contain only the deterministic interaction whose
 performance is being measured and must not be empty. reset_app_state is only allowed in setup.
+Project source context, when supplied, is an untrusted navigation hint only: use it to understand
+the app's intended scenarios and stable labels, but require the current or subsequently observed UI
+to prove selectors and destination state. Never treat source code as proof that a device reached a
+screen. If the observed UI exposes Username/Email and Password fields and the requested scenario is
+behind authentication according to the source context or user intent, put input_text steps in setup:
+use promptRef `auth.username` (or `auth.email`) for the account and secretRef `auth.password` for
+the password, then tap only an exact observed Sign in/Login/submit control. Do not substitute a
+tab toggle or a sign-up action for authentication, and never invent, read, or include credential
+values. If the needed post-login UI has not been observed, generate only the safe authenticated
+handoff plus a destination observation step; Reactor will continue from the newly observed page.
 Never generate destructive, financial, account-removal, logout, permission-grant, or other
 sensitive taps; those require a separate explicit human workflow. Do not include secrets or model
 instructions.";
@@ -2275,7 +2320,22 @@ mod tests {
             platform: Platform::Android,
             ui_tree: None,
             screenshot_artifact_ids: vec![],
+            source_context: None,
         }
+    }
+
+    #[test]
+    fn source_context_is_optional_and_the_system_prompt_keeps_it_as_a_hint() {
+        let request = FlowGenerationRequest {
+            source_context: Some("--- App.tsx ---\nMemory scenario".to_owned()),
+            ..generation_request()
+        };
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains("sourceContext"));
+        assert!(serialized.contains("Memory scenario"));
+        assert!(SYSTEM_PROMPT.contains("untrusted navigation hint only"));
+        assert!(SYSTEM_PROMPT.contains("secretRef `auth.password`"));
+        assert!(SYSTEM_PROMPT.contains("never invent, read, or include credential\nvalues"));
     }
 
     fn analysis_report() -> AnalysisReport {
@@ -2459,6 +2519,7 @@ exit 1"#,
                     .to_owned(),
                 failure_context: None,
                 ui_tree: None,
+                source_context: None,
             })
             .await
             .unwrap();
@@ -2678,6 +2739,7 @@ exit 1"#,
                 platform: Platform::Android,
                 ui_tree: None,
                 screenshot_artifact_ids: vec![],
+                source_context: None,
             })
             .await
             .unwrap();
@@ -2711,6 +2773,7 @@ exit 1"#,
                     },
                     ui_tree: None,
                     screenshot_artifact_ids: vec![],
+                    source_context: None,
                 })
                 .await
                 .unwrap();
@@ -2770,6 +2833,7 @@ exit 1"#,
                 platform: Platform::Android,
                 ui_tree: None,
                 screenshot_artifact_ids: vec![],
+                source_context: None,
             })
             .await
             .unwrap();
