@@ -2,6 +2,19 @@ appId: com.reactor.bench.flutter
 ---
 - launchApp:
     clearState: true
+- runFlow:
+    when:
+      visible: "Username"
+    commands:
+      - tapOn: "Username"
+      - inputText: "test"
+      - tapOn: "Password"
+      - inputText: "test"
+      - hideKeyboard
+      # Three "Sign in" candidates on auth screen (header / tab / submit).
+      - tapOn:
+          text: "Sign in"
+          index: 2
 - assertVisible: "Reactor ready"
 - tapOn: "Update scenario"
 - assertVisible: "Update ready"
