@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runAndroidManualDiagnose, runDemo, runIos, saveFlowSecret, stageUpdate, stopManualDiagnose, trialGeneratedFlow } from "./api";
-import { conservativeAndroidDiagnosticPlan } from "./diagnosticLogic";
+import { conservativeAndroidDiagnosticPlan, telemetrySlopePerMinute } from "./diagnosticLogic";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
 import { FlowCopilot } from "./FlowCopilot";
@@ -1020,6 +1020,7 @@ function App() {
       </aside>
 
       <main className="workspace">
+        {activeJob && (page === "flow" || !["completed", "failed", "cancelled"].includes(activeJob.job.state)) && <RunStatus snapshot={activeJob} cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
         {page === "explorer" ? (
           <FlowExplorer
             devices={environment?.devices ?? []}
@@ -1083,6 +1084,7 @@ function App() {
           <AnalysisCenter />
         ) : page === "diagnostics" ? (
           <DiagnosticCenter
+            manualRecordingActive={Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.job.state) && activeJob.job.request && typeof activeJob.job.request === "object" && (activeJob.job.request as Record<string, unknown>).manualSession === true)}
             activeFlow={flowLock ? {
               flowHash: flowLock.flowHash,
               name: flowLock.flow.name,
@@ -1134,8 +1136,6 @@ function App() {
         </section>
 
         {error && <div className="error-banner">{error}</div>}
-
-        {activeJob && <RunStatus snapshot={activeJob} cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
 
         <div className="content-grid">
           <section className="primary-column">
@@ -1783,12 +1783,11 @@ function RunStatus({
   const latestEvents = snapshot.events.slice(-4);
   const telemetry = snapshot.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
-    .map((event) => event.data as { source?: string; cycle?: number; totalCycles?: number; elapsedMs?: number; cpuPct?: number; pssMb?: number; rssMb?: number; javaHeapMb?: number; nativeHeapMb?: number; rn?: { sampledEventCount?: number; componentRenderCount?: number; componentTreeCommitCount?: number; profileCommitCount?: number; consoleEventCount?: number; networkEventCount?: number; hermesHeapSampleCount?: number; latestKind?: string; latestName?: string }; officialMetric?: boolean });
+    .map((event) => event.data as LiveTelemetrySample);
   const latestTelemetry = telemetry.at(-1);
   const latestProgress = snapshot.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "flow_progress")
     .at(-1)?.data as { cycle?: number; totalCycles?: number; commandNumber?: number } | undefined;
-  const maxLivePss = Math.max(...telemetry.map((sample) => sample.pssMb ?? 0), 1);
   return (
     <section className={`run-status card ${terminal ? "terminal" : "active"}`} aria-live="polite">
       <div className="run-status-heading">
@@ -1815,12 +1814,83 @@ function RunStatus({
             {latestTelemetry?.rn && <div><span>Console / Network</span><b>{latestTelemetry.rn.consoleEventCount ?? 0} / {latestTelemetry.rn.networkEventCount ?? 0}</b></div>}
             {latestTelemetry?.rn && <div><span>Hermes Heap 样本</span><b>{latestTelemetry.rn.hermesHeapSampleCount ?? 0}</b></div>}
           </div>
-          <div className="live-performance-chart">{telemetry.map((sample, index) => <i key={`${sample.elapsedMs ?? sample.cycle ?? index}-${index}`} style={{ height: `${Math.max(5, ((sample.pssMb ?? 0) / maxLivePss) * 100)}%` }} title={sample.cycle ? `第 ${sample.cycle} 轮 · ${formatMetric(sample.pssMb)} MB` : `${((sample.elapsedMs ?? 0) / 1000).toFixed(1)} 秒 · ${formatMetric(sample.pssMb)} MB`} />)}</div>
+          <LivePerformanceChart samples={telemetry} />
         </div>
       )}
       {snapshot.job.error && <p className="run-error">{snapshot.job.error}</p>}
     </section>
   );
+}
+
+interface LiveTelemetrySample {
+  source?: string;
+  cycle?: number;
+  totalCycles?: number;
+  elapsedMs?: number;
+  cpuPct?: number;
+  pssMb?: number;
+  rssMb?: number;
+  javaHeapMb?: number;
+  nativeHeapMb?: number;
+  rn?: { sampledEventCount?: number; componentRenderCount?: number; componentTreeCommitCount?: number; profileCommitCount?: number; consoleEventCount?: number; networkEventCount?: number; hermesHeapSampleCount?: number; latestKind?: string; latestName?: string };
+  officialMetric?: boolean;
+}
+
+function LivePerformanceChart({ samples }: { samples: LiveTelemetrySample[] }) {
+  const visible = samples.filter((sample) => Number.isFinite(sample.elapsedMs)).slice(-150);
+  if (visible.length < 2) return <div className="live-chart-waiting"><Activity size={16} /><span>正在等待时间序列样本；约每 2 秒更新一次。</span></div>;
+  const width = 960;
+  const height = 210;
+  const pad = { left: 52, right: 46, top: 22, bottom: 30 };
+  const times = visible.map((sample) => sample.elapsedMs ?? 0);
+  const start = Math.min(...times);
+  const end = Math.max(...times);
+  const memoryValues = visible.flatMap((sample) => [sample.pssMb, sample.javaHeapMb, sample.nativeHeapMb]).filter((value): value is number => Number.isFinite(value));
+  const rawMinMemory = memoryValues.length ? Math.min(...memoryValues) : 0;
+  const rawMaxMemory = memoryValues.length ? Math.max(...memoryValues) : 1;
+  const memoryPad = Math.max(2, (rawMaxMemory - rawMinMemory) * 0.12);
+  const minMemory = Math.max(0, rawMinMemory - memoryPad);
+  const maxMemory = rawMaxMemory + memoryPad;
+  const maxCpu = Math.max(10, ...visible.map((sample) => sample.cpuPct ?? 0)) * 1.1;
+  const x = (time: number) => pad.left + ((time - start) / Math.max(1, end - start)) * (width - pad.left - pad.right);
+  const memoryY = (value: number) => height - pad.bottom - ((value - minMemory) / Math.max(1, maxMemory - minMemory)) * (height - pad.top - pad.bottom);
+  const cpuY = (value: number) => height - pad.bottom - (value / maxCpu) * (height - pad.top - pad.bottom);
+  const path = (get: (sample: LiveTelemetrySample) => number | undefined, scale: (value: number) => number) => {
+    let started = false;
+    return visible.flatMap((sample) => {
+      const value = get(sample);
+      if (!Number.isFinite(value)) return [];
+      const command = started ? "L" : "M";
+      started = true;
+      return `${command}${x(sample.elapsedMs ?? 0).toFixed(1)},${scale(value as number).toFixed(1)}`;
+    }).join(" ");
+  };
+  const firstPss = visible.find((sample) => Number.isFinite(sample.pssMb))?.pssMb;
+  const lastPss = [...visible].reverse().find((sample) => Number.isFinite(sample.pssMb))?.pssMb;
+  const pssDelta = firstPss !== undefined && lastPss !== undefined ? lastPss - firstPss : undefined;
+  const pssSlope = telemetrySlopePerMinute(visible.map((sample) => ({ timeMs: sample.elapsedMs ?? 0, value: sample.pssMb })).filter((point): point is { timeMs: number; value: number } => Number.isFinite(point.value)));
+  const grid = [0, 0.25, 0.5, 0.75, 1];
+  return <div className="live-time-series">
+    <div className="live-chart-summary">
+      <div><span>PSS 增量</span><b>{pssDelta === undefined ? "—" : `${pssDelta >= 0 ? "+" : ""}${pssDelta.toFixed(1)} MB`}</b></div>
+      <div><span>PSS 增长速率</span><b>{pssSlope === undefined ? "—" : `${pssSlope >= 0 ? "+" : ""}${pssSlope.toFixed(2)} MB/min`}</b></div>
+      <div><span>已录制</span><b>{((end - start) / 1000).toFixed(0)} s · {visible.length} 样本</b></div>
+    </div>
+    <div className="live-chart-legend"><span className="pss">PSS</span><span className="java">Java Heap</span><span className="native">Native Heap</span><span className="cpu">CPU</span></div>
+    <svg className="live-performance-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="实时性能时间序列：PSS、Java Heap、Native Heap 和 CPU">
+      {grid.map((ratio) => {
+        const y = pad.top + ratio * (height - pad.top - pad.bottom);
+        const memoryLabel = maxMemory - ratio * (maxMemory - minMemory);
+        const cpuLabel = maxCpu - ratio * maxCpu;
+        return <g key={ratio}><line x1={pad.left} x2={width - pad.right} y1={y} y2={y} className="chart-grid" /><text x={pad.left - 8} y={y + 4} textAnchor="end">{memoryLabel.toFixed(0)} MB</text><text x={width - pad.right + 8} y={y + 4}>{cpuLabel.toFixed(0)}%</text></g>;
+      })}
+      <text x={pad.left} y={height - 8}>{((start) / 1000).toFixed(0)}s</text><text x={width - pad.right} y={height - 8} textAnchor="end">{(end / 1000).toFixed(0)}s</text>
+      <path d={path((sample) => sample.pssMb, memoryY)} className="chart-line pss" />
+      <path d={path((sample) => sample.javaHeapMb, memoryY)} className="chart-line java" />
+      <path d={path((sample) => sample.nativeHeapMb, memoryY)} className="chart-line native" />
+      <path d={path((sample) => sample.cpuPct, cpuY)} className="chart-line cpu" />
+    </svg>
+  </div>;
 }
 
 function PreparationReview({ preparation }: { preparation: TrialPreparation }) {

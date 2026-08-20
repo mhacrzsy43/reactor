@@ -18,6 +18,17 @@ export function conservativeAndroidDiagnosticPlan(durationMs: number, iterations
   };
 }
 
+export function telemetrySlopePerMinute(points: Array<{ timeMs: number; value: number }>) {
+  if (points.length < 2) return undefined;
+  const origin = points[0].timeMs;
+  const xs = points.map((point) => (point.timeMs - origin) / 60_000);
+  const meanX = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+  const meanY = points.reduce((sum, point) => sum + point.value, 0) / points.length;
+  const denominator = xs.reduce((sum, value) => sum + (value - meanX) ** 2, 0);
+  if (denominator === 0) return undefined;
+  return points.reduce((sum, point, index) => sum + (xs[index] - meanX) * (point.value - meanY), 0) / denominator;
+}
+
 export class RequestTokens<Request extends string> {
   private tokens: Record<Request, number>;
 

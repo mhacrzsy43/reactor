@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { conservativeAndroidDiagnosticPlan, diagnosticContextKey, diagnosticRunIdentity, diagnosticWorkbenchKey, groupDiagnosticRunsByFlow, historicalRerunBlockingReferences, isUsableDiagnosticResult, preferredDiagnosticFlowHash, preferredDiagnosticRun, RequestTokens, sourceMapStatus } from "./diagnosticLogic.ts";
+import { conservativeAndroidDiagnosticPlan, diagnosticContextKey, diagnosticRunIdentity, diagnosticWorkbenchKey, groupDiagnosticRunsByFlow, historicalRerunBlockingReferences, isUsableDiagnosticResult, preferredDiagnosticFlowHash, preferredDiagnosticRun, RequestTokens, sourceMapStatus, telemetrySlopePerMinute } from "./diagnosticLogic.ts";
 import type { DiagnosticRunSummary, NormalizedResult } from "./types.ts";
 
 function result(synthetic: boolean, successfulIterationCount: number): NormalizedResult {
@@ -26,6 +26,15 @@ test("Android Diagnose plan uses supported collector and bounded resources", () 
   assert.ok(plan.resourceLimits.maxArtifactBytes <= 1024 * 1024 * 1024);
   assert.ok(plan.resourceLimits.maxEvents <= 5_000_000);
   assert.ok(plan.resourceLimits.maxSamples <= 20_000_000);
+});
+
+test("live telemetry slope reports memory growth per minute", () => {
+  assert.equal(telemetrySlopePerMinute([
+    { timeMs: 1_000, value: 100 },
+    { timeMs: 31_000, value: 105 },
+    { timeMs: 61_000, value: 110 },
+  ]), 10);
+  assert.equal(telemetrySlopePerMinute([{ timeMs: 1_000, value: 100 }]), undefined);
 });
 
 test("historical rerun blocks prompt, secret, and TOTP refs including nested repeats", () => {

@@ -97,8 +97,35 @@ h1 { margin: 0; font-size: 25px; line-height: 1.2; letter-spacing: -.035em; }
 .live-performance-values span, .live-performance-values b { display: block; }
 .live-performance-values span { color: var(--muted); font-size: 9px; }
 .live-performance-values b { margin-top: 3px; font: 10px DM Mono, monospace; }
-.live-performance-chart { height: 56px; margin-top: 10px; display: flex; align-items: end; gap: 4px; border-bottom: 1px solid var(--line); }
-.live-performance-chart i { min-width: 5px; flex: 1; max-width: 22px; border-radius: 3px 3px 0 0; background: var(--purple); opacity: .8; }
+.live-time-series { margin-top: 11px; }
+.live-chart-summary { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 7px; }
+.live-chart-summary > div { padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); }
+.live-chart-summary span, .live-chart-summary b { display: block; }
+.live-chart-summary span { color: var(--muted); font-size: 8px; }
+.live-chart-summary b { margin-top: 3px; font: 10px DM Mono, monospace; }
+.live-chart-legend { margin: 10px 0 4px; display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 8px; }
+.live-chart-legend span::before { width: 16px; height: 2px; margin-right: 5px; display: inline-block; vertical-align: middle; border-radius: 2px; background: currentColor; content: ""; }
+.live-chart-legend .pss { color: #8b6dff; }
+.live-chart-legend .java { color: #43d6a5; }
+.live-chart-legend .native { color: #ffad5c; }
+.live-chart-legend .cpu { color: #56b7ff; }
+.live-performance-chart { width: 100%; min-height: 180px; display: block; overflow: visible; }
+.live-performance-chart text { fill: var(--muted); font: 8px DM Mono, monospace; }
+.chart-grid { stroke: var(--line); stroke-width: 1; }
+.chart-line { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.chart-line.pss { stroke: #8b6dff; }
+.chart-line.java { stroke: #43d6a5; }
+.chart-line.native { stroke: #ffad5c; }
+.chart-line.cpu { stroke: #56b7ff; stroke-dasharray: 6 4; }
+.live-chart-waiting { min-height: 96px; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); font-size: 9px; }
+.diagnostic-live-entry { max-width: 1390px; margin: 0 auto 18px; padding: 13px 15px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.diagnostic-live-entry > div { display: flex; align-items: center; gap: 10px; }
+.diagnostic-live-entry svg { color: var(--muted); }
+.diagnostic-live-entry b, .diagnostic-live-entry small { display: block; }
+.diagnostic-live-entry b { font-size: 11px; }
+.diagnostic-live-entry small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.diagnostic-live-entry.active { border-color: color-mix(in srgb, var(--green) 42%, var(--line)); background: color-mix(in srgb, var(--green) 5%, var(--surface)); }
+.diagnostic-live-entry.active svg { color: var(--green); }
 .run-events > div { padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); }
 .run-events span { color: var(--purple); font-size: 9px; font-weight: 600; }
 .run-events p { margin: 4px 0 0; overflow: hidden; color: var(--text-soft); font-size: 9px; white-space: nowrap; text-overflow: ellipsis; }

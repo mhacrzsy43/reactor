@@ -45,6 +45,7 @@ interface DiagnosticFlowContext {
 
 interface DiagnosticCenterProps {
   activeFlow?: DiagnosticFlowContext;
+  manualRecordingActive?: boolean;
   onNavigate?: (page: "flow" | "history" | "analysis") => void;
   onViewHistoricalRun?: (jobId: string) => void;
   onLoadHistoricalFlow?: (flowLock: FlowLock, run: DiagnosticRunSummary) => void;
@@ -143,6 +144,10 @@ function DiagnosticCenterContent(props: DiagnosticCenterProps) {
       <div className="top-actions"><span className="status-pill ready"><span className="status-dot" />本地解析 · 不上传源码</span></div>
     </header>
     {error && <div className="error-banner">{error}</div>}
+    <section className={`diagnostic-live-entry card ${props.manualRecordingActive ? "active" : "idle"}`}>
+      <div><Activity size={19} /><span><b>{props.manualRecordingActive ? "手动性能录制进行中" : "当前没有正在录制的性能会话"}</b><small>{props.manualRecordingActive ? "实时 CPU 与内存时间序列固定显示在页面顶部；可在设备中继续自由操作。" : "只在设备中点击 App 不会自动开始采集。请先启动手动 Start/Stop 录制。"}</small></span></div>
+      {!props.manualRecordingActive && props.onNavigate && <button className="primary-button" onClick={() => props.onNavigate?.("flow")}>前往 Flow Studio 启动录制</button>}
+    </section>
     <HistoricalRunSelector
       activeFlowHash={props.activeFlow?.flowHash}
       groups={groups}
