@@ -28,7 +28,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runAndroidManualDiagnose, runDemo, runIos, saveFlowSecret, stageUpdate, stopManualDiagnose, trialGeneratedFlow } from "./api";
+import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runAndroidManualDiagnose, runDemo, runIos, sampleTrialLivePerformance, saveFlowSecret, stageUpdate, stopManualDiagnose, trialGeneratedFlow } from "./api";
 import { conservativeAndroidDiagnosticPlan, telemetrySlopePerMinute } from "./diagnosticLogic";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
@@ -167,6 +167,8 @@ function App() {
   const [results, setResults] = useState<NormalizedResult[]>([]);
   const [reportPath, setReportPath] = useState("");
   const [activeJob, setActiveJob] = useState<JobSnapshot>();
+  const [trialRunning, setTrialRunning] = useState(false);
+  const [trialTelemetry, setTrialTelemetry] = useState<LiveTelemetrySample[]>([]);
   const [runPreset, setRunPreset] = useState<"quick" | "standard" | "leak">("quick");
   const [pendingRunMode, setPendingRunMode] = useState<"benchmark" | "diagnose" | "manual">("benchmark");
   const [cancelling, setCancelling] = useState(false);
@@ -577,13 +579,38 @@ function App() {
       return;
     }
     setBusy(true);
+    setTrialRunning(true);
+    setTrialTelemetry([]);
     setError("");
+    const trialStartedAt = performance.now();
+    let samplePending = false;
+    const collectTrialSample = async () => {
+      if (platform !== "android" || samplePending) return;
+      samplePending = true;
+      try {
+        const sample = await sampleTrialLivePerformance({
+          deviceId: selectedTarget.id,
+          appId: generated.flow.appId,
+          elapsedMs: Math.max(0, Math.round(performance.now() - trialStartedAt)),
+        });
+        setTrialTelemetry((samples) => [...samples, sample].slice(-150));
+      } catch {
+        // A trial remains valid if a transient observational sample is unavailable.
+      } finally {
+        samplePending = false;
+      }
+    };
+    void collectTrialSample();
+    const trialSampleTimer = window.setInterval(() => void collectTrialSample(), 2_000);
     try {
       setPreparation(await trialGeneratedFlow(generated, selectedTarget.id, generationContext, trialPromptValues));
       setTrialPromptValues({});
     } catch (reason) {
       handleRunFailure(reason);
     } finally {
+      window.clearInterval(trialSampleTimer);
+      await collectTrialSample();
+      setTrialRunning(false);
       setBusy(false);
     }
   }
@@ -676,6 +703,8 @@ function App() {
     setError("");
     setResults([]);
     setReportPath("");
+    setTrialRunning(false);
+    setTrialTelemetry([]);
     setActiveJob(undefined);
     setStoppingManual(false);
     try {
@@ -898,6 +927,8 @@ function App() {
     setFlowEditNotice("");
     setFlowLock(undefined);
     setPreparation(undefined);
+    setTrialRunning(false);
+    setTrialTelemetry([]);
     setResults([]);
     setReportPath("");
     setStage("compose");
@@ -1254,6 +1285,8 @@ function App() {
               </div>
             </div>
 
+            <FlowPerformancePanel snapshot={activeJob} trialRunning={trialRunning} trialTelemetry={trialTelemetry} />
+
             {generated && (
               <div className="flow-ready-banner" role="status">
                 <Check size={18} />
@@ -1342,23 +1375,6 @@ function App() {
                   ) : null}
                 </div>
               </div>
-              <FlowCopilot
-                flow={generated.flow}
-                provider={providerMode}
-                providerLabel={providerNames[providerMode]}
-                endpoint={providerMode === "local" ? localEndpoint : providerMode === "cloud" ? endpoint : undefined}
-                apiKey={providerMode === "cloud" ? apiKey || undefined : undefined}
-                saveApiKey={providerMode === "cloud" && saveApiKey}
-                useSavedApiKey={providerMode === "cloud" && useSavedApiKey}
-                model={providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel || undefined : model}
-                cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
-                disabled={busy || providerBlocked}
-                locked={Boolean(flowLock)}
-                contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" && !isReactorEvidenceFailure(preparation.failure.code) ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
-                failureUiTree={preparation?.failure?.code !== "runtime_input_rejected" ? preparation?.context?.uiTree : undefined}
-                onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
-                onApply={applyCopilotProposal}
-              />
               </div>
             )}
 
@@ -1366,7 +1382,23 @@ function App() {
           </section>
 
           <aside className="inspector-column">
-            <FlowPerformancePanel snapshot={activeJob} />
+            {generated && <FlowCopilot
+              flow={generated.flow}
+              provider={providerMode}
+              providerLabel={providerNames[providerMode]}
+              endpoint={providerMode === "local" ? localEndpoint : providerMode === "cloud" ? endpoint : undefined}
+              apiKey={providerMode === "cloud" ? apiKey || undefined : undefined}
+              saveApiKey={providerMode === "cloud" && saveApiKey}
+              useSavedApiKey={providerMode === "cloud" && useSavedApiKey}
+              model={providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel || undefined : model}
+              cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
+              disabled={busy || providerBlocked}
+              locked={Boolean(flowLock)}
+              contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" && !isReactorEvidenceFailure(preparation.failure.code) ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
+              failureUiTree={preparation?.failure?.code !== "runtime_input_rejected" ? preparation?.context?.uiTree : undefined}
+              onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
+              onApply={applyCopilotProposal}
+            />}
             <div className="card environment-card">
               <div className="mini-heading"><h3>运行环境</h3><button className="icon-button small" onClick={onRefresh}><RefreshCw size={14} /></button></div>
               <div className="environment-list">
@@ -1814,6 +1846,7 @@ function RunStatus({
             <div><span>Java Heap</span><b>{formatMetric(latestTelemetry?.javaHeapMb)} MB</b></div>
             <div><span>Native Heap</span><b>{formatMetric(latestTelemetry?.nativeHeapMb)} MB</b></div>
             {latestTelemetry?.rn && <div><span>RN Tree / Profile</span><b>{latestTelemetry.rn.componentTreeCommitCount ?? 0} / {latestTelemetry.rn.profileCommitCount ?? 0}</b></div>}
+            {latestTelemetry?.rn && <div><span>RN Render / 重复</span><b>{latestTelemetry.rn.componentRenderCount ?? 0} / {latestTelemetry.rn.duplicateComponentRenderCount ?? 0}</b></div>}
             {latestTelemetry?.rn && <div><span>Console / Network</span><b>{latestTelemetry.rn.consoleEventCount ?? 0} / {latestTelemetry.rn.networkEventCount ?? 0}</b></div>}
             {latestTelemetry?.rn && <div><span>Hermes Heap 样本</span><b>{latestTelemetry.rn.hermesHeapSampleCount ?? 0}</b></div>}
           </div>
@@ -1825,7 +1858,7 @@ function RunStatus({
   );
 }
 
-function FlowPerformancePanel({ snapshot }: { snapshot?: JobSnapshot }) {
+function FlowPerformancePanel({ snapshot, trialRunning, trialTelemetry }: { snapshot?: JobSnapshot; trialRunning: boolean; trialTelemetry: LiveTelemetrySample[] }) {
   const terminal = Boolean(snapshot && ["completed", "failed", "cancelled"].includes(snapshot.job.state));
   const telemetry = snapshot?.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
@@ -1834,14 +1867,19 @@ function FlowPerformancePanel({ snapshot }: { snapshot?: JobSnapshot }) {
   const latestProgress = snapshot?.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "flow_progress")
     .at(-1)?.data as { cycle?: number; totalCycles?: number; commandNumber?: number } | undefined;
-  const active = Boolean(snapshot && !terminal);
-  const hasPerformance = active || telemetry.length > 0 || Boolean(latestProgress);
+  const jobActive = Boolean(snapshot && !terminal);
+  const observingTrial = trialRunning || (!snapshot && trialTelemetry.length > 0);
+  const active = trialRunning || jobActive;
+  const visibleTelemetry = observingTrial ? trialTelemetry : telemetry;
+  const visibleLatestTelemetry = visibleTelemetry.at(-1);
+  const visibleProgress = observingTrial ? undefined : latestProgress;
+  const hasPerformance = active || visibleTelemetry.length > 0 || Boolean(visibleProgress);
 
   return (
     <div className={`card flow-performance-panel ${active ? "active" : "idle"}`} aria-live="polite">
       <div className="flow-performance-panel-heading">
         <div className="heading-icon purple"><Activity size={18} /></div>
-        <div><h3>实时性能</h3><p>{active ? "约每 2 秒更新 · 观察值" : hasPerformance ? "本次运行已结束 · 最终证据已保存" : "等待 Flow 或手动录制开始"}</p></div>
+        <div><h3>实时性能</h3><p>{active ? trialRunning ? "Flow 试跑中 · 约每 2 秒更新" : "约每 2 秒更新 · 观察值" : hasPerformance ? observingTrial ? "试跑已结束 · 观察值不作为基准" : "本次运行已结束 · 最终证据已保存" : "等待 Flow 或手动录制开始"}</p></div>
         {active && <span className="live-badge"><span />LIVE</span>}
       </div>
       {!hasPerformance ? (
@@ -1853,13 +1891,17 @@ function FlowPerformancePanel({ snapshot }: { snapshot?: JobSnapshot }) {
       ) : (
         <>
           <div className="live-performance-values compact">
-            <div><span>{latestProgress?.cycle ? "循环 / 命令" : "已运行"}</span><b>{latestProgress?.cycle ? `${latestProgress.cycle}/${latestProgress.totalCycles ?? "—"} · #${latestProgress.commandNumber ?? "—"}` : `${((latestTelemetry?.elapsedMs ?? 0) / 1000).toFixed(1)} 秒`}</b></div>
-            <div><span>CPU</span><b>{formatMetric(latestTelemetry?.cpuPct)}%</b></div>
-            <div><span>PSS</span><b>{formatMetric(latestTelemetry?.pssMb)} MB</b></div>
-            <div><span>Java / Native</span><b>{formatMetric(latestTelemetry?.javaHeapMb)} / {formatMetric(latestTelemetry?.nativeHeapMb)} MB</b></div>
+            <div><span>{visibleProgress?.cycle ? "循环 / 命令" : "已运行"}</span><b>{visibleProgress?.cycle ? `${visibleProgress.cycle}/${visibleProgress.totalCycles ?? "—"} · #${visibleProgress.commandNumber ?? "—"}` : `${((visibleLatestTelemetry?.elapsedMs ?? 0) / 1000).toFixed(1)} 秒`}</b></div>
+            <div><span>CPU</span><b>{formatMetric(visibleLatestTelemetry?.cpuPct)}%</b></div>
+            <div><span>PSS</span><b>{formatMetric(visibleLatestTelemetry?.pssMb)} MB</b></div>
+            <div><span>Java / Native</span><b>{formatMetric(visibleLatestTelemetry?.javaHeapMb)} / {formatMetric(visibleLatestTelemetry?.nativeHeapMb)} MB</b></div>
+            <div><span>组件 Render</span><b>{visibleLatestTelemetry?.rn?.componentRenderCount ?? "—"}</b></div>
+            <div><span>重复 Render</span><b>{visibleLatestTelemetry?.rn?.duplicateComponentRenderCount ?? "—"}</b></div>
+            <div><span>Tree / Profile Commit</span><b>{visibleLatestTelemetry?.rn ? `${visibleLatestTelemetry.rn.componentTreeCommitCount ?? 0} / ${visibleLatestTelemetry.rn.profileCommitCount ?? 0}` : "—"}</b></div>
+            <div><span>Console / Network</span><b>{visibleLatestTelemetry?.rn ? `${visibleLatestTelemetry.rn.consoleEventCount ?? 0} / ${visibleLatestTelemetry.rn.networkEventCount ?? 0}` : "—"}</b></div>
           </div>
-          <LivePerformanceChart samples={telemetry} />
-          <p className="flow-performance-note">实时观察用于操作反馈；最终结论以录制结束后保存的原始证据为准。</p>
+          <LivePerformanceChart samples={visibleTelemetry} />
+          <p className="flow-performance-note">“重复 Render”表示最近观察窗口内同名组件首次 Render 之后的再次 Render。实时观察用于操作反馈；最终结论以录制结束后保存的原始证据为准。</p>
         </>
       )}
     </div>
@@ -1876,7 +1918,7 @@ interface LiveTelemetrySample {
   rssMb?: number;
   javaHeapMb?: number;
   nativeHeapMb?: number;
-  rn?: { sampledEventCount?: number; componentRenderCount?: number; componentTreeCommitCount?: number; profileCommitCount?: number; consoleEventCount?: number; networkEventCount?: number; hermesHeapSampleCount?: number; latestKind?: string; latestName?: string };
+  rn?: { sampledEventCount?: number; componentRenderCount?: number; duplicateComponentRenderCount?: number; componentTreeCommitCount?: number; profileCommitCount?: number; consoleEventCount?: number; networkEventCount?: number; hermesHeapSampleCount?: number; latestKind?: string; latestName?: string };
   officialMetric?: boolean;
 }
 

@@ -45,7 +45,8 @@ use reactor_runner::{
     delete_all_flow_secrets, delete_flow_secret, discover_android_devices, discover_ios_simulators,
     doctor, enqueue_android, enqueue_demo, enqueue_ios, execute_android_job, execute_demo_job,
     execute_explorer_step, execute_ios_job, has_flow_secret, recover_orphaned_jobs,
-    replay_explorer_flow_with_progress, save_flow_secret, trial_android, trial_ios_simulator,
+    replay_explorer_flow_with_progress, sample_android_live_performance, save_flow_secret,
+    trial_android, trial_ios_simulator,
 };
 use reactor_store::{DiagnosticRunCatalogEntry, DiagnosticRunFilter, Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
@@ -75,6 +76,28 @@ struct Bootstrap {
 struct CaptureDeviceInspectorInput {
     platform: Platform,
     device_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrialLivePerformanceInput {
+    device_id: String,
+    app_id: String,
+    elapsed_ms: u64,
+}
+
+#[tauri::command]
+async fn sample_trial_live_performance(
+    input: TrialLivePerformanceInput,
+) -> Result<serde_json::Value, String> {
+    sample_android_live_performance(
+        &workspace(),
+        &input.device_id,
+        &input.app_id,
+        input.elapsed_ms,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3971,6 +3994,7 @@ pub fn run() {
             get_flow_secret_status,
             delete_flow_secret_value,
             trial_generated_flow,
+            sample_trial_live_performance,
             repair_flow,
             confirm_flow,
             start_demo,

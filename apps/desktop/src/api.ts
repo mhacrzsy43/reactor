@@ -54,6 +54,27 @@ export interface FlowModificationProposal {
   changes: FlowChange[];
 }
 
+export interface TrialLivePerformanceSample {
+  source?: string;
+  elapsedMs?: number;
+  cpuPct?: number;
+  pssMb?: number;
+  rssMb?: number;
+  javaHeapMb?: number;
+  nativeHeapMb?: number;
+  rn?: {
+    sampledEventCount?: number;
+    componentRenderCount?: number;
+    duplicateComponentRenderCount?: number;
+    componentTreeCommitCount?: number;
+    profileCommitCount?: number;
+    consoleEventCount?: number;
+    networkEventCount?: number;
+    hermesHeapSampleCount?: number;
+  };
+  officialMetric?: boolean;
+}
+
 export interface CliProviderStatus {
   kind: "codex" | "claude-code";
   label: string;
@@ -310,6 +331,15 @@ export async function trialGeneratedFlow(generated: GeneratedFlow, deviceId?: st
     repairAttempts: 0,
     modelCalls: 0,
   };
+}
+
+export async function sampleTrialLivePerformance(input: {
+  deviceId: string;
+  appId: string;
+  elapsedMs: number;
+}): Promise<TrialLivePerformanceSample> {
+  if (!inTauri) throw new Error("实时试跑采样仅在 Reactor 桌面应用中可用");
+  return invoke("sample_trial_live_performance", { input });
 }
 
 export async function repairFlow(input: {

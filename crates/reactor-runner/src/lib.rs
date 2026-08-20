@@ -2627,6 +2627,61 @@ async fn sample_android_memory_checkpoint(
     Ok(checkpoint)
 }
 
+/// Collects one lightweight Android CPU/memory sample outside the formal measurement window.
+///
+/// This is used by interactive Flow trials so the desktop can provide immediate feedback without
+/// turning trial observations into benchmark evidence.
+///
+/// # Errors
+///
+/// Returns an error when the package id is invalid, managed ADB is unavailable, or the device
+/// cannot provide its current process metrics.
+pub async fn sample_android_live_performance(
+    workspace: &Path,
+    device_id: &str,
+    app_id: &str,
+    elapsed_ms: u64,
+) -> Result<Value, RunnerError> {
+    validate_android_package_id(app_id)?;
+    let adb = resolve_tools(workspace)
+        .adb
+        .ok_or(RunnerError::MissingTool("adb"))?;
+    let output = android_shell_text(
+        &adb,
+        device_id,
+        &["dumpsys", "meminfo", app_id],
+        "trial-live-meminfo",
+    )
+    .await?;
+    let mut checkpoint = parse_memory_checkpoint(&output, "trial", 0, elapsed_ms);
+    checkpoint.cpu_pct = sample_android_cpu_pct(&adb, device_id, app_id)
+        .await
+        .ok()
+        .flatten();
+    let remote = format!("/sdcard/Android/data/{app_id}/files/reactor/rn-diagnostics.ndjson");
+    let rn = android_shell_text(
+        &adb,
+        device_id,
+        &["tail", "-n", "1000", &remote],
+        "trial-live-rn-diagnostics",
+    )
+    .await
+    .ok()
+    .map(|output| summarize_live_rn_events(&output));
+    Ok(serde_json::json!({
+        "kind": "live_telemetry",
+        "source": "trial_observer",
+        "elapsedMs": checkpoint.elapsed_ms,
+        "cpuPct": checkpoint.cpu_pct,
+        "pssMb": checkpoint.pss_mb,
+        "rssMb": checkpoint.rss_mb,
+        "javaHeapMb": checkpoint.java_heap_mb,
+        "nativeHeapMb": checkpoint.native_heap_mb,
+        "rn": rn,
+        "officialMetric": false,
+    }))
+}
+
 async fn run_android_live_observer(
     workspace: PathBuf,
     job_id: String,
@@ -2724,6 +2779,8 @@ fn summarize_live_rn_events(output: &str) -> Value {
     let mut console = 0_u64;
     let mut network = 0_u64;
     let mut hermes_heap = 0_u64;
+    let mut duplicate_renders = 0_u64;
+    let mut rendered_components = BTreeSet::new();
     let mut latest_kind = None;
     let mut latest_name = None;
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
@@ -2735,8 +2792,20 @@ fn summarize_live_rn_events(output: &str) -> Value {
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let event_name = event
+            .pointer("/payload/name")
+            .or_else(|| event.pointer("/payload/id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         match kind {
-            "component_render" => renders = renders.saturating_add(1),
+            "component_render" => {
+                renders = renders.saturating_add(1);
+                if let Some(name) = event_name.as_ref()
+                    && !rendered_components.insert(name.clone())
+                {
+                    duplicate_renders = duplicate_renders.saturating_add(1);
+                }
+            }
             "component_tree" => tree_commits = tree_commits.saturating_add(1),
             "react_profile" => commits = commits.saturating_add(1),
             "console" => console = console.saturating_add(1),
@@ -2745,15 +2814,12 @@ fn summarize_live_rn_events(output: &str) -> Value {
             _ => {}
         }
         latest_kind = Some(kind.to_owned());
-        latest_name = event
-            .pointer("/payload/name")
-            .or_else(|| event.pointer("/payload/id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        latest_name = event_name;
     }
     serde_json::json!({
         "sampledEventCount": total,
         "componentRenderCount": renders,
+        "duplicateComponentRenderCount": duplicate_renders,
         "componentTreeCommitCount": tree_commits,
         "profileCommitCount": commits,
         "consoleEventCount": console,
@@ -6095,6 +6161,19 @@ mod tests {
                 .to_string()
                 .contains("invalid integer metric")
         );
+    }
+
+    #[test]
+    fn live_rn_summary_counts_repeated_component_renders() {
+        let summary = summarize_live_rn_events(
+            r#"{"kind":"component_render","payload":{"name":"ListRow"}}
+{"kind":"component_render","payload":{"name":"ListRow"}}
+{"kind":"component_render","payload":{"name":"Header"}}
+{"kind":"react_profile","payload":{"name":"commit"}}"#,
+        );
+        assert_eq!(summary["componentRenderCount"], 3);
+        assert_eq!(summary["duplicateComponentRenderCount"], 1);
+        assert_eq!(summary["profileCommitCount"], 1);
     }
 
     #[tokio::test]
