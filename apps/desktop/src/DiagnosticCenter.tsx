@@ -222,16 +222,23 @@ function DiagnosticWorkbench({ activeFlow, onNavigate, onViewHistoricalRun, onLo
     setRerunEligibility(undefined);
     setHistoricalLock(undefined);
     if (!selectedRun) return;
-    void Promise.all([
-      getDiagnosticRerunEligibility(selectedRun.jobId, selectedRun.runId, selectedRun.flowHash),
-      loadHistoricalFlowLock(selectedRun.jobId, selectedRun.runId, selectedRun.flowHash),
-    ]).then(([eligibility, lock]) => {
-      if (cancelled) return;
-      setRerunEligibility(eligibility);
-      setHistoricalLock(lock);
-    }).catch((reason) => {
-      if (!cancelled) setError(`读取历史 Flow 重跑能力失败：${String(reason)}`);
-    });
+    void (async () => {
+      try {
+        const eligibility = await getDiagnosticRerunEligibility(selectedRun.jobId, selectedRun.runId, selectedRun.flowHash);
+        if (cancelled) return;
+        setRerunEligibility(eligibility);
+        if (!eligibility.lockAvailable) {
+          // Runs created before provenance persistence are still valid analysis evidence.
+          // Missing replay provenance is an expected capability state, not a page-level failure.
+          setHistoricalLock(null);
+          return;
+        }
+        const lock = await loadHistoricalFlowLock(selectedRun.jobId, selectedRun.runId, selectedRun.flowHash);
+        if (!cancelled) setHistoricalLock(lock);
+      } catch (reason) {
+        if (!cancelled) setError(`读取历史 Flow 重跑能力失败：${String(reason)}`);
+      }
+    })();
     return () => { cancelled = true; };
   }, [selectedRun?.jobId, selectedRun?.runId, selectedRun?.flowHash]);
 

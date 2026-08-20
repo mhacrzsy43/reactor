@@ -707,6 +707,8 @@ struct RealRunInput {
     #[serde(default)]
     diagnostic_plan: Option<DiagnosticPlanV1>,
     leak_test: Option<AndroidLeakTestPlan>,
+    #[serde(default)]
+    manual_session: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2736,6 +2738,7 @@ fn start_android_for(root: &Path, input: RealRunInput) -> Result<(Job, AndroidRu
         run_mode: input.run_mode,
         diagnostic_plan: input.diagnostic_plan,
         leak_test: input.leak_test,
+        manual_session: input.manual_session,
     };
     let job = enqueue_android(&request).map_err(|error| error.to_string())?;
     let provenance = persist_job_provenance(root, &job.id, &input.flow_lock);
@@ -3319,6 +3322,13 @@ fn ensure_model_calls_allowed() -> Result<(), String> {
 #[allow(clippy::needless_pass_by_value)]
 fn cancel_job(job_id: String) -> Result<Job, String> {
     reactor_runner::cancel_persisted_job(&workspace(), &job_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn stop_manual_diagnose(job_id: String) -> Result<Job, String> {
+    reactor_runner::request_android_manual_stop(&workspace(), &job_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3982,6 +3992,7 @@ pub fn run() {
             get_frame_drilldown,
             explain_analysis,
             cancel_job,
+            stop_manual_diagnose,
             open_report
         ])
         .run(tauri::generate_context!())

@@ -473,6 +473,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cooldown_ms: 5_000,
                     threshold_mb_per_cycle: 0.25,
                 }),
+                manual_session: false,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);

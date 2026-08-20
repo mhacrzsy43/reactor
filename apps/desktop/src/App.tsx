@@ -28,7 +28,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runDemo, runIos, saveFlowSecret, stageUpdate, trialGeneratedFlow } from "./api";
+import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runAndroidManualDiagnose, runDemo, runIos, saveFlowSecret, stageUpdate, stopManualDiagnose, trialGeneratedFlow } from "./api";
 import { conservativeAndroidDiagnosticPlan } from "./diagnosticLogic";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
@@ -168,8 +168,9 @@ function App() {
   const [reportPath, setReportPath] = useState("");
   const [activeJob, setActiveJob] = useState<JobSnapshot>();
   const [runPreset, setRunPreset] = useState<"quick" | "standard" | "leak">("quick");
-  const [pendingRunMode, setPendingRunMode] = useState<"benchmark" | "diagnose">("benchmark");
+  const [pendingRunMode, setPendingRunMode] = useState<"benchmark" | "diagnose" | "manual">("benchmark");
   const [cancelling, setCancelling] = useState(false);
+  const [stoppingManual, setStoppingManual] = useState(false);
   const [preparingTools, setPreparingTools] = useState(false);
   const [refreshingDevices, setRefreshingDevices] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -649,6 +650,7 @@ function App() {
     setResults([]);
     setReportPath("");
     setActiveJob(undefined);
+    setStoppingManual(false);
     try {
       const output = await runDemo(flowLock, setActiveJob);
       applyOutput(output);
@@ -661,7 +663,7 @@ function App() {
 
   async function onRealRun() {
     if (!flowLock || !selectedTarget) return;
-    if (pendingRunMode === "diagnose" && platform === "ios") {
+    if (pendingRunMode !== "benchmark" && platform === "ios") {
       setError("iOS Diagnose 暂不可用；请选择 Android 设备，或切换为 Benchmark。");
       return;
     }
@@ -675,23 +677,26 @@ function App() {
     setResults([]);
     setReportPath("");
     setActiveJob(undefined);
+    setStoppingManual(false);
     try {
-      const run = platform === "ios" ? runIos : pendingRunMode === "diagnose" ? runAndroidDiagnose : runAndroid;
-      const durationMs = runPreset === "standard" ? 18_000 : 5_000;
-      const iterations = runPreset === "standard" ? 10 : 1;
-      const diagnosticPlan = pendingRunMode === "diagnose"
+      const manual = pendingRunMode === "manual";
+      const run = platform === "ios" ? runIos : manual ? runAndroidManualDiagnose : pendingRunMode === "diagnose" ? runAndroidDiagnose : runAndroid;
+      const durationMs = manual ? 5 * 60_000 : runPreset === "standard" ? 18_000 : 5_000;
+      const iterations = manual ? 1 : runPreset === "standard" ? 10 : 1;
+      const diagnosticPlan = pendingRunMode !== "benchmark"
         ? conservativeAndroidDiagnosticPlan(durationMs, iterations)
         : undefined;
       const output = await run({
         flowLock,
         framework,
-        scenario: generated?.flow.id.split("-")[0] ?? "custom",
+        scenario: manual ? "manual-diagnose" : generated?.flow.id.split("-")[0] ?? "custom",
         deviceId: selectedTarget.id,
         durationMs: diagnosticPlan ? Math.min(durationMs, Math.floor(diagnosticPlan.resourceLimits.maxDurationMs / Math.min(iterations, 3))) : durationMs,
         iterations: diagnosticPlan ? Math.min(iterations, 3) : iterations,
-        runMode: pendingRunMode,
+        runMode: pendingRunMode === "benchmark" ? "benchmark" : "diagnose",
         diagnosticPlan,
-        leakTest: runPreset === "leak" ? {
+        manualSession: manual,
+        leakTest: !manual && runPreset === "leak" ? {
           cycles: 20,
           checkpointEvery: 2,
           warmupCycles: 2,
@@ -790,6 +795,19 @@ function App() {
       setError(String(reason));
     } finally {
       setCancelling(false);
+    }
+  }
+
+  async function onStopManual() {
+    if (!activeJob || ["completed", "failed", "cancelled"].includes(activeJob.job.state)) return;
+    setStoppingManual(true);
+    setError("");
+    try {
+      const job = await stopManualDiagnose(activeJob.job.id);
+      setActiveJob((snapshot) => snapshot ? { ...snapshot, job } : snapshot);
+    } catch (reason) {
+      setError(String(reason));
+      setStoppingManual(false);
     }
   }
 
@@ -1117,7 +1135,7 @@ function App() {
 
         {error && <div className="error-banner">{error}</div>}
 
-        {activeJob && <RunStatus snapshot={activeJob} cancelling={cancelling} onCancel={onCancel} />}
+        {activeJob && <RunStatus snapshot={activeJob} cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
 
         <div className="content-grid">
           <section className="primary-column">
@@ -1313,12 +1331,13 @@ function App() {
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
                     <div className="run-buttons">
-                      <label className="run-preset"><span>采集预设</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">快速验收 · 1 次 × 5 秒</option><option value="standard">正式基准 · 10 次 × 18 秒</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>
+                      {platform === "android" && <label className="run-preset"><span>运行模式</span><select value={pendingRunMode} onChange={(event) => setPendingRunMode(event.target.value as "benchmark" | "diagnose" | "manual")}><option value="benchmark">Benchmark · 稳定基准</option><option value="diagnose">Diagnose · 运行 Flow 并录制</option><option value="manual">手动录制 · Start/Stop 自由操作</option></select></label>}
+                      {pendingRunMode === "manual" ? <div className="run-preset"><span>手动会话</span><b>最长 5 分钟 · 可随时停止并保存</b></div> : <label className="run-preset"><span>{pendingRunMode === "diagnose" ? "录制预设" : "采集预设"}</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">{pendingRunMode === "diagnose" ? "快速观察 · 1 次 × 5 秒" : "快速验收 · 1 次 × 5 秒"}</option><option value="standard">{pendingRunMode === "diagnose" ? "正式录制 · 3 次 × 18 秒" : "正式基准 · 10 次 × 18 秒"}</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>}
                       {flowLock.trial?.synthetic && availableTargets.length > 0 && (
                         <button className="secondary-button" disabled={busy} onClick={() => { setFlowLock(undefined); setPreparation(undefined); }}>改用模拟器试跑</button>
                       )}
                       <button className="secondary-button" disabled={busy} onClick={onDemo} title="使用明确标记的虚拟指标预览三框架报告布局，不会测量真实应用">三框架模拟导览</button>
-                      <button className="primary-button" disabled={busy || !selectedTarget || flowLock.trial?.synthetic !== false} onClick={onRealRun} title={selectedTarget ? `在所选 ${platform === "ios" ? "iOS Simulator 使用 xctrace" : "Android 模拟器或设备"}执行测量` : `启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"} 后启用`}>{busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}{selectedTarget ? platform === "ios" ? "iOS xctrace 运行" : "模拟器/设备运行" : `等待 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"}`}</button>
+                      <button className="primary-button" disabled={busy || !selectedTarget || flowLock.trial?.synthetic !== false} onClick={onRealRun} title={selectedTarget ? pendingRunMode === "manual" ? "开始后可在 App 中自由操作；点击停止后会完整关闭采集器并保存证据" : pendingRunMode === "diagnose" ? "执行 Flow 并同屏录制实时性能；正式结论仍以结束后的原始证据为准" : `在所选 ${platform === "ios" ? "iOS Simulator 使用 xctrace" : "Android 模拟器或设备"}执行测量` : `启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"} 后启用`}>{busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}{selectedTarget ? platform === "ios" ? "iOS xctrace 运行" : pendingRunMode === "manual" ? "Start 手动录制" : pendingRunMode === "diagnose" ? "开始 Diagnose 录制" : "开始 Benchmark" : `等待 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"}`}</button>
                     </div>
                   ) : null}
                 </div>
@@ -1749,13 +1768,18 @@ function VirtualEventList({ events }: { events: JobSnapshot["events"] }) {
 function RunStatus({
   snapshot,
   cancelling,
+  stoppingManual,
   onCancel,
+  onStopManual,
 }: {
   snapshot: JobSnapshot;
   cancelling: boolean;
+  stoppingManual: boolean;
   onCancel: () => void;
+  onStopManual: () => void;
 }) {
   const terminal = ["completed", "failed", "cancelled"].includes(snapshot.job.state);
+  const manual = Boolean(snapshot.job.request && typeof snapshot.job.request === "object" && (snapshot.job.request as Record<string, unknown>).manualSession === true);
   const latestEvents = snapshot.events.slice(-4);
   const telemetry = snapshot.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
@@ -1771,7 +1795,8 @@ function RunStatus({
         <div className="heading-icon purple"><Activity size={19} /></div>
         <div><h2>{jobStateNames[snapshot.job.state]}</h2><p>任务 {snapshot.job.id.slice(0, 8)} · 重启 Reactor 后可自动重连</p></div>
         {!terminal && <span className="running-indicator"><span />Runner 运行中</span>}
-        {!terminal && <button className="secondary-button danger-button" disabled={cancelling} onClick={onCancel}>{cancelling ? "正在取消…" : "取消任务"}</button>}
+        {!terminal && manual && <button className="primary-button" disabled={stoppingManual} onClick={onStopManual}>{stoppingManual ? "正在完成证据…" : "停止并保存录制"}</button>}
+        {!terminal && <button className="secondary-button danger-button" disabled={cancelling || stoppingManual} onClick={onCancel}>{cancelling ? "正在取消…" : "取消任务"}</button>}
       </div>
       {latestEvents.length > 0 && (
         <div className="run-events">

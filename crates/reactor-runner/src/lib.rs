@@ -147,6 +147,10 @@ pub struct AndroidRunRequest {
     pub diagnostic_plan: Option<DiagnosticPlanV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leak_test: Option<AndroidLeakTestPlan>,
+    /// Records a user-driven session instead of executing the locked Flow. The lock still binds
+    /// the app identity and provenance, while the scenario prevents comparison with Flow runs.
+    #[serde(default)]
+    pub manual_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -526,6 +530,60 @@ pub fn cancel_persisted_job(workspace: &Path, job_id: &str) -> Result<Job, Runne
     )?)
 }
 
+/// Requests a graceful end to a user-driven Android diagnostic recording. Unlike cancellation,
+/// the detached worker remains alive long enough to close collectors and persist final evidence.
+///
+/// # Errors
+///
+/// Returns an error for unknown, non-manual, or malformed jobs and for an unwritable stop marker.
+pub fn request_android_manual_stop(workspace: &Path, job_id: &str) -> Result<Job, RunnerError> {
+    uuid::Uuid::parse_str(job_id).map_err(|_| {
+        RunnerError::InvalidDiagnosticPlan("manual recording job id is invalid".to_owned())
+    })?;
+    let store = open_store(workspace)?;
+    let current = store
+        .get_job(job_id)?
+        .ok_or_else(|| reactor_store::StoreError::UnknownJob(job_id.to_owned()))?;
+    if current.state.is_terminal() {
+        return Ok(current);
+    }
+    if current
+        .request
+        .get("manualSession")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(RunnerError::InvalidDiagnosticPlan(
+            "only a manual diagnostic recording can be stopped gracefully".to_owned(),
+        ));
+    }
+    let directory = workspace.join("results/runs").join(job_id);
+    std::fs::create_dir_all(&directory)?;
+    let stop_path = directory.join("manual-stop.request");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&stop_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(b"stop\n")?;
+            file.sync_all()?;
+            store.append_event(
+                job_id,
+                current.state,
+                "已请求停止手动录制；正在关闭采集器并保存证据",
+                Some(&serde_json::json!({ "kind": "manual_stop_requested" })),
+            )?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(store
+        .get_job(job_id)?
+        .ok_or_else(|| reactor_store::StoreError::UnknownJob(job_id.to_owned()))?)
+}
+
 /// Marks active jobs with missing/dead workers as failed while retaining their indexed artifacts.
 ///
 /// # Errors
@@ -636,6 +694,15 @@ fn validate_android_request(request: &AndroidRunRequest) -> Result<(), RunnerErr
     if request.duration_ms == 0 || request.iteration_count == 0 {
         return Err(RunnerError::InvalidDiagnosticPlan(
             "durationMs and iterationCount must be non-zero".to_owned(),
+        ));
+    }
+    if request.manual_session
+        && (request.run_mode != RunMode::Diagnose
+            || request.iteration_count != 1
+            || request.leak_test.is_some())
+    {
+        return Err(RunnerError::InvalidDiagnosticPlan(
+            "manual recording requires diagnose mode, one iteration, and no leak plan".to_owned(),
         ));
     }
     match (request.run_mode, request.diagnostic_plan.as_ref()) {
@@ -3630,7 +3697,11 @@ async fn execute_android_job_inner(
         return Err(RunnerError::MissingAndroidTrial(request.device_id.clone()));
     }
     let compiled = compile_maestro(&lock.flow)?;
-    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
+    let input_environment = if request.manual_session {
+        Vec::new()
+    } else {
+        resolve_input_environment(&compiled.input_bindings, None)?
+    };
     let tools = resolve_tools(&request.workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let flashlight = tools
@@ -3674,10 +3745,14 @@ async fn execute_android_job_inner(
         &request.workspace,
         job_id,
         JobState::Warmup,
-        "执行非计分预热",
+        if request.manual_session {
+            "准备手动诊断录制"
+        } else {
+            "执行非计分预热"
+        },
         None,
     )?;
-    if !lock.flow.setup.is_empty() {
+    if !request.manual_session && !lock.flow.setup.is_empty() {
         run_maestro_with_inputs(
             &maestro,
             &java,
@@ -3688,16 +3763,18 @@ async fn execute_android_job_inner(
         )
         .await?;
     }
-    run_maestro_with_inputs(
-        &maestro,
-        &java,
-        &adb,
-        &measured_path,
-        Some(&request.device_id),
-        &input_environment,
-    )
-    .await?;
-    if !lock.flow.teardown.is_empty() {
+    if !request.manual_session {
+        run_maestro_with_inputs(
+            &maestro,
+            &java,
+            &adb,
+            &measured_path,
+            Some(&request.device_id),
+            &input_environment,
+        )
+        .await?;
+    }
+    if !request.manual_session && !lock.flow.teardown.is_empty() {
         run_maestro_with_inputs(
             &maestro,
             &java,
@@ -3713,7 +3790,11 @@ async fn execute_android_job_inner(
         &request.workspace,
         job_id,
         JobState::Measuring,
-        "执行锁定 Flow 并采集原生指标",
+        if request.manual_session {
+            "手动诊断录制已开始；请在 App 中自由操作"
+        } else {
+            "执行锁定 Flow 并采集原生指标"
+        },
         None,
     )?;
     let mut native_warnings = Vec::new();
@@ -3786,20 +3867,33 @@ async fn execute_android_job_inner(
         lock.flow.app_id.clone(),
         observer_stop_rx,
     ));
-    let flashlight_result = run_flashlight(
-        &flashlight,
-        &maestro,
-        &java,
-        &adb,
-        &setup_path,
-        &measured_path,
-        (!lock.flow.teardown.is_empty()).then_some(teardown_path.as_path()),
-        &raw_path,
-        &lock.flow.app_id,
-        request,
-        &input_environment,
-    )
-    .await;
+    let flashlight_result = if request.manual_session {
+        run_flashlight_manual(
+            &flashlight,
+            &java,
+            &adb,
+            &raw_path,
+            &lock.flow.app_id,
+            request,
+            job_id,
+        )
+        .await
+    } else {
+        run_flashlight(
+            &flashlight,
+            &maestro,
+            &java,
+            &adb,
+            &setup_path,
+            &measured_path,
+            (!lock.flow.teardown.is_empty()).then_some(teardown_path.as_path()),
+            &raw_path,
+            &lock.flow.app_id,
+            request,
+            &input_environment,
+        )
+        .await
+    };
     let _ = observer_stop.send(true);
     let _ = observer_task.await;
     let hermes_cpu_result = if let Some(capture) = &hermes_cpu_capture {
@@ -5501,6 +5595,60 @@ async fn run_flashlight(
     .await
 }
 
+async fn run_flashlight_manual(
+    flashlight: &Path,
+    java: &Path,
+    adb: &Path,
+    raw_path: &Path,
+    app_id: &str,
+    request: &AndroidRunRequest,
+    job_id: &str,
+) -> Result<(), RunnerError> {
+    let artifact_dir = raw_path.parent().ok_or_else(|| {
+        RunnerError::InvalidDiagnosticPlan("manual recording artifact path is invalid".to_owned())
+    })?;
+    let stop_path = artifact_dir.join("manual-stop.request");
+    let wait_script = artifact_dir.join("manual-recording-wait.sh");
+    let tick_count = request.duration_ms.div_ceil(250).clamp(1, 1_200);
+    let script = format!(
+        "#!/bin/sh\ni=0\nwhile [ ! -f {} ] && [ \"$i\" -lt {tick_count} ]; do\n  sleep 0.25\n  i=$((i + 1))\ndone\n",
+        quote_shell(&stop_path.display().to_string()),
+    );
+    fs::write(&wait_script, script).await?;
+    register_artifact(
+        &request.workspace,
+        job_id,
+        "manual_recording_control",
+        &wait_script,
+    )?;
+    let test_command = format!("sh {}", quote_shell(&wait_script.display().to_string()));
+    let mut command = Command::new(flashlight);
+    let title = format!("{} · manual-diagnose · Reactor", request.framework);
+    command.args([
+        "test",
+        "--bundleId",
+        app_id,
+        "--testCommand",
+        &test_command,
+        "--iterationCount",
+        "1",
+        "--maxRetries",
+        "0",
+        "--skipRestart",
+        "--resultsTitle",
+        &title,
+        "--resultsFilePath",
+        &raw_path.display().to_string(),
+    ]);
+    configure_environment(&mut command, java, adb, Some(&request.device_id));
+    run_command_with_timeout(
+        command,
+        "flashlight-manual-recording",
+        Duration::from_millis(request.duration_ms.saturating_add(120_000)),
+    )
+    .await
+}
+
 fn flashlight_timeout(request: &AndroidRunRequest) -> Duration {
     // Flashlight's duration only covers metric sampling. Maestro setup, Flow execution and
     // teardown happen around every iteration and need their own bounded allowance.
@@ -6381,6 +6529,7 @@ mod tests {
                 },
             }),
             leak_test: None,
+            manual_session: false,
         };
         validate_android_request(&request).unwrap();
         request.iteration_count = 4;
@@ -6441,6 +6590,7 @@ mod tests {
             run_mode: RunMode::Benchmark,
             diagnostic_plan: None,
             leak_test: None,
+            manual_session: false,
         };
         assert_eq!(flashlight_timeout(&request), Duration::from_secs(900));
     }
@@ -6527,5 +6677,101 @@ mod tests {
             "a repeated cancel must not append another terminal event"
         );
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn manual_stop_is_graceful_idempotent_and_rejects_regular_jobs() {
+        let workspace =
+            std::env::temp_dir().join(format!("reactor-manual-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = open_store(&workspace).unwrap();
+        let manual = store
+            .create_job(&serde_json::json!({ "manualSession": true }))
+            .unwrap();
+        let first = request_android_manual_stop(&workspace, &manual.id).unwrap();
+        let event_count_after_first = store.events_after(&manual.id, 0).unwrap().len();
+        let second = request_android_manual_stop(&workspace, &manual.id).unwrap();
+        assert_eq!(first.state, JobState::Queued);
+        assert_eq!(second.state, JobState::Queued);
+        assert!(
+            workspace
+                .join("results/runs")
+                .join(&manual.id)
+                .join("manual-stop.request")
+                .is_file()
+        );
+        assert_eq!(
+            store.events_after(&manual.id, 0).unwrap().len(),
+            event_count_after_first
+        );
+
+        let regular = store
+            .create_job(&serde_json::json!({ "manualSession": false }))
+            .unwrap();
+        assert!(request_android_manual_stop(&workspace, &regular.id).is_err());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a Reactor-managed Android target and explicit local workspace/Flow lock"]
+    async fn manual_android_recording_stops_and_persists_evidence() {
+        let workspace = PathBuf::from(
+            std::env::var("REACTOR_MANUAL_WORKSPACE")
+                .expect("set REACTOR_MANUAL_WORKSPACE for the managed runtime"),
+        );
+        let flow_lock = PathBuf::from(
+            std::env::var("REACTOR_MANUAL_FLOW_LOCK")
+                .expect("set REACTOR_MANUAL_FLOW_LOCK for a verified Android Flow"),
+        );
+        let request = AndroidRunRequest {
+            workspace: workspace.clone(),
+            flow_lock,
+            framework: "react-native".to_owned(),
+            scenario: "manual-diagnose".to_owned(),
+            device_id: "emulator-5554".to_owned(),
+            duration_ms: 30_000,
+            iteration_count: 1,
+            run_mode: RunMode::Diagnose,
+            diagnostic_plan: Some(DiagnosticPlanV1 {
+                schema_version: 1,
+                mode: reactor_protocol::DiagnosticCaptureMode::InBand,
+                collectors: vec![reactor_protocol::DiagnosticCollectorPlanV1 {
+                    collector: "hermes-cpu".to_owned(),
+                    required: false,
+                }],
+                resource_limits: reactor_protocol::DiagnosticResourceLimitsV1 {
+                    max_duration_ms: 30_000,
+                    max_artifact_bytes: 256 * 1024 * 1024,
+                    max_events: 500_000,
+                    max_samples: 2_000_000,
+                },
+            }),
+            leak_test: None,
+            manual_session: true,
+        };
+        let job = enqueue_android(&request).unwrap();
+        let execute_request = request.clone();
+        let job_id = job.id.clone();
+        let execute_job_id = job_id.clone();
+        let execution =
+            tokio::spawn(
+                async move { execute_android_job(&execute_request, &execute_job_id).await },
+            );
+        for _ in 0..120 {
+            let (current, _) = get_job(&workspace, &job_id, 0).unwrap();
+            if current.state == JobState::Measuring {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        request_android_manual_stop(&workspace, &job_id).unwrap();
+        let (completed, result) = execution.await.unwrap().unwrap();
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(result.scenario, "manual-diagnose");
+        let artifacts = workspace.join("results/runs").join(&job_id);
+        assert!(artifacts.join("flashlight.json").is_file());
+        assert!(artifacts.join("perfetto.pftrace").is_file());
+        assert!(artifacts.join("result.json").is_file());
     }
 }

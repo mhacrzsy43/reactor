@@ -142,6 +142,7 @@ export interface RealRunInput {
   iterations: number;
   runMode?: "benchmark" | "diagnose";
   diagnosticPlan?: DiagnosticPlanV1;
+  manualSession?: boolean;
   leakTest?: {
     cycles: number;
     checkpointEvery: number;
@@ -469,6 +470,11 @@ export async function cancelJob(jobId: string): Promise<Job> {
   return invoke("cancel_job", { jobId });
 }
 
+export async function stopManualDiagnose(jobId: string): Promise<Job> {
+  if (!inTauri) throw new Error("手动诊断录制只能在 Reactor 桌面应用中停止");
+  return invoke("stop_manual_diagnose", { jobId });
+}
+
 export async function resumeJob(
   jobId: string,
   onUpdate?: (snapshot: JobSnapshot) => void,
@@ -516,6 +522,24 @@ export async function runAndroidDiagnose(
   const diagnosticPlan = input.diagnosticPlan ?? conservativeAndroidDiagnosticPlan(input.durationMs, iterations);
   const durationMs = Math.min(input.durationMs, Math.floor(diagnosticPlan.resourceLimits.maxDurationMs / iterations));
   return runAndroid({ ...input, durationMs, iterations, runMode: "diagnose", diagnosticPlan }, onUpdate);
+}
+
+export async function runAndroidManualDiagnose(
+  input: RealRunInput,
+  onUpdate?: (snapshot: JobSnapshot) => void,
+): Promise<DemoOutput> {
+  const durationMs = Math.max(1_000, Math.min(5 * 60 * 1_000, Math.trunc(input.durationMs)));
+  const diagnosticPlan = input.diagnosticPlan ?? conservativeAndroidDiagnosticPlan(durationMs, 1);
+  return runAndroid({
+    ...input,
+    scenario: "manual-diagnose",
+    durationMs,
+    iterations: 1,
+    runMode: "diagnose",
+    diagnosticPlan,
+    leakTest: undefined,
+    manualSession: true,
+  }, onUpdate);
 }
 
 export async function analyzeJobPair(baselineJobId: string, currentJobId: string): Promise<JobAnalysis> {
