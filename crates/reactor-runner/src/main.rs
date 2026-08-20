@@ -79,6 +79,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 device_id: device,
                 duration_ms,
                 iteration_count: iterations,
+                run_mode: reactor_protocol::RunMode::Benchmark,
+                diagnostic_plan: None,
                 leak_test: leak_cycles.map(|cycles| AndroidLeakTestPlan {
                     cycles,
                     checkpoint_every: 2,

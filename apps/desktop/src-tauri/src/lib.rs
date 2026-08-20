@@ -1,13 +1,14 @@
 use std::{
     env,
-    fs::File,
+    fs::{File, OpenOptions},
     future::Future,
+    io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 #[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
+use std::os::unix::{fs::OpenOptionsExt as _, process::CommandExt as _};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
@@ -20,7 +21,11 @@ use reactor_ai::{
     diff_flows, doctor_cli_provider, doctor_local_model as check_local_model, redact_ui_tree,
 };
 use reactor_analysis::{
-    AnalysisReport, DiagnosticProfileReport, ProfileDiffReport, RegressionPolicy, analyze_pair,
+    AnalysisReport, DiagnosticIndex, DiagnosticManifest as IndexDiagnosticManifest,
+    DiagnosticProfileReport, FrameDrilldown as IndexFrameDrilldown, ProfileDiffReport,
+    RegressionPolicy, SelectionAnalysis as IndexSelectionAnalysis,
+    TimelineItem as IndexTimelineItem, TimelineOverview as IndexTimelineOverview,
+    TimelineWindow as IndexTimelineWindow, analyze_pair,
     analyze_profile_json as analyze_diagnostic_profile,
     apply_source_map_json as apply_diagnostic_source_map,
     diff_profile_reports as diff_diagnostic_profiles,
@@ -153,6 +158,7 @@ const AI_CLI_TIMEOUT_SECONDS: u64 = 120;
 const AI_CLI_STDOUT_BYTES: u64 = 1024 * 1024;
 const AI_CLI_STDERR_BYTES: u64 = 256 * 1024;
 const LOCAL_TRACE_MIN_FREE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_WORKER_LOG_FILES: usize = 20;
 const UPDATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const STABLE_UPDATE_ENDPOINT: &str =
     "https://github.com/mhacrzsy43/reactor/releases/latest/download/stable.json";
@@ -492,6 +498,166 @@ struct DiffProfileInput {
     current: DiagnosticProfileReport,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticRunInput {
+    job_id: String,
+    run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticOverviewInput {
+    job_id: String,
+    run_id: String,
+    start_ms: f64,
+    end_ms: f64,
+    pixel_width: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticManifestDto {
+    schema_version: u32,
+    run_id: String,
+    range: Option<DiagnosticRangeDto>,
+    tracks: Vec<DiagnosticTrackAvailabilityDto>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticRangeDto {
+    start_ms: f64,
+    end_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticTrackAvailabilityDto {
+    kind: String,
+    track_id: Option<i64>,
+    state: String,
+    label: String,
+    reason: Option<String>,
+    count: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineOverviewDto {
+    range: DiagnosticRangeDto,
+    tracks: Vec<TimelineOverviewTrackDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineOverviewTrackDto {
+    kind: String,
+    buckets: Vec<TimelineOverviewBucketDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineOverviewBucketDto {
+    start_ms: f64,
+    end_ms: f64,
+    count: u64,
+    max_duration_ms: Option<f64>,
+    slow_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineItemDto {
+    id: i64,
+    track_id: i64,
+    track: String,
+    item_type: String,
+    start_ms: f64,
+    end_ms: f64,
+    label: String,
+    severity: Option<String>,
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineWindowDto {
+    range: DiagnosticRangeDto,
+    items: Vec<TimelineItemDto>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectionAnalysisDto {
+    range: DiagnosticRangeDto,
+    summary: String,
+    event_count: u64,
+    frame_count: u64,
+    slow_frame_count: u64,
+    react_commit_count: u64,
+    cpu_sample_count: u64,
+    top_functions: Vec<reactor_analysis::RankedValue>,
+    top_components: Vec<reactor_analysis::RankedValue>,
+    availability: std::collections::BTreeMap<String, DiagnosticTrackAvailabilityDto>,
+    correlations: Vec<serde_json::Value>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameDrilldownDto {
+    available: bool,
+    reason: Option<String>,
+    frame_id: Option<i64>,
+    start_ms: f64,
+    end_ms: f64,
+    duration_ms: Option<f64>,
+    budget_ms: Option<f64>,
+    classification: Option<String>,
+    details: Vec<FrameDetailDto>,
+    correlations: Vec<serde_json::Value>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FrameDetailDto {
+    label: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticWindowInput {
+    job_id: String,
+    run_id: String,
+    start_ms: f64,
+    end_ms: f64,
+    #[serde(default)]
+    track_ids: Vec<i64>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticSelectionInput {
+    job_id: String,
+    run_id: String,
+    start_ms: f64,
+    end_ms: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_field_names)]
+struct FrameDrilldownInput {
+    job_id: String,
+    run_id: String,
+    frame_id: i64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JobAnalysis {
@@ -701,6 +867,91 @@ fn is_sensitive_artifact(path: &Path) -> bool {
         || name.contains("ui-hierarchy")
 }
 
+fn is_sensitive_registered_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "perfetto_trace"
+            | "react_native_hermes_cpu"
+            | "react_native_diagnostics"
+            | "react_native_profile"
+            | "react_native_hermes_heap_stats"
+            | "react_native_hermes_heap_snapshot"
+            | "react_native_java_heap_dump"
+            | "android_native_heap_trace"
+            | "xctrace_archive"
+            | "xctrace_profile"
+    )
+}
+
+fn is_sensitive_diagnostic_provenance(artifact: &reactor_protocol::ArtifactRef) -> bool {
+    let provenance = format!(
+        "{} {} {} {}",
+        artifact.format, artifact.producer, artifact.producer_version, artifact.capture_method
+    )
+    .to_ascii_lowercase();
+    ["trace", "profile", "heap", "reactor-rn-events"]
+        .iter()
+        .any(|marker| provenance.contains(marker))
+}
+
+fn managed_existing_file_from(root: &Path, base: &Path, path: &Path) -> Option<PathBuf> {
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    let canonical = std::fs::canonicalize(candidate).ok()?;
+    let metadata = std::fs::symlink_metadata(&canonical).ok()?;
+    (metadata.is_file() && canonical.starts_with(canonical_root)).then_some(canonical)
+}
+
+fn managed_existing_file(root: &Path, path: &Path) -> Option<PathBuf> {
+    managed_existing_file_from(root, root, path)
+}
+
+fn collect_result_diagnostic_paths(
+    root: &Path,
+    result_base: &Path,
+    result: &reactor_protocol::NormalizedResult,
+) -> Vec<PathBuf> {
+    let mut paths = result
+        .artifacts
+        .iter()
+        .filter(|artifact| is_sensitive_diagnostic_provenance(artifact))
+        .filter_map(|artifact| {
+            managed_existing_file_from(root, result_base, Path::new(&artifact.path))
+        })
+        .collect::<Vec<_>>();
+    if let Some(diagnostics) = result.react_native_diagnostics() {
+        match diagnostics {
+            reactor_protocol::ReactNativeDiagnosticsView::V1(diagnostics) => {
+                paths.extend(
+                    diagnostics
+                        .collectors
+                        .values()
+                        .flat_map(|collector| &collector.artifacts)
+                        .filter(|artifact| is_sensitive_diagnostic_provenance(artifact))
+                        .filter_map(|artifact| {
+                            managed_existing_file_from(root, result_base, Path::new(&artifact.path))
+                        }),
+                );
+            }
+            reactor_protocol::ReactNativeDiagnosticsView::Legacy(diagnostics) => {
+                paths.extend(
+                    std::iter::once(Some(diagnostics.event_file.as_str()))
+                        .chain(std::iter::once(diagnostics.profile_file.as_deref()))
+                        .flatten()
+                        .filter_map(|path| {
+                            managed_existing_file_from(root, result_base, Path::new(path))
+                        }),
+                );
+            }
+        }
+    }
+    paths
+}
+
 fn scan_files(root: &Path) -> Result<(u64, u64, Vec<PathBuf>), String> {
     if !root.exists() {
         return Ok((0, 0, Vec::new()));
@@ -804,7 +1055,60 @@ fn create_diagnostic_bundle_for(root: &Path) -> Result<DiagnosticBundleResult, S
 }
 
 fn erase_sensitive_files(root: &Path) -> Result<PrivacyEraseResult, String> {
-    let (_, _, sensitive) = scan_files(&root.join("results"))?;
+    let results_root = root.join("results");
+    let (_, _, named_sensitive) = scan_files(&results_root)?;
+    let mut sensitive = named_sensitive
+        .into_iter()
+        .filter_map(|path| managed_existing_file(&results_root, &path))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    let total = store.job_count().map_err(|error| error.to_string())?;
+    let mut offset = 0_u32;
+    while u64::from(offset) < total {
+        let jobs = store
+            .list_jobs_page(100, offset)
+            .map_err(|error| error.to_string())?;
+        if jobs.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(u32::try_from(jobs.len()).unwrap_or(100));
+        for job in jobs {
+            for artifact in store
+                .list_artifacts(&job.id)
+                .map_err(|error| error.to_string())?
+            {
+                if is_sensitive_registered_kind(&artifact.kind)
+                    && let Some(path) = managed_existing_file(root, Path::new(&artifact.path))
+                {
+                    sensitive.insert(path);
+                }
+            }
+            if let Some(result_path) = job.result_path {
+                let result_base = Path::new(&result_path).parent().unwrap_or(root);
+                for result in read_results(&result_path).unwrap_or_default() {
+                    sensitive.extend(collect_result_diagnostic_paths(root, result_base, &result));
+                }
+            }
+        }
+    }
+    drop(store);
+
+    let worker_dir = root.join(".reactor/runtime/workers");
+    if worker_dir.is_dir() {
+        for entry in std::fs::read_dir(&worker_dir).map_err(|error| error.to_string())? {
+            let path = entry.map_err(|error| error.to_string())?.path();
+            if matches!(
+                path.extension().and_then(std::ffi::OsStr::to_str),
+                Some("json" | "log")
+            ) && let Some(path) = managed_existing_file(root, &path)
+            {
+                sensitive.insert(path);
+            }
+        }
+    }
+
     let mut removed_files = 0_u64;
     let mut removed_bytes = 0_u64;
     for path in sensitive {
@@ -2304,6 +2608,8 @@ fn start_android(input: RealRunInput) -> Result<StartedJob, String> {
         device_id: input.device_id,
         duration_ms: input.duration_ms,
         iteration_count: input.iterations,
+        run_mode: reactor_protocol::RunMode::Benchmark,
+        diagnostic_plan: None,
         leak_test: input.leak_test,
     };
     let job = enqueue_android(&request).map_err(|error| error.to_string())?;
@@ -2630,18 +2936,440 @@ fn read_results(path: &str) -> Result<Vec<reactor_protocol::NormalizedResult>, S
         .map_err(|error| error.to_string())
 }
 
+fn diagnostic_index_path(
+    managed_results_root: &Path,
+    result_base: &Path,
+    run_id: &str,
+) -> Result<PathBuf, String> {
+    use sha2::{Digest as _, Sha256};
+
+    let canonical_managed_root =
+        std::fs::canonicalize(managed_results_root).map_err(|error| error.to_string())?;
+    let canonical_result_base =
+        std::fs::canonicalize(result_base).map_err(|error| error.to_string())?;
+    if !canonical_result_base.starts_with(&canonical_managed_root) {
+        return Err("诊断结果目录不属于当前工作区".to_owned());
+    }
+    let index_root = canonical_result_base.join("diagnostic-index");
+    std::fs::create_dir_all(&index_root).map_err(|error| error.to_string())?;
+    let canonical_index_root =
+        std::fs::canonicalize(&index_root).map_err(|error| error.to_string())?;
+    if !canonical_index_root.starts_with(&canonical_result_base) {
+        return Err("诊断索引目录不属于结果目录".to_owned());
+    }
+    let opaque_id = hex::encode(Sha256::digest(run_id.as_bytes()));
+    let run_directory = canonical_index_root.join(opaque_id);
+    std::fs::create_dir_all(&run_directory).map_err(|error| error.to_string())?;
+    let canonical_run_directory =
+        std::fs::canonicalize(&run_directory).map_err(|error| error.to_string())?;
+    if !canonical_run_directory.starts_with(&canonical_index_root) {
+        return Err("诊断运行索引逃逸受管目录".to_owned());
+    }
+    Ok(canonical_run_directory.join("diagnostic-index.sqlite"))
+}
+
+fn diagnostic_index(job_id: &str, run_id: &str) -> Result<DiagnosticIndex, String> {
+    let root = workspace();
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    let job = store
+        .get_job(job_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("找不到任务 {job_id}"))?;
+    if !job.state.is_terminal() {
+        return Err("诊断索引只能为已经结束的任务构建".to_owned());
+    }
+    let result_path = job
+        .result_path
+        .as_deref()
+        .ok_or_else(|| "任务没有可索引的结果".to_owned())?;
+    let result = read_results(result_path)?
+        .into_iter()
+        .find(|result| result.run_id == run_id)
+        .ok_or_else(|| format!("任务 {job_id} 中找不到运行 {run_id}"))?;
+    let result_base = Path::new(result_path)
+        .parent()
+        .ok_or_else(|| "结果路径没有父目录".to_owned())?;
+    let index_path = diagnostic_index_path(&root.join("results"), result_base, &result.run_id)?;
+    DiagnosticIndex::open_or_build(&index_path, result_base, &result)
+        .map_err(|error| error.to_string())
+}
+
+fn diagnostic_track_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "events" => Some("runtime_events"),
+        "react" => Some("react_commits"),
+        "frames" => Some("frames"),
+        "cpu" => Some("js_samples"),
+        _ => None,
+    }
+}
+
+fn diagnostic_ui_tracks() -> [(&'static str, &'static str); 5] {
+    [
+        ("iterations", "Iterations"),
+        ("frames", "Frames"),
+        ("react_commits", "React commits"),
+        ("js_samples", "CPU samples"),
+        ("runtime_events", "Diagnostic events"),
+    ]
+}
+
+fn diagnostic_state(state: &str) -> String {
+    match state {
+        "available" => "available",
+        "unsupported" => "unsupported",
+        "failed" => "failed",
+        "not_collected" => "not_collected",
+        _ => "unavailable",
+    }
+    .to_owned()
+}
+
+fn manifest_dto(
+    manifest: IndexDiagnosticManifest,
+    overview: &IndexTimelineOverview,
+) -> DiagnosticManifestDto {
+    let tracks_by_kind = overview
+        .tracks
+        .iter()
+        .filter_map(|track| diagnostic_track_kind(&track.kind).map(|kind| (kind, track)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let availability_by_kind = manifest
+        .availability
+        .iter()
+        .filter_map(|(kind, availability)| {
+            diagnostic_track_kind(kind).map(|ui_kind| (ui_kind, availability))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let tracks = diagnostic_ui_tracks()
+        .into_iter()
+        .map(|(kind, default_label)| {
+            let track = tracks_by_kind.get(kind).copied();
+            let availability = availability_by_kind.get(kind).copied();
+            DiagnosticTrackAvailabilityDto {
+                kind: kind.to_owned(),
+                track_id: track.map(|value| value.id),
+                state: availability.map_or_else(
+                    || "not_collected".to_owned(),
+                    |value| diagnostic_state(&value.state),
+                ),
+                label: track
+                    .map_or(default_label, |value| value.name.as_str())
+                    .to_owned(),
+                reason: availability
+                    .and_then(|value| value.reason.clone())
+                    .or_else(|| {
+                        (kind == "iterations").then(|| {
+                            "the diagnostic index does not expose an iteration track".to_owned()
+                        })
+                    }),
+                count: availability.map_or(0, |value| value.item_count),
+            }
+        })
+        .collect();
+    DiagnosticManifestDto {
+        schema_version: manifest.schema_version,
+        run_id: manifest.run_id,
+        range: manifest
+            .start_ms
+            .zip(manifest.end_ms)
+            .map(|(start_ms, end_ms)| DiagnosticRangeDto { start_ms, end_ms }),
+        tracks,
+        warnings: manifest.warnings,
+    }
+}
+
+fn timeline_item_dto(
+    item: IndexTimelineItem,
+    track_kinds: &std::collections::BTreeMap<i64, String>,
+) -> Option<TimelineItemDto> {
+    let track = track_kinds.get(&item.track_id)?.clone();
+    Some(TimelineItemDto {
+        id: item.id,
+        track_id: item.track_id,
+        track,
+        item_type: item.item_type,
+        start_ms: item.start_ms,
+        end_ms: item.end_ms,
+        label: item.label,
+        severity: item.severity,
+        data: item.data,
+    })
+}
+
+fn diagnostic_track_map(
+    overview: &IndexTimelineOverview,
+) -> std::collections::BTreeMap<i64, String> {
+    overview
+        .tracks
+        .iter()
+        .filter_map(|track| {
+            diagnostic_track_kind(&track.kind).map(|kind| (track.id, kind.to_owned()))
+        })
+        .collect()
+}
+
+#[tauri::command(rename = "getDiagnosticManifest")]
+#[allow(clippy::needless_pass_by_value)]
+fn get_diagnostic_manifest(input: DiagnosticRunInput) -> Result<DiagnosticManifestDto, String> {
+    let index = diagnostic_index(&input.job_id, &input.run_id)?;
+    let overview = index.overview().map_err(|error| error.to_string())?;
+    Ok(manifest_dto(overview.manifest.clone(), &overview))
+}
+
+#[tauri::command(rename = "getTimelineOverview")]
+#[allow(clippy::needless_pass_by_value)]
+fn get_timeline_overview(input: DiagnosticOverviewInput) -> Result<TimelineOverviewDto, String> {
+    let index = diagnostic_index(&input.job_id, &input.run_id)?;
+    let overview = index.overview().map_err(|error| error.to_string())?;
+    let track_kinds = diagnostic_track_map(&overview);
+    let track_ids = track_kinds.keys().copied().collect::<Vec<_>>();
+    let window = index
+        .timeline_window(input.start_ms, input.end_ms, &track_ids, Some(20_000))
+        .map_err(|error| error.to_string())?;
+    let bucket_count = input.pixel_width.clamp(1, 2_000).div_ceil(4).max(1);
+    let bucket_count_usize = usize::try_from(bucket_count).expect("bounded timeline bucket count");
+    let bucket_width = (input.end_ms - input.start_ms) / f64::from(bucket_count);
+    let mut buckets = track_kinds
+        .values()
+        .map(|kind| {
+            (
+                kind.clone(),
+                vec![(0_u64, None::<f64>, 0_u64); bucket_count_usize],
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for item in &window.items {
+        let Some(kind) = track_kinds.get(&item.track_id) else {
+            continue;
+        };
+        let index = (0..bucket_count)
+            .position(|candidate| {
+                item.start_ms < input.start_ms + f64::from(candidate + 1) * bucket_width
+            })
+            .unwrap_or(bucket_count_usize - 1);
+        let bucket = &mut buckets.get_mut(kind).expect("known diagnostic track")[index];
+        bucket.0 += 1;
+        let duration = (item.end_ms - item.start_ms).max(0.0);
+        bucket.1 = Some(bucket.1.map_or(duration, |current| current.max(duration)));
+        if item
+            .severity
+            .as_deref()
+            .is_some_and(|value| matches!(value, "slow" | "warning" | "error"))
+        {
+            bucket.2 += 1;
+        }
+    }
+    Ok(TimelineOverviewDto {
+        range: DiagnosticRangeDto {
+            start_ms: input.start_ms,
+            end_ms: input.end_ms,
+        },
+        tracks: buckets
+            .into_iter()
+            .map(|(kind, values)| TimelineOverviewTrackDto {
+                kind,
+                buckets: values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (count, max_duration_ms, slow_count))| {
+                        TimelineOverviewBucketDto {
+                            start_ms: input.start_ms
+                                + f64::from(u32::try_from(index).expect("bounded bucket index"))
+                                    * bucket_width,
+                            end_ms: if index + 1 == bucket_count_usize {
+                                input.end_ms
+                            } else {
+                                input.start_ms
+                                    + f64::from(
+                                        u32::try_from(index + 1).expect("bounded bucket index"),
+                                    ) * bucket_width
+                            },
+                            count,
+                            max_duration_ms,
+                            slow_count,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command(rename = "getTimelineWindow")]
+#[allow(clippy::needless_pass_by_value)]
+fn get_timeline_window(input: DiagnosticWindowInput) -> Result<TimelineWindowDto, String> {
+    let index = diagnostic_index(&input.job_id, &input.run_id)?;
+    let overview = index.overview().map_err(|error| error.to_string())?;
+    let track_kinds = diagnostic_track_map(&overview);
+    let allowed_ids = input
+        .track_ids
+        .into_iter()
+        .filter(|id| track_kinds.contains_key(id))
+        .collect::<Vec<_>>();
+    if allowed_ids.is_empty() {
+        return Ok(TimelineWindowDto {
+            range: DiagnosticRangeDto {
+                start_ms: input.start_ms,
+                end_ms: input.end_ms,
+            },
+            items: Vec::new(),
+            truncated: false,
+        });
+    }
+    let window: IndexTimelineWindow = index
+        .timeline_window(input.start_ms, input.end_ms, &allowed_ids, input.limit)
+        .map_err(|error| error.to_string())?;
+    Ok(TimelineWindowDto {
+        range: DiagnosticRangeDto {
+            start_ms: window.start_ms,
+            end_ms: window.end_ms,
+        },
+        items: window
+            .items
+            .into_iter()
+            .filter_map(|item| timeline_item_dto(item, &track_kinds))
+            .collect(),
+        truncated: window.clipped,
+    })
+}
+
+#[tauri::command(rename = "analyzeDiagnosticSelection")]
+#[allow(clippy::needless_pass_by_value)]
+fn analyze_diagnostic_selection(
+    input: DiagnosticSelectionInput,
+) -> Result<SelectionAnalysisDto, String> {
+    let index = diagnostic_index(&input.job_id, &input.run_id)?;
+    let analysis: IndexSelectionAnalysis = index
+        .analyze_selection(input.start_ms, input.end_ms)
+        .map_err(|error| error.to_string())?;
+    let availability = analysis
+        .availability
+        .iter()
+        .filter_map(|(kind, value)| {
+            diagnostic_track_kind(kind).map(|ui_kind| {
+                (
+                    ui_kind.to_owned(),
+                    DiagnosticTrackAvailabilityDto {
+                        kind: ui_kind.to_owned(),
+                        track_id: None,
+                        state: diagnostic_state(&value.state),
+                        label: ui_kind.to_owned(),
+                        reason: value.reason.clone(),
+                        count: value.item_count,
+                    },
+                )
+            })
+        })
+        .collect();
+    Ok(SelectionAnalysisDto {
+        range: DiagnosticRangeDto { start_ms: analysis.start_ms, end_ms: analysis.end_ms },
+        summary: "Counts and hotspots are limited to the selected time range; temporal overlap is not causal evidence.".to_owned(),
+        event_count: analysis.event_count,
+        frame_count: analysis.frame_count,
+        slow_frame_count: analysis.slow_frame_count,
+        react_commit_count: analysis.react_commit_count,
+        cpu_sample_count: analysis.cpu_sample_count,
+        top_functions: analysis.top_functions,
+        top_components: analysis.top_components,
+        availability,
+        correlations: Vec::new(),
+        warnings: vec!["No causal relationship is inferred from this selection.".to_owned()],
+    })
+}
+
+#[tauri::command(rename = "getFrameDrilldown")]
+#[allow(clippy::needless_pass_by_value)]
+fn get_frame_drilldown(input: FrameDrilldownInput) -> Result<FrameDrilldownDto, String> {
+    let drilldown: IndexFrameDrilldown = diagnostic_index(&input.job_id, &input.run_id)?
+        .frame_drilldown(input.frame_id)
+        .map_err(|error| error.to_string())?;
+    let frame = drilldown.frame.as_ref();
+    let duration_ms = frame.map(|value| (value.end_ms - value.start_ms).max(0.0));
+    Ok(FrameDrilldownDto {
+        available: drilldown.available,
+        reason: drilldown.reason.clone(),
+        frame_id: frame.map(|_| input.frame_id),
+        start_ms: frame.map_or(0.0, |value| value.start_ms),
+        end_ms: frame.map_or(0.0, |value| value.end_ms),
+        duration_ms,
+        budget_ms: None,
+        classification: frame.and_then(|value| value.severity.clone()),
+        details: vec![
+            FrameDetailDto {
+                label: "Overlapping events".to_owned(),
+                value: drilldown.overlapping_events.len().to_string(),
+            },
+            FrameDetailDto {
+                label: "React commits".to_owned(),
+                value: drilldown.react_commits.len().to_string(),
+            },
+            FrameDetailDto {
+                label: "CPU hotspots".to_owned(),
+                value: drilldown.cpu_samples.len().to_string(),
+            },
+        ],
+        correlations: Vec::new(),
+        warnings: if drilldown.correlations.is_empty() {
+            vec!["No indexed temporal correlation candidates are available; no causal relationship is inferred.".to_owned()]
+        } else {
+            vec!["Indexed correlation records are temporal candidates only and are not causal evidence.".to_owned()]
+        },
+    })
+}
+
+fn write_worker_request(path: &Path, request: &WorkerRequest) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(request).map_err(|error| error.to_string())?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    file.write_all(b"\n").map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
+}
+
+fn take_worker_request(path: &Path) -> Result<WorkerRequest, String> {
+    let request = std::fs::read(path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))?;
+    std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    Ok(request)
+}
+
+fn prune_worker_logs(worker_dir: &Path, keep: usize) -> Result<(), String> {
+    let mut logs = std::fs::read_dir(worker_dir)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(std::ffi::OsStr::to_str) == Some("log"))
+                .then(|| {
+                    entry
+                        .metadata()
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .map(|modified| (modified, path))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    logs.sort_by_key(|(modified, path)| (*modified, path.clone()));
+    let remove_count = logs.len().saturating_sub(keep);
+    for (_, path) in logs.into_iter().take(remove_count) {
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn spawn_worker(workspace: &Path, job_id: &str, request: &WorkerRequest) -> Result<(), String> {
     let worker_dir = workspace.join(".reactor/runtime/workers");
     std::fs::create_dir_all(&worker_dir).map_err(|error| error.to_string())?;
+    prune_worker_logs(&worker_dir, MAX_WORKER_LOG_FILES.saturating_sub(1))?;
     let request_path = worker_dir.join(format!("{job_id}.json"));
-    std::fs::write(
-        &request_path,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(request).map_err(|error| error.to_string())?
-        ),
-    )
-    .map_err(|error| error.to_string())?;
+    write_worker_request(&request_path, request)?;
     let stdout = File::create(worker_dir.join(format!("{job_id}.log")))
         .map_err(|error| error.to_string())?;
     let stderr = stdout.try_clone().map_err(|error| error.to_string())?;
@@ -2718,11 +3446,9 @@ pub fn run_worker_from_args() -> bool {
         eprintln!("missing worker job id");
         return true;
     };
+    let request_path = PathBuf::from(request_path);
     let result = (|| -> Result<(), String> {
-        let request: WorkerRequest = serde_json::from_slice(
-            &std::fs::read(request_path).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
+        let request = take_worker_request(&request_path)?;
         tokio::runtime::Runtime::new()
             .map_err(|error| error.to_string())?
             .block_on(async move {
@@ -2824,6 +3550,11 @@ pub fn run() {
             analyze_profile_json,
             analyze_managed_profile,
             diff_profile_reports,
+            get_diagnostic_manifest,
+            get_timeline_overview,
+            get_timeline_window,
+            analyze_diagnostic_selection,
+            get_frame_drilldown,
             explain_analysis,
             cancel_job,
             open_report
@@ -3208,23 +3939,129 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_erase_removes_screenshots_and_ui_trees_but_keeps_raw_traces() {
+    fn sensitive_erase_uses_registered_kind_and_worker_provenance_without_broad_deletion() {
         let root = temporary_workspace("privacy");
-        let evidence = root.join("results/trials/one");
+        let evidence = root.join("results/runs/one");
+        let workers = root.join(".reactor/runtime/workers");
         std::fs::create_dir_all(&evidence).unwrap();
+        std::fs::create_dir_all(&workers).unwrap();
+        let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3")).unwrap();
+        let job = store
+            .create_job(&serde_json::json!({ "kind": "android" }))
+            .unwrap();
         let screenshot = evidence.join("screenshot.png");
-        let ui_tree = evidence.join("destination-ui-tree.xml");
-        let trace = evidence.join("trace.pftrace");
+        let unrelated_trace = evidence.join("user-trace-not-registered.pftrace");
         std::fs::write(&screenshot, b"pixels").unwrap();
-        std::fs::write(&ui_tree, b"tree").unwrap();
-        std::fs::write(&trace, b"trace").unwrap();
+        std::fs::write(&unrelated_trace, b"unrelated").unwrap();
+
+        let registered = [
+            ("perfetto_trace", "performance.pftrace"),
+            ("react_native_hermes_cpu", "cpu.cpuprofile"),
+            ("react_native_profile", "react-profile.json"),
+            ("react_native_diagnostics", "rn-events.ndjson"),
+            ("react_native_hermes_heap_snapshot", "heap.heapsnapshot"),
+        ];
+        for (kind, name) in registered {
+            let path = evidence.join(name);
+            std::fs::write(&path, kind).unwrap();
+            store.register_artifact(&job.id, kind, &path).unwrap();
+        }
+        let request = workers.join("stale.json");
+        let log = workers.join("stale.log");
+        let unrelated_worker_file = workers.join("README.txt");
+        std::fs::write(&request, b"secret request").unwrap();
+        std::fs::write(&log, b"secret log").unwrap();
+        std::fs::write(&unrelated_worker_file, b"keep").unwrap();
+        drop(store);
 
         let result = erase_sensitive_files(&root).unwrap();
-        assert_eq!(result.removed_files, 2);
+        assert_eq!(result.removed_files, 8);
         assert!(!screenshot.exists());
-        assert!(!ui_tree.exists());
-        assert!(trace.exists());
+        for (_, name) in registered {
+            assert!(!evidence.join(name).exists());
+        }
+        assert!(!request.exists());
+        assert!(!log.exists());
+        assert!(unrelated_trace.exists());
+        assert!(unrelated_worker_file.exists());
         assert!(!result.full_reset);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_index_hashes_traversal_run_ids_and_stays_canonically_contained() {
+        let root = temporary_workspace("diagnostic-index-traversal");
+        let managed_results = root.join("results");
+        let results = managed_results.join("runs/job");
+        std::fs::create_dir_all(&results).unwrap();
+        let path =
+            diagnostic_index_path(&managed_results, &results, "../../outside/../persisted-run")
+                .unwrap();
+        let canonical_parent = path.parent().unwrap().canonicalize().unwrap();
+        let canonical_index_root = results.join("diagnostic-index").canonicalize().unwrap();
+        assert!(canonical_parent.starts_with(&canonical_index_root));
+        assert_eq!(
+            canonical_parent.parent(),
+            Some(canonical_index_root.as_path())
+        );
+        assert_eq!(
+            canonical_parent
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .len(),
+            64
+        );
+        assert!(!root.join("outside").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_request_is_private_consumed_after_deserialization_and_logs_are_bounded() {
+        let root = temporary_workspace("worker-request");
+        let workers = root.join(".reactor/runtime/workers");
+        std::fs::create_dir_all(&workers).unwrap();
+        let request_path = workers.join("job.json");
+        let request = WorkerRequest::Ios {
+            request: IosRunRequest {
+                workspace: root.clone(),
+                flow_lock: root.join("flow.lock.json"),
+                framework: "react-native".to_owned(),
+                scenario: "list".to_owned(),
+                device_id: "simulator".to_owned(),
+                duration_ms: 1_000,
+            },
+        };
+        write_worker_request(&request_path, &request).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&request_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        let taken = take_worker_request(&request_path).unwrap();
+        assert!(matches!(taken, WorkerRequest::Ios { .. }));
+        assert!(!request_path.exists());
+
+        for index in 0..25 {
+            std::fs::write(workers.join(format!("{index:02}.log")), b"log").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        prune_worker_logs(&workers, MAX_WORKER_LOG_FILES).unwrap();
+        let log_count = std::fs::read_dir(&workers)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(std::ffi::OsStr::to_str) == Some("log")
+            })
+            .count();
+        assert_eq!(log_count, MAX_WORKER_LOG_FILES);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3306,6 +4143,16 @@ mod tests {
         assert!(result.failure.is_some());
         assert!(result.trial.is_none());
         assert_eq!(audit.len(), MAX_FLOW_REPAIR_ATTEMPTS as usize);
+    }
+
+    #[test]
+    fn diagnostic_track_mapping_keeps_numeric_ids_separate_from_ui_kinds() {
+        assert_eq!(diagnostic_track_kind("events"), Some("runtime_events"));
+        assert_eq!(diagnostic_track_kind("react"), Some("react_commits"));
+        assert_eq!(diagnostic_track_kind("cpu"), Some("js_samples"));
+        assert_eq!(diagnostic_track_kind("correlations"), None);
+        assert_eq!(diagnostic_state("unavailable"), "unavailable");
+        assert_eq!(diagnostic_ui_tracks()[0].0, "iterations");
     }
 
     #[tokio::test]

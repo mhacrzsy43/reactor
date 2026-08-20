@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "runId": "fixture-diagnose",
+  "createdAt": "2026-08-20T00:00:00Z",
+  "framework": "react-native",
+  "platform": "android",
+  "scenario": "list",
+  "adapter": "perfetto",
+  "buildMode": "release",
+  "flowHash": "fixture-flow",
+  "runMode": "diagnose",
+  "diagnosticPlan": {
+    "schemaVersion": 1,
+    "mode": "companion",
+    "collectors": [
+      {
+        "collector": "hermes-cpu-v1",
+        "required": true
+      }
+    ],
+    "resourceLimits": {
+      "maxDurationMs": 60000,
+      "maxArtifactBytes": 268435456,
+      "maxEvents": 500000,
+      "maxSamples": 2000000
+    }
+  },
+  "buildIdentity": {
+    "schemaVersion": 1,
+    "appVersion": "1.0",
+    "reactNativeVersion": "0.87.0",
+    "reactVersion": "19.2.0",
+    "hermesVersion": "0.14",
+    "reactorSdkVersion": "1.0.0",
+    "variant": "releaseDiagnostic",
+    "optimizationMode": "optimized",
+    "bundleSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "binarySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "capabilities": [
+      "hermes_cpu"
+    ],
+    "fingerprint": "fixture-build-fingerprint"
+  },
+  "artifacts": [
+    {
+      "path": "artifacts/hermes.cpuprofile",
+      "format": "hermes-cpu-profile",
+      "sizeBytes": 42,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "producer": "reactor-rn-sdk",
+      "producerVersion": "1.0.0",
+      "captureMethod": "hermes-public-sampling-profiler",
+      "integrity": "complete"
+    }
+  ],
+  "frameworkDiagnostics": {
+    "reactNative": {
+      "collectors": {
+        "hermes-cpu-v1": {
+          "status": "collected",
+          "artifacts": [
+            {
+              "path": "artifacts/hermes.cpuprofile",
+              "format": "hermes-cpu-profile",
+              "sizeBytes": 42,
+              "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "producer": "reactor-rn-sdk",
+              "producerVersion": "1.0.0",
+              "captureMethod": "hermes-public-sampling-profiler",
+              "integrity": "complete"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "device": {
+    "refreshRate": 60,
+    "id": "emulator-5554",
+    "osVersion": "36",
+    "physical": false
+  },
+  "source": {
+    "synthetic": false
+  },
+  "iterations": [],
+  "summary": {
+    "iterationCount": 0,
+    "successfulIterationCount": 0
+  },
+  "warnings": []
+}

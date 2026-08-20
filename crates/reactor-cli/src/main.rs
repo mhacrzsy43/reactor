@@ -1,15 +1,17 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io::Read, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use reactor_ai::{FlowAiProvider, FlowGenerationRequest, OpenAiCompatibleProvider};
 use reactor_analysis::{
-    CiReport, RegressionPolicy, analyze_pair, analyze_profile_json, apply_source_map_json,
-    diff_profile_reports, render_ci_html, render_ci_junit,
+    CiReport, DiagnosticRegressionEvidence, DiagnosticRegressionPolicy, RegressionPolicy,
+    analyze_diagnostic_regression, analyze_pair, analyze_profile_json, apply_source_map_json,
+    check_compatibility, diff_profile_reports, render_ci_html, render_ci_junit,
 };
-use reactor_core::{compile_maestro, render_html_report};
+use reactor_core::{compile_maestro, render_diagnostic_regression_html, render_html_report};
 use reactor_protocol::{
-    Flow, FlowLock, FlowTrialEvidence, GenerationProvenance, NormalizedResult, Platform,
-    validate_flow,
+    ArtifactIntegrity, DiagnosticCaptureMode, DiagnosticCollectorPlanV1, DiagnosticPlanV1,
+    DiagnosticResourceLimitsV1, Flow, FlowLock, FlowTrialEvidence, GenerationProvenance,
+    NormalizedResult, Platform, RunMode, validate_flow,
 };
 use reactor_runner::{
     AndroidLeakTestPlan, AndroidRunRequest, IosRunRequest, cancel_persisted_job,
@@ -18,6 +20,7 @@ use reactor_runner::{
     verify_job_artifacts,
 };
 use reactor_toolchain::{ManagedToolsManifest, SetupOptions, setup};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -159,6 +162,12 @@ enum Command {
         duration_ms: u64,
         #[arg(long, default_value_t = 10)]
         iterations: u32,
+        /// Run a probe-enabled diagnostic measurement instead of an official benchmark.
+        #[arg(long)]
+        diagnose: bool,
+        /// Fail the diagnostic run when Hermes CPU collection is unavailable or fails.
+        #[arg(long, requires = "diagnose")]
+        diagnostic_required: bool,
         /// Also run the measured Flow repeatedly in one process and capture memory checkpoints.
         #[arg(long)]
         leak_cycles: Option<u32>,
@@ -187,6 +196,27 @@ enum Command {
         output_dir: PathBuf,
         #[arg(long, default_value = "Reactor 跨框架性能对比")]
         title: String,
+    },
+    /// Compare managed diagnostic evidence associated with compatible normalized results.
+    DiagnosticRegression {
+        /// Baseline `NormalizedResult` JSON used to establish compatibility.
+        #[arg(long)]
+        baseline_result: PathBuf,
+        /// Current `NormalizedResult` JSON used to establish compatibility.
+        #[arg(long)]
+        current_result: PathBuf,
+        /// Baseline diagnostic evidence v1 JSON derived from managed artifacts.
+        #[arg(long)]
+        baseline_evidence: PathBuf,
+        /// Current diagnostic evidence v1 JSON derived from managed artifacts.
+        #[arg(long)]
+        current_evidence: PathBuf,
+        /// Directory for diagnostic-regression.json and diagnostic-regression.html.
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Optional `DiagnosticRegressionPolicy` JSON.
+        #[arg(long)]
+        policy: Option<PathBuf>,
     },
     /// Compare normalized results and optional component profiles for CI.
     Ci {
@@ -392,16 +422,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             workspace,
             duration_ms,
             iterations,
+            diagnose,
+            diagnostic_required,
             leak_cycles,
         } => {
+            let effective_iterations = if diagnose {
+                iterations.min(3)
+            } else {
+                iterations
+            };
+            let effective_duration_ms = if diagnose {
+                duration_ms.min((5 * 60 * 1_000) / u64::from(effective_iterations.max(1)))
+            } else {
+                duration_ms
+            };
+            let diagnostic_plan = diagnose.then(|| DiagnosticPlanV1 {
+                schema_version: 1,
+                mode: DiagnosticCaptureMode::InBand,
+                collectors: vec![DiagnosticCollectorPlanV1 {
+                    collector: "hermes-cpu".to_owned(),
+                    required: diagnostic_required,
+                }],
+                resource_limits: DiagnosticResourceLimitsV1 {
+                    max_duration_ms: effective_duration_ms
+                        .saturating_mul(u64::from(effective_iterations)),
+                    max_artifact_bytes: 256 * 1024 * 1024,
+                    max_events: 500_000,
+                    max_samples: 2_000_000,
+                },
+            });
             let result = run_android(&AndroidRunRequest {
                 workspace,
                 flow_lock,
                 framework,
                 scenario,
                 device_id: device,
-                duration_ms,
-                iteration_count: iterations,
+                duration_ms: effective_duration_ms,
+                iteration_count: effective_iterations,
+                run_mode: if diagnose {
+                    RunMode::Diagnose
+                } else {
+                    RunMode::Benchmark
+                },
+                diagnostic_plan,
                 leak_test: leak_cycles.map(|cycles| AndroidLeakTestPlan {
                     cycles,
                     checkpoint_every: 2,
@@ -459,6 +522,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("{}", output_dir.display());
         }
+        Command::DiagnosticRegression {
+            baseline_result,
+            current_result,
+            baseline_evidence,
+            current_evidence,
+            output_dir,
+            policy,
+        } => {
+            let report = run_diagnostic_regression(
+                &baseline_result,
+                &current_result,
+                &baseline_evidence,
+                &current_evidence,
+                &output_dir,
+                policy.as_ref(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Ci {
             baseline,
             current,
@@ -480,6 +561,117 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             std::process::exit(i32::from(report.exit_code));
         }
+    }
+    Ok(())
+}
+
+fn run_diagnostic_regression(
+    baseline_result_path: &PathBuf,
+    current_result_path: &PathBuf,
+    baseline_evidence_path: &PathBuf,
+    current_evidence_path: &PathBuf,
+    output_dir: &PathBuf,
+    policy_path: Option<&PathBuf>,
+) -> Result<reactor_analysis::DiagnosticRegressionReport, Box<dyn std::error::Error>> {
+    let baseline_results = read_normalized_results(baseline_result_path)?;
+    let current_results = read_normalized_results(current_result_path)?;
+    if baseline_results.len() != 1 || current_results.len() != 1 {
+        return Err(
+            "diagnostic regression requires exactly one baseline and current result".into(),
+        );
+    }
+    let baseline = &baseline_results[0];
+    let current = &current_results[0];
+    validate_managed_evidence_path(baseline, baseline_result_path, baseline_evidence_path)?;
+    validate_managed_evidence_path(current, current_result_path, current_evidence_path)?;
+    let baseline_evidence: DiagnosticRegressionEvidence =
+        serde_json::from_slice(&fs::read(baseline_evidence_path)?)?;
+    let current_evidence: DiagnosticRegressionEvidence =
+        serde_json::from_slice(&fs::read(current_evidence_path)?)?;
+    if baseline_evidence.run_id != baseline.run_id {
+        return Err("baseline diagnostic evidence runId does not match baseline result".into());
+    }
+    if current_evidence.run_id != current.run_id {
+        return Err("current diagnostic evidence runId does not match current result".into());
+    }
+    let policy = policy_path.map_or_else(
+        || Ok(DiagnosticRegressionPolicy::default()),
+        |path| {
+            serde_json::from_slice::<DiagnosticRegressionPolicy>(&fs::read(path)?)
+                .map_err(Box::<dyn std::error::Error>::from)
+        },
+    )?;
+    let report = analyze_diagnostic_regression(
+        &baseline_evidence,
+        &current_evidence,
+        check_compatibility(baseline, current),
+        policy,
+    )?;
+    fs::create_dir_all(output_dir)?;
+    write_json(&output_dir.join("diagnostic-regression.json"), &report)?;
+    fs::write(
+        output_dir.join("diagnostic-regression.html"),
+        render_diagnostic_regression_html(&report),
+    )?;
+    Ok(report)
+}
+
+fn validate_managed_evidence_path(
+    result: &NormalizedResult,
+    result_path: &std::path::Path,
+    evidence_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result_dir = result_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let canonical_evidence = evidence_path.canonicalize()?;
+    let artifact = result.artifacts.iter().find(|artifact| {
+        artifact.format == "reactor-diagnostic-regression-evidence-v1"
+            && artifact.integrity == ArtifactIntegrity::Complete
+            && result_dir
+                .join(&artifact.path)
+                .canonicalize()
+                .is_ok_and(|path| path == canonical_evidence)
+    });
+    let Some(artifact) = artifact else {
+        return Err(format!(
+            "diagnostic evidence {} must be a complete reactor-diagnostic-regression-evidence-v1 artifact registered by result {}",
+            evidence_path.display(),
+            result.run_id
+        )
+        .into());
+    };
+    verify_artifact_ref(artifact, &canonical_evidence)?;
+    Ok(())
+}
+
+fn verify_artifact_ref(
+    artifact: &reactor_protocol::ArtifactRef,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() != artifact.size_bytes {
+        return Err(format!(
+            "artifact {} size mismatch: expected {}, found {}",
+            artifact.path,
+            artifact.size_bytes,
+            metadata.len()
+        )
+        .into());
+    }
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != artifact.sha256.to_ascii_lowercase() {
+        return Err(format!("artifact {} SHA-256 mismatch", artifact.path).into());
     }
     Ok(())
 }
@@ -512,10 +704,15 @@ fn run_ci(
             let baseline = baseline_results
                 .iter()
                 .find(|candidate| candidate.framework == current.framework)
-                .unwrap_or(&baseline_results[0]);
-            analyze_pair(baseline, current, &policy)
+                .ok_or_else(|| {
+                    format!(
+                        "CI baseline has no result for current framework {}",
+                        current.framework
+                    )
+                })?;
+            Ok(analyze_pair(baseline, current, &policy))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let profile_diff =
         read_profile_diff(baseline_profile_path, current_profile_path, source_map_path)?;
     let report = CiReport::new(analyses, profile_diff);
@@ -779,6 +976,48 @@ mod tests {
         let mut missing_app = result();
         missing_app.app_version = None;
         assert!(validation_error(&[missing_app]).contains("application id and version"));
+    }
+
+    #[test]
+    fn diagnostic_evidence_must_be_registered_and_complete() {
+        let directory = std::env::temp_dir().join(format!(
+            "reactor-diagnostic-evidence-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let result_path = directory.join("result.json");
+        let evidence_path = directory.join("evidence.json");
+        fs::write(&evidence_path, b"{}").unwrap();
+        let mut result = result();
+        result.artifacts.push(reactor_protocol::ArtifactRef {
+            path: "evidence.json".to_owned(),
+            format: "reactor-diagnostic-regression-evidence-v1".to_owned(),
+            size_bytes: 2,
+            sha256: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a".to_owned(),
+            producer: "fixture".to_owned(),
+            producer_version: "1".to_owned(),
+            capture_method: "fixture".to_owned(),
+            integrity: ArtifactIntegrity::Complete,
+            time_range: None,
+        });
+
+        assert!(validate_managed_evidence_path(&result, &result_path, &evidence_path).is_ok());
+        fs::write(&evidence_path, b"tampered").unwrap();
+        assert!(
+            validate_managed_evidence_path(&result, &result_path, &evidence_path)
+                .unwrap_err()
+                .to_string()
+                .contains("size mismatch")
+        );
+        fs::write(&evidence_path, b"{}").unwrap();
+        result.artifacts[0].integrity = ArtifactIntegrity::Partial;
+        assert!(
+            validate_managed_evidence_path(&result, &result_path, &evidence_path)
+                .unwrap_err()
+                .to_string()
+                .contains("must be a complete")
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -6,7 +6,9 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use reactor_analysis::check_compatibility;
+use reactor_protocol::{NormalizedResult, RunMode};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -127,11 +129,40 @@ pub struct ArtifactIssue {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibleBaseline {
+    pub run_id: String,
+    pub job_id: String,
+    pub created_at: DateTime<Utc>,
+    pub result: NormalizedResult,
+}
+
+#[derive(Debug, Clone)]
+struct CompatibilityFacts {
+    run_id: String,
+    job_id: String,
+    framework: String,
+    platform: String,
+    scenario: String,
+    flow_hash: String,
+    adapter: String,
+    build_mode: String,
+    run_mode: RunMode,
+    device_id: Option<String>,
+    device_physical: Option<bool>,
+    os_version: Option<String>,
+    refresh_rate_millihz: i64,
+    build_fingerprint: Option<String>,
+    diagnostic_class: String,
+    synthetic: bool,
+}
+
 pub struct Store {
     connection: Connection,
 }
 
-const DATABASE_SCHEMA_VERSION: i64 = 2;
+const DATABASE_SCHEMA_VERSION: i64 = 3;
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Error)]
@@ -244,8 +275,181 @@ fn migrate(connection: &mut Connection, path: &Path) -> Result<(), StoreError> {
         )?;
     }
 
+    if current_version < 3 {
+        migrate_result_compatibility_facts(&transaction)?;
+        backfill_compatibility_facts(&transaction)?;
+    }
+
     transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
     transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_result_compatibility_facts(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS result_compatibility_facts (
+           run_id TEXT PRIMARY KEY REFERENCES results(run_id) ON DELETE CASCADE,
+           job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+           framework TEXT NOT NULL,
+           platform TEXT NOT NULL,
+           scenario TEXT NOT NULL,
+           flow_hash TEXT NOT NULL,
+           adapter TEXT NOT NULL,
+           build_mode TEXT NOT NULL,
+           run_mode TEXT NOT NULL,
+           device_id TEXT,
+           device_physical INTEGER,
+           os_version TEXT,
+           refresh_rate_millihz INTEGER NOT NULL,
+           build_fingerprint TEXT,
+           diagnostic_class TEXT NOT NULL,
+           synthetic INTEGER NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS compatibility_lookup ON result_compatibility_facts(
+           framework, platform, scenario, flow_hash, adapter, build_mode, run_mode,
+           device_id, device_physical, os_version, refresh_rate_millihz,
+           build_fingerprint, diagnostic_class, synthetic, created_at DESC
+         );
+         CREATE INDEX IF NOT EXISTS compatibility_by_job
+           ON result_compatibility_facts(job_id, created_at DESC);",
+    )?;
+    Ok(())
+}
+
+fn backfill_compatibility_facts(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let rows = {
+        let mut statement = transaction
+            .prepare("SELECT run_id, job_id, device_id, payload_json, created_at FROM results")?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (run_id, job_id, device_id, payload, created_at) in rows {
+        let Ok(result) = serde_json::from_str::<NormalizedResult>(&payload) else {
+            continue;
+        };
+        if result.run_id != run_id {
+            continue;
+        }
+        let facts = compatibility_facts(&job_id, device_id.as_deref(), &result);
+        insert_compatibility_facts(transaction, &facts, &created_at)?;
+    }
+    Ok(())
+}
+
+fn refresh_rate_millihz(refresh_rate: f64) -> i64 {
+    if !refresh_rate.is_finite() || refresh_rate <= 0.0 {
+        return 0;
+    }
+    format!("{:.0}", refresh_rate * 1_000.0)
+        .parse()
+        .unwrap_or(i64::MAX)
+}
+
+fn compatibility_facts(
+    job_id: &str,
+    indexed_device_id: Option<&str>,
+    result: &NormalizedResult,
+) -> CompatibilityFacts {
+    let mut collectors = result
+        .diagnostic_plan
+        .as_ref()
+        .map(|plan| {
+            plan.collectors
+                .iter()
+                .map(|collector| format!("{}:{}", collector.collector, collector.required))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    collectors.sort();
+    let diagnostic_class = format!(
+        "{}:{}",
+        result
+            .diagnostic_plan
+            .as_ref()
+            .map_or_else(|| "disabled".to_owned(), |plan| format!("{:?}", plan.mode)),
+        collectors.join(",")
+    );
+    CompatibilityFacts {
+        run_id: result.run_id.clone(),
+        job_id: job_id.to_owned(),
+        framework: result.framework.clone(),
+        platform: result.platform.clone(),
+        scenario: result.scenario.clone(),
+        flow_hash: result.flow_hash.clone(),
+        adapter: result.adapter.clone(),
+        build_mode: result.build_mode.clone(),
+        run_mode: result.run_mode,
+        device_id: result
+            .device
+            .id
+            .clone()
+            .or_else(|| indexed_device_id.map(str::to_owned)),
+        device_physical: result.device.physical,
+        os_version: result.device.os_version.clone(),
+        refresh_rate_millihz: refresh_rate_millihz(result.device.refresh_rate),
+        build_fingerprint: result
+            .build_identity
+            .as_ref()
+            .map(|identity| identity.fingerprint.clone()),
+        diagnostic_class,
+        synthetic: result.source.synthetic,
+    }
+}
+
+fn insert_compatibility_facts(
+    transaction: &Transaction<'_>,
+    facts: &CompatibilityFacts,
+    created_at: &str,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO result_compatibility_facts(
+           run_id, job_id, framework, platform, scenario, flow_hash, adapter, build_mode,
+           run_mode, device_id, device_physical, os_version, refresh_rate_millihz,
+           build_fingerprint, diagnostic_class, synthetic, created_at
+         ) VALUES(
+           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+         ) ON CONFLICT(run_id) DO UPDATE SET
+           job_id=excluded.job_id, framework=excluded.framework, platform=excluded.platform,
+           scenario=excluded.scenario, flow_hash=excluded.flow_hash, adapter=excluded.adapter,
+           build_mode=excluded.build_mode, run_mode=excluded.run_mode,
+           device_id=excluded.device_id, device_physical=excluded.device_physical,
+           os_version=excluded.os_version, refresh_rate_millihz=excluded.refresh_rate_millihz,
+           build_fingerprint=excluded.build_fingerprint,
+           diagnostic_class=excluded.diagnostic_class, synthetic=excluded.synthetic,
+           created_at=excluded.created_at",
+        params![
+            facts.run_id,
+            facts.job_id,
+            facts.framework,
+            facts.platform,
+            facts.scenario,
+            facts.flow_hash,
+            facts.adapter,
+            facts.build_mode,
+            match facts.run_mode {
+                RunMode::Benchmark => "benchmark",
+                RunMode::Diagnose => "diagnose",
+            },
+            facts.device_id,
+            facts.device_physical,
+            facts.os_version,
+            facts.refresh_rate_millihz,
+            facts.build_fingerprint,
+            facts.diagnostic_class,
+            facts.synthetic,
+            created_at,
+        ],
+    )?;
     Ok(())
 }
 
@@ -715,20 +919,122 @@ impl Store {
         device_id: Option<&str>,
         payload: &Value,
     ) -> Result<(), StoreError> {
-        self.connection.execute(
+        let result: NormalizedResult = serde_json::from_value(payload.clone())?;
+        if result.run_id != run_id {
+            return Err(StoreError::Json(serde_json::Error::io(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "indexed run id does not match normalized result",
+                ),
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        let facts = compatibility_facts(job_id, device_id, &result);
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO results(run_id, job_id, device_id, payload_json, created_at)
              VALUES(?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(run_id) DO UPDATE SET payload_json=excluded.payload_json,
-               device_id=excluded.device_id",
+               device_id=excluded.device_id, job_id=excluded.job_id",
             params![
                 run_id,
                 job_id,
                 device_id,
                 serde_json::to_string(payload)?,
-                Utc::now().to_rfc3339(),
+                now,
             ],
         )?;
+        insert_compatibility_facts(&transaction, &facts, &now)?;
+        transaction.commit()?;
         Ok(())
+    }
+
+    /// Lists strictly compatible older results newest first. The indexed facts narrow the search;
+    /// Rust compatibility remains authoritative before any baseline is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the current result is missing or persisted data is invalid.
+    pub fn list_compatible_baselines(
+        &self,
+        current_job_id: &str,
+        run_id: &str,
+        limit: u32,
+    ) -> Result<Vec<CompatibleBaseline>, StoreError> {
+        let current_payload = self
+            .connection
+            .query_row(
+                "SELECT payload_json FROM results WHERE job_id=?1 AND run_id=?2",
+                params![current_job_id, run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::UnknownArtifact(format!("result {run_id}")))?;
+        let current: NormalizedResult = serde_json::from_str(&current_payload)?;
+        let facts = compatibility_facts(current_job_id, current.device.id.as_deref(), &current);
+        if facts.synthetic {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT f.run_id, f.job_id, f.created_at, r.payload_json
+             FROM result_compatibility_facts f
+             JOIN results r ON r.run_id=f.run_id
+             WHERE f.job_id<>?1 AND f.run_id<>?2 AND f.synthetic=0
+               AND f.framework=?3 AND f.platform=?4 AND f.scenario=?5 AND f.flow_hash=?6
+               AND f.adapter=?7 AND f.build_mode=?8 AND f.run_mode=?9
+               AND f.device_id IS ?10 AND f.device_physical IS ?11 AND f.os_version IS ?12
+               AND f.refresh_rate_millihz=?13 AND f.build_fingerprint IS ?14
+               AND f.diagnostic_class=?15
+             ORDER BY f.created_at DESC, f.run_id DESC",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    current_job_id,
+                    run_id,
+                    facts.framework,
+                    facts.platform,
+                    facts.scenario,
+                    facts.flow_hash,
+                    facts.adapter,
+                    facts.build_mode,
+                    match facts.run_mode {
+                        RunMode::Benchmark => "benchmark",
+                        RunMode::Diagnose => "diagnose",
+                    },
+                    facts.device_id,
+                    facts.device_physical,
+                    facts.os_version,
+                    facts.refresh_rate_millihz,
+                    facts.build_fingerprint,
+                    facts.diagnostic_class,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut baselines = Vec::new();
+        for (candidate_run_id, candidate_job_id, created_at, payload) in rows {
+            let candidate: NormalizedResult = serde_json::from_str(&payload)?;
+            if check_compatibility(&candidate, &current).compatible {
+                baselines.push(CompatibleBaseline {
+                    run_id: candidate_run_id,
+                    job_id: candidate_job_id,
+                    created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+                    result: candidate,
+                });
+                if baselines.len() >= limit as usize {
+                    break;
+                }
+            }
+        }
+        Ok(baselines)
     }
 
     fn artifact_by_path(&self, job_id: &str, path: &Path) -> Result<Option<Artifact>, StoreError> {
@@ -1113,6 +1419,94 @@ mod tests {
         );
         let failed = store.fail(&job.id, "stopped").unwrap();
         assert_eq!(failed.worker_pid, None);
+    }
+
+    #[test]
+    fn lists_only_strictly_compatible_baselines_beyond_first_history_page() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let template: NormalizedResult = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/result-v1-diagnostics.json"
+        ))
+        .unwrap();
+        let mut expected = Vec::new();
+        for index in 0..105 {
+            let job = store
+                .create_job(&serde_json::json!({ "index": index }))
+                .unwrap();
+            let mut result = template.clone();
+            result.run_id = format!("run-{index:03}");
+            if index % 25 == 0 {
+                expected.push(result.run_id.clone());
+            } else {
+                result.flow_hash = format!("different-{index}");
+            }
+            store
+                .index_result(
+                    &job.id,
+                    &result.run_id,
+                    result.device.id.as_deref(),
+                    &serde_json::to_value(&result).unwrap(),
+                )
+                .unwrap();
+        }
+        let current_job = store
+            .create_job(&serde_json::json!({ "current": true }))
+            .unwrap();
+        let mut current = template;
+        current.run_id = "current".to_owned();
+        store
+            .index_result(
+                &current_job.id,
+                &current.run_id,
+                current.device.id.as_deref(),
+                &serde_json::to_value(&current).unwrap(),
+            )
+            .unwrap();
+        let baselines = store
+            .list_compatible_baselines(&current_job.id, &current.run_id, 10)
+            .unwrap();
+        assert_eq!(baselines.len(), expected.len());
+        assert!(
+            baselines
+                .iter()
+                .all(|baseline| expected.contains(&baseline.run_id))
+        );
+    }
+
+    #[test]
+    fn index_result_updates_payload_and_compatibility_facts_atomically() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let job = store.create_job(&serde_json::json!({})).unwrap();
+        let mut result: NormalizedResult = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/result-v1-diagnostics.json"
+        ))
+        .unwrap();
+        store
+            .index_result(
+                &job.id,
+                &result.run_id,
+                result.device.id.as_deref(),
+                &serde_json::to_value(&result).unwrap(),
+            )
+            .unwrap();
+        result.flow_hash = "changed".to_owned();
+        store
+            .index_result(
+                &job.id,
+                &result.run_id,
+                result.device.id.as_deref(),
+                &serde_json::to_value(&result).unwrap(),
+            )
+            .unwrap();
+        let stored: String = store
+            .connection
+            .query_row(
+                "SELECT flow_hash FROM result_compatibility_facts WHERE run_id=?1",
+                [&result.run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "changed");
     }
 
     #[test]

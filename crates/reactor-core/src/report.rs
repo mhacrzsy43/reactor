@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 
+use reactor_analysis::{DiagnosticRegressionReport, DiagnosticRegressionVerdict};
 use reactor_protocol::NormalizedResult;
 
 /// Renders a self-contained, offline HTML report from normalized results.
@@ -296,6 +297,101 @@ pub fn render_html_report(title: &str, results: &[NormalizedResult]) -> String {
     html
 }
 
+/// Renders a self-contained production report without assigning causality to
+/// threshold hits or temporal candidates.
+#[must_use]
+pub fn render_diagnostic_regression_html(report: &DiagnosticRegressionReport) -> String {
+    let status = match report.verdict {
+        DiagnosticRegressionVerdict::Stable => "STABLE",
+        DiagnosticRegressionVerdict::Regressed => "REGRESSED",
+        DiagnosticRegressionVerdict::Incompatible => "INCOMPATIBLE",
+    };
+    let mut hotspot_rows = String::new();
+    for fact in &report.facts.js_hotspot_deltas {
+        write!(
+            hotspot_rows,
+            "<tr><td><code>{}</code></td><td>{} → {} ({:+})</td><td>{:.2} → {:.2} ({:+.2} ms)</td><td>{:.2} → {:.2} ({:+.2} ms)</td><td>{}</td><td>{:+}</td><td>{} / {}</td></tr>",
+            escape(&fact.identity),
+            fact.baseline_sample_count,
+            fact.current_sample_count,
+            fact.sample_count_delta,
+            fact.baseline_self_time_ms,
+            fact.current_self_time_ms,
+            fact.self_time_delta_ms,
+            fact.baseline_inclusive_time_ms,
+            fact.current_inclusive_time_ms,
+            fact.inclusive_time_delta_ms,
+            fact.selection_share_delta_pct_points.map_or_else(|| "—".to_owned(), |value| format!("{value:+.2} pp")),
+            fact.slow_frame_window_count_delta,
+            fact.added_caller_paths.len(),
+            fact.removed_caller_paths.len(),
+        )
+        .expect("writing to String cannot fail");
+    }
+    let mut cluster_rows = String::new();
+    for fact in &report.facts.slow_frame_cluster_deltas {
+        write!(
+            cluster_rows,
+            "<tr><td><code>{}</code></td><td>{} → {} ({:+})</td><td>{:.2} → {:.2} ({:+.2} ms)</td><td>{}</td></tr>",
+            escape(&fact.signature),
+            fact.baseline_count,
+            fact.current_count,
+            fact.count_delta,
+            fact.baseline_total_duration_ms,
+            fact.current_total_duration_ms,
+            fact.total_duration_delta_ms,
+            if fact.new_cluster { "new" } else if fact.removed_cluster { "removed" } else { "existing" },
+        )
+        .expect("writing to String cannot fail");
+    }
+    let mut hit_items = String::new();
+    for hit in &report.rule_hits {
+        write!(
+            hit_items,
+            "<li><strong>{}</strong><code>{}</code><span>{} threshold gates matched</span></li>",
+            escape(&hit.rule_id),
+            escape(&hit.fact_identity),
+            hit.gates.len(),
+        )
+        .expect("writing to String cannot fail");
+    }
+    if report.rule_hits.is_empty() {
+        hit_items.push_str("<li>No rule hits were emitted.</li>");
+    }
+    let mut candidate_rows = String::new();
+    for candidate in &report.temporal_candidates {
+        write!(
+            candidate_rows,
+            "<tr><td>{:?}</td><td>{:.2}–{:.2} ms</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            candidate.capture,
+            candidate.start_ms,
+            candidate.end_ms,
+            candidate.frame_count,
+            escape(&candidate.component_candidates.join(", ")),
+            escape(&candidate.bottom_up_hotspot_candidates.join(", ")),
+        )
+        .expect("writing to String cannot fail");
+    }
+    let incompatibility = if report.compatibility.compatible {
+        String::new()
+    } else {
+        format!(
+            "<aside class=\"warning\">Compatibility failed: {}. Facts are shown, but rule hits are suppressed.</aside>",
+            escape(&report.compatibility.reasons.join("; "))
+        )
+    };
+    let mut limitations = String::new();
+    for item in &report.limitations {
+        write!(limitations, "<li>{}</li>", escape(item)).expect("writing to String cannot fail");
+    }
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Reactor P3 Diagnostic Regression</title><style>{CSS}</style></head><body><main><header><div><p class=\"eyebrow\">REACTOR · DIAGNOSTIC REGRESSION v{}</p><h1>P3 Diagnostic Regression</h1><p>{} → {}</p></div><span class=\"badge\">{status}</span></header>{incompatibility}<section><h2>Rule hits</h2><p>Threshold classifications only; they do not establish a cause.</p><ul>{hit_items}</ul></section><section><h2>JS hotspot facts</h2><div class=\"table-scroll\"><table><thead><tr><th>Identity</th><th>Samples</th><th>Self</th><th>Inclusive</th><th>Share Δ</th><th>Slow windows Δ</th><th>Caller paths + / −</th></tr></thead><tbody>{hotspot_rows}</tbody></table></div></section><section><h2>Slow-frame cluster facts</h2><div class=\"table-scroll\"><table><thead><tr><th>Signature</th><th>Frames</th><th>Total duration</th><th>State</th></tr></thead><tbody>{cluster_rows}</tbody></table></div></section><section><h2>Temporal candidates</h2><p>Co-occurrence candidates only. No causal relationship is inferred.</p><div class=\"table-scroll\"><table><thead><tr><th>Capture</th><th>Window</th><th>Frames</th><th>Components</th><th>Bottom-up hotspots</th></tr></thead><tbody>{candidate_rows}</tbody></table></div></section><section><h2>Limitations</h2><ul>{limitations}</ul></section><footer>Generated locally from managed/result artifacts. AI did not alter facts or verdicts.</footer></main></body></html>",
+        report.schema_version,
+        escape(&report.baseline_run_id),
+        escape(&report.current_run_id),
+    )
+}
+
 fn number(value: Option<f64>, unit: &str) -> String {
     value.map_or_else(|| "—".to_owned(), |value| format!("{value:.1}{unit}"))
 }
@@ -350,6 +446,11 @@ mod tests {
             adapter: "tour".to_owned(),
             build_mode: "release".to_owned(),
             flow_hash: "abc".to_owned(),
+            run_mode: reactor_protocol::RunMode::Benchmark,
+            diagnostic_plan: None,
+            build_identity: None,
+            artifacts: vec![],
+            framework_diagnostics: None,
             app_id: Some("com.reactor.fixture".to_owned()),
             app_version: Some("1.0 (1)".to_owned()),
             device: DeviceMetadata {

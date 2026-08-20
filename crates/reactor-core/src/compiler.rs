@@ -11,6 +11,7 @@ pub struct CompiledFlow {
     pub measured: String,
     pub teardown: String,
     pub input_bindings: Vec<CompiledInputBinding>,
+    pub expanded_steps: Vec<reactor_protocol::ExpandedFlowStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -46,6 +47,7 @@ pub fn compile_maestro(flow: &Flow) -> Result<CompiledFlow, CompileError> {
         measured,
         teardown,
         input_bindings,
+        expanded_steps: flow.expanded_steps(),
     })
 }
 
@@ -233,6 +235,8 @@ mod tests {
         let output = compile_maestro(&flow).unwrap();
         assert!(output.setup.contains("clearState"));
         assert!(output.measured.contains("tapOn: \"List scenario\""));
+        assert_eq!(output.expanded_steps[0].id, "flow-step:setup[0]");
+        assert_eq!(output.expanded_steps[1].id, "flow-step:measured[0]");
     }
 
     #[test]

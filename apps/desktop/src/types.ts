@@ -342,6 +342,7 @@ export interface IosNativeMetrics {
 }
 
 export interface NormalizedResult {
+  jobId?: string;
   runId: string;
   framework: string;
   platform: string;
@@ -357,7 +358,12 @@ export interface NormalizedResult {
     physical?: boolean;
     refreshRate?: number;
   };
-  source: { synthetic: boolean; status?: string };
+  source: {
+    name?: string;
+    status?: string;
+    rawFile?: string;
+    synthetic: boolean;
+  };
   androidNative?: AndroidNativeMetrics;
   iosNative?: IosNativeMetrics;
   summary: ResultSummary;
@@ -481,6 +487,35 @@ export interface AnalysisExplanation {
   nextSteps: { title: string; text: string }[];
 }
 
+export type ProfileEvidenceKind = "react" | "hermes" | "baseline";
+export type EvidenceBusinessState = "loading" | "available" | "not-collected" | "unsupported" | "unverified" | "error";
+export type ProfileEvidenceSource = "managed-run" | "local-file";
+
+export interface ProfileEvidence {
+  kind: ProfileEvidenceKind;
+  source: ProfileEvidenceSource;
+  state: EvidenceBusinessState;
+  report?: DiagnosticProfileReport;
+  json?: string;
+  fileName?: string;
+  rawFile?: string;
+  runId?: string;
+  flowHash?: string;
+  collector?: string;
+  producer?: string;
+  producerVersion?: string;
+  sameRunVerified: boolean;
+  error?: string;
+}
+
+export interface SourceMapEvidence {
+  state: "not-collected" | "loading" | "available" | "error";
+  fileName?: string;
+  json?: string;
+  mappedCount: number;
+  error?: string;
+}
+
 export interface SourceLocation {
   file: string;
   line?: number;
@@ -590,4 +625,115 @@ export interface ProfileDiffReport {
   reasons: string[];
   components: ComponentProfileDiff[];
   regressionCount: number;
+}
+
+export type TimelineTrackKind = "iterations" | "frames" | "react_commits" | "js_samples" | "runtime_events";
+export type TimelineAvailabilityState = "available" | "not_collected" | "unsupported" | "failed" | "unavailable";
+export type TimelineCorrelationConfidence = "high" | "medium" | "low" | "unavailable";
+
+export interface TimelineRange {
+  startMs: number;
+  endMs: number;
+}
+
+export interface TimelineTrackAvailability {
+  kind: TimelineTrackKind;
+  trackId?: number;
+  state: TimelineAvailabilityState;
+  label?: string;
+  reason?: string;
+  count?: number;
+}
+
+export interface DiagnosticManifest {
+  schemaVersion: number;
+  runId: string;
+  range?: TimelineRange;
+  tracks: TimelineTrackAvailability[];
+  clock?: {
+    quality?: "good" | "fair" | "poor" | "unavailable";
+    uncertaintyMs?: number;
+    reason?: string;
+  };
+  warnings?: string[];
+}
+
+export interface TimelineOverviewBucket {
+  startMs: number;
+  endMs: number;
+  count: number;
+  maxDurationMs?: number;
+  slowCount?: number;
+}
+
+export interface TimelineOverviewTrack {
+  kind: TimelineTrackKind;
+  buckets: TimelineOverviewBucket[];
+}
+
+export interface TimelineOverview {
+  range: TimelineRange;
+  tracks: TimelineOverviewTrack[];
+}
+
+export interface TimelineItem {
+  id: number;
+  trackId: number;
+  itemType: string;
+  track: TimelineTrackKind;
+  startMs: number;
+  endMs: number;
+  label: string;
+  detail?: string;
+  durationMs?: number;
+  severity?: "normal" | "slow" | "warning" | "error";
+  data?: Record<string, unknown>;
+}
+
+export interface TimelineWindow {
+  range: TimelineRange;
+  items: TimelineItem[];
+  truncated?: boolean;
+  warnings?: string[];
+}
+
+export interface DiagnosticCorrelationCandidate {
+  id?: string;
+  itemId?: string;
+  track?: TimelineTrackKind;
+  label: string;
+  relation?: "overlaps" | "adjacent_before" | "adjacent_after" | "contains" | "contained_by" | "unavailable";
+  confidence: TimelineCorrelationConfidence;
+  overlapRatio?: number;
+  gapMs?: number;
+  reasons: string[];
+}
+
+export interface DiagnosticSelectionAnalysis {
+  range: TimelineRange;
+  summary?: string;
+  eventCount?: number;
+  frameCount?: number;
+  slowFrameCount?: number;
+  reactCommitCount?: number;
+  cpuSampleCount?: number;
+  topFunctions?: Array<{ name: string; value: number; count: number }>;
+  topComponents?: Array<{ name: string; value: number; count: number }>;
+  availability?: Partial<Record<TimelineTrackKind, TimelineTrackAvailability>>;
+  correlations: DiagnosticCorrelationCandidate[];
+  warnings?: string[];
+}
+
+export interface FrameDrilldown {
+  available: boolean;
+  reason?: string;
+  frameId?: number;
+  startMs?: number;
+  endMs?: number;
+  durationMs?: number;
+  budgetMs?: number;
+  classification?: string;
+  details?: Array<{ label: string; value: string }>;
+  correlations: DiagnosticCorrelationCandidate[];
+  warnings?: string[];
 }

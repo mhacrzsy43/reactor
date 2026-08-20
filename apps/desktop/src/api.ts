@@ -6,9 +6,12 @@ import type {
   JobAnalysis,
   CompiledFlow,
   DemoOutput,
+  DiagnosticManifest,
   DiagnosticProfileReport,
+  DiagnosticSelectionAnalysis,
   DeviceInspectorSnapshot,
   DeviceReplayFrame,
+  FrameDrilldown,
   Flow,
   FlowChange,
   FlowLock,
@@ -22,6 +25,9 @@ import type {
   ProfileDiffReport,
   RedactedUiContext,
   TrialPreparation,
+  TimelineOverview,
+  TimelineRange,
+  TimelineWindow,
 } from "./types";
 
 export interface GenerateInput {
@@ -505,6 +511,45 @@ export async function diffProfileReports(
 ): Promise<ProfileDiffReport> {
   if (!inTauri) throw new Error("Profile 对比请在 Reactor 桌面应用中使用");
   return invoke("diff_profile_reports", { input: { baseline, current } });
+}
+
+export async function getDiagnosticManifest(jobId: string, runId: string): Promise<DiagnosticManifest> {
+  if (!inTauri) throw new Error("统一时间线请在 Reactor 桌面应用中查看");
+  return invoke("getDiagnosticManifest", { input: { jobId, runId } });
+}
+
+export async function getTimelineOverview(
+  jobId: string,
+  runId: string,
+  range: TimelineRange,
+  pixelWidth: number,
+): Promise<TimelineOverview> {
+  if (!inTauri) throw new Error("统一时间线请在 Reactor 桌面应用中查看");
+  return invoke("getTimelineOverview", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs, pixelWidth } });
+}
+
+export async function getTimelineWindow(
+  jobId: string,
+  runId: string,
+  range: TimelineRange,
+  trackIds: number[],
+): Promise<TimelineWindow> {
+  if (!inTauri) throw new Error("统一时间线请在 Reactor 桌面应用中查看");
+  return invoke("getTimelineWindow", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs, trackIds } });
+}
+
+export async function analyzeDiagnosticSelection(
+  jobId: string,
+  runId: string,
+  range: TimelineRange,
+): Promise<DiagnosticSelectionAnalysis> {
+  if (!inTauri) throw new Error("时间段分析请在 Reactor 桌面应用中使用");
+  return invoke("analyzeDiagnosticSelection", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs } });
+}
+
+export async function getFrameDrilldown(jobId: string, runId: string, frameId: number): Promise<FrameDrilldown> {
+  if (!inTauri) throw new Error("帧下钻请在 Reactor 桌面应用中使用");
+  return invoke("getFrameDrilldown", { input: { jobId, runId, frameId } });
 }
 
 export async function getJobSnapshot(

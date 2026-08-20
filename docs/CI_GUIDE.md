@@ -61,3 +61,35 @@ exit "$status"
 ```
 
 不要把退出码 `3` 当成普通回归；它表示实验条件不同，应重新选择兼容基线。
+
+## P3 诊断回归报告
+
+P3 报告复用 `reactor-analysis` 的 JS hotspot 与慢帧聚类算法，但保持三层输出分离：
+
+- `facts`：Self/Inclusive/Sample/选择份额/慢帧窗口/Caller Path 的基线、当前值与 delta，以及慢帧 cluster delta；
+- `ruleHits`：兼容输入上同时通过相对、绝对和最小样本门槛的确定性规则命中；
+- `temporalCandidates`：按时间邻近聚合的候选窗口，不代表组件、函数和慢帧之间存在因果关系。
+
+诊断 evidence 必须使用 `schemaVersion: 1`，符合
+`schemas/reactor-diagnostic-regression-evidence.schema.json`，并以
+`format: reactor-diagnostic-regression-evidence-v1`、`integrity: complete` 登记在对应
+`NormalizedResult.artifacts` 中。CLI 不接受未登记的任意本地文件。
+
+```sh
+./target/release/reactor diagnostic-regression \
+  --baseline-result results/runs/<baseline>/result.json \
+  --current-result results/runs/<current>/result.json \
+  --baseline-evidence results/runs/<baseline>/diagnostic-regression-evidence.json \
+  --current-evidence results/runs/<current>/diagnostic-regression-evidence.json \
+  --output-dir target/reactor-diagnostic-regression
+```
+
+可通过 `--policy policy.json` 覆盖版本化默认门槛。Policy 必须同时给出 JS 的
+`relativeThresholdPct`、`absoluteSelfTimeThresholdMs`、`minCurrentSamples`，以及慢帧的
+`countRelativeThresholdPct`、`durationRelativeThresholdPct`、
+`durationAbsoluteThresholdMs`、`minCurrentFrames` 与 `proximityMs`。
+
+输出为 `diagnostic-regression.json` 和离线 `diagnostic-regression.html`。结果兼容性来自
+两个 `NormalizedResult` 的现有完整兼容检查；不兼容时仍保留事实 delta，但 verdict 为
+`incompatible` 且不产生规则命中。当前命令只消费已经归一化并登记的 managed/result
+artifact，不解析 Perfetto/Hermes 原始二进制，也不把时间重叠解释为根因。

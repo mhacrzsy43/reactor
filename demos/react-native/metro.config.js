@@ -7,8 +7,12 @@ const path = require('path');
  *
  * @type {import('@react-native/metro-config').MetroConfig}
  */
+const reactorSdkRoot = path.resolve(__dirname, '../../packages/reactor-react-native');
+
 const config = {
+  watchFolders: [reactorSdkRoot],
   resolver: {
+    nodeModulesPaths: [path.resolve(__dirname, 'node_modules')],
     resolveRequest(context, moduleName, platform) {
       if (moduleName === './ReactorBenchmarkMode') {
         const fault = process.env.REACTOR_DEMO_FAULT;

@@ -4,6 +4,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import android.os.Debug
+import android.os.SystemClock
 import java.io.File
 
 class ReactorDiagnosticsModule(private val context: ReactApplicationContext) :
@@ -14,7 +15,18 @@ class ReactorDiagnosticsModule(private val context: ReactApplicationContext) :
   override fun getName() = "ReactorDiagnostics"
 
   override fun getConstants(): MutableMap<String, Any> =
-    mutableMapOf("diagnosticBuild" to BuildConfig.REACTOR_DIAGNOSTIC)
+    mutableMapOf(
+      "diagnosticBuild" to BuildConfig.REACTOR_DIAGNOSTIC,
+      "sdkVersion" to "1.0.0",
+      "protocolVersion" to 1,
+      "capabilities" to
+        listOf(
+          "react-profiler",
+          "runtime-events",
+          "hermes-heap-jsi",
+          if (BuildConfig.REACTOR_DIAGNOSTIC) "hermes-cpu-sampling" else "hermes-cpu-unavailable",
+        ),
+    )
 
   private fun evidenceFile(): File {
     val root = context.getExternalFilesDir("reactor") ?: File(context.filesDir, "reactor")
@@ -61,7 +73,11 @@ class ReactorDiagnosticsModule(private val context: ReactApplicationContext) :
   @ReactMethod
   fun appendEvent(kind: String, payloadJson: String) {
     if (!kind.matches(Regex("[a-z_]{1,48}")) || payloadJson.length > 64 * 1024) return
-    val line = "{\"schemaVersion\":1,\"kind\":\"$kind\",\"timestampMs\":${System.currentTimeMillis()},\"payload\":$payloadJson}\n"
+    val line =
+      "{\"schemaVersion\":1,\"kind\":\"$kind\"," +
+        "\"timestampMs\":${System.currentTimeMillis()}," +
+        "\"elapsedRealtimeNanos\":${SystemClock.elapsedRealtimeNanos()}," +
+        "\"payload\":$payloadJson}\n"
     synchronized(lock) {
       evidenceFile().appendText(line)
     }

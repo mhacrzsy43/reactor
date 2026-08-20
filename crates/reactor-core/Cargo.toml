@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 hex.workspace = true
+reactor-analysis = { path = "../reactor-analysis" }
 reactor-protocol = { path = "../reactor-protocol" }
 serde.workspace = true
 serde_json.workspace = true

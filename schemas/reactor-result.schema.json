@@ -13,6 +13,28 @@
     "scenario": { "enum": ["startup", "list", "update", "animation"] },
     "adapter": { "type": "string" },
     "buildMode": { "const": "release" },
+    "flowHash": { "type": "string", "minLength": 1 },
+    "runMode": { "enum": ["benchmark", "diagnose"], "default": "benchmark" },
+    "diagnosticPlan": { "$ref": "#/$defs/diagnosticPlanV1" },
+    "buildIdentity": { "$ref": "#/$defs/buildIdentityV1" },
+    "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactRef" } },
+    "frameworkDiagnostics": {
+      "type": "object",
+      "properties": {
+        "reactNative": {
+          "type": "object",
+          "required": ["collectors"],
+          "properties": {
+            "collectors": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/collectorDiagnostic" }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
     "device": {
       "type": "object",
       "required": ["refreshRate"],
@@ -26,6 +48,94 @@
     "iterations": { "type": "array", "items": { "type": "object" } },
     "summary": { "type": "object" },
     "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "diagnosticPlanV1": {
+      "type": "object",
+      "required": ["schemaVersion", "mode", "collectors", "resourceLimits"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "mode": { "enum": ["disabled", "in_band", "companion"] },
+        "collectors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["collector", "required"],
+            "properties": {
+              "collector": { "type": "string", "minLength": 1 },
+              "required": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "resourceLimits": {
+          "type": "object",
+          "required": ["maxDurationMs", "maxArtifactBytes", "maxEvents", "maxSamples"],
+          "properties": {
+            "maxDurationMs": { "type": "integer", "minimum": 1 },
+            "maxArtifactBytes": { "type": "integer", "minimum": 1 },
+            "maxEvents": { "type": "integer", "minimum": 1 },
+            "maxSamples": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "buildIdentityV1": {
+      "type": "object",
+      "required": ["schemaVersion", "appVersion", "variant", "optimizationMode", "capabilities", "fingerprint"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "appVersion": { "type": "string", "minLength": 1 },
+        "reactNativeVersion": { "type": "string" },
+        "reactVersion": { "type": "string" },
+        "hermesVersion": { "type": "string" },
+        "reactorSdkVersion": { "type": "string" },
+        "variant": { "type": "string", "minLength": 1 },
+        "optimizationMode": { "type": "string", "minLength": 1 },
+        "bundleSha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "binarySha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "fingerprint": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "artifactRef": {
+      "type": "object",
+      "required": ["path", "format", "sizeBytes", "sha256", "producer", "producerVersion", "captureMethod", "integrity"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "not": { "pattern": "^(?:/|[A-Za-z]:[\\\\/])" } },
+        "format": { "type": "string", "minLength": 1 },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "producer": { "type": "string", "minLength": 1 },
+        "producerVersion": { "type": "string", "minLength": 1 },
+        "captureMethod": { "type": "string", "minLength": 1 },
+        "integrity": { "enum": ["complete", "partial", "truncated", "corrupt"] },
+        "timeRange": {
+          "type": "object",
+          "required": ["startNs", "endNs", "clock"],
+          "properties": {
+            "startNs": { "type": "integer", "minimum": 0 },
+            "endNs": { "type": "integer", "minimum": 0 },
+            "clock": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "collectorDiagnostic": {
+      "type": "object",
+      "required": ["status", "artifacts"],
+      "properties": {
+        "status": { "enum": ["collected", "unavailable", "failed", "skipped"] },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactRef" } },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": true
 }

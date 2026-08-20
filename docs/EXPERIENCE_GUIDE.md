@@ -65,15 +65,17 @@ AI 输出分成“已验证事实 / 可能原因 / 建议验证步骤”；未�
 ## 统一性能诊断与 RN 深度分析
 
 1. 打开一级入口 **性能诊断**，在顶部选择 React Native、Flutter 或 Lynx。
-2. “性能总览”自动读取所选框架最近一次可信运行的帧、Jank、CPU、内存和启动指标；点击指标可进入对应的框架诊断路径。
-3. React Native 提供 Render、重复渲染、Hermes/JS CPU、时间线/火焰图、Profile Diff 和源码定位七个视图。
+2. “性能总览”只读取最近 30 个任务中最多 20 个已完成快照；可用 Run 必须有结果、非 `synthetic` 且成功迭代数大于 0。未锁定 Flow 时只称“搜索范围内的可用 Run”，不会声称全局最新。
+3. React Native 提供 Render、可疑渲染规则命中、Hermes/JS CPU、时间线/火焰图、未验证统计差异和源码定位视图。Android `memoryPssMb` 显示为“测后 PSS”。
 4. 导入 React DevTools Profiler JSON：
    `tests/fixtures/react-profiler-regressed.json`。
-5. 可再导入基线：`tests/fixtures/react-profiler-baseline.json`；规则发现支持直接下钻到异常 Commit 和参与渲染的组件。
+5. 可再导入基线：`tests/fixtures/react-profiler-baseline.json`；本地文件始终标记为“导入上下文，Flow 身份未验证”，因此差异不称为回归。
 6. 独立导入 `tests/fixtures/hermes-cpu-profile.json` 可同时保留 React Render 与 Hermes/Chrome CPU 热点证据。
 7. 要体验 Source Map，导入 `tests/fixtures/hermes-bundle-profile.json`，再导入
    `tests/fixtures/hermes-bundle.js.map`；位置会从 `index.bundle:1:1` 映射到
-   `src/screens/CatalogScreen.tsx:1:1`。
+   `src/screens/CatalogScreen.tsx:1:1`。页面会区分未导入、已加载但 0 个位置可映射和成功映射。
+
+切换 Flow 或框架会清理当前 Profile、Source Map、统计差异和选中 Commit；陈旧异步解析结果不会覆盖新上下文。受管运行时证据缺失时，应返回 Flow 采集，不能用手工 JSON 代替。
 
 Profile、Source Map 和源码位置均在本机 Rust 核心中处理；诊断页不会调用 AI。
 Flutter/Lynx 当前共享黑盒性能总览，并明确展示专项采集接入边界，不会用 RN 组件语义生成占位结论。
