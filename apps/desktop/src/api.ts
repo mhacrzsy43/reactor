@@ -52,6 +52,17 @@ export interface GenerateInput {
 export interface FlowModificationProposal {
   generated: GeneratedFlow;
   changes: FlowChange[];
+  answer?: string;
+}
+
+export interface FlowAssistantDecision {
+  kind: "question" | "change";
+  answer: string;
+}
+
+export async function classifyFlowRequest(input: Omit<GenerateInput, "intent"> & { flow?: Flow; instruction: string }): Promise<FlowAssistantDecision> {
+  if (!inTauri) return { kind: input.flow ? "question" : "change", answer: input.flow ? "请在 Reactor 桌面应用中使用 Flow AI。" : "创建 Flow" };
+  return invoke("classify_flow_request", { input });
 }
 
 export interface TrialLivePerformanceSample {
@@ -68,6 +79,8 @@ export interface TrialLivePerformanceSample {
     duplicateComponentRenderCount?: number;
     componentTreeCommitCount?: number;
     profileCommitCount?: number;
+    slowestCommitMs?: number;
+    slowestCommitName?: string;
     consoleEventCount?: number;
     networkEventCount?: number;
     hermesHeapSampleCount?: number;

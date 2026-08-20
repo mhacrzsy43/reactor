@@ -1,8 +1,7 @@
 import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Braces, Check, Code2, Copy, Crosshair, GitBranch, ListPlus, LockKeyhole, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captureDeviceInspector, captureDeviceReplayFrame, compileFlowPreview, confirmFlow, getFlowSecretStatus, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, saveFlowSecret, trialGeneratedFlow } from "./api";
-import type { FlowModificationProposal } from "./api";
-import { FlowCopilot } from "./FlowCopilot";
+import { captureDeviceInspector, captureDeviceReplayFrame, classifyFlowRequest, compileFlowPreview, confirmFlow, generateFlow, getFlowSecretStatus, modifyFlow, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, sampleTrialLivePerformance, saveFlowSecret, trialGeneratedFlow } from "./api";
+import type { FlowModificationProposal, TrialLivePerformanceSample } from "./api";
 import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowLock, FlowStep, GeneratedFlow, InputValue, InspectorElement, InspectorSelectorCandidate, RedactedUiContext, TrialPreparation } from "./types";
 
 interface ExplorerGraphNode {
@@ -53,6 +52,8 @@ interface FlowExplorerProps {
     cliExecutable?: string;
   };
   activeJobRunning: boolean;
+  onGoalChange: (goal: string) => void;
+  onAiProviderChange: (provider: "codex" | "claude" | "cloud") => void;
   onSelectDevice: (device: Device) => void;
   onAppIdChange: (appId: string) => void;
   onRefreshDevices: () => void;
@@ -72,6 +73,8 @@ export function FlowExplorer({
   goal,
   ai,
   activeJobRunning,
+  onGoalChange,
+  onAiProviderChange,
   onSelectDevice,
   onAppIdChange,
   onRefreshDevices,
@@ -127,6 +130,12 @@ export function FlowExplorer({
   const [inputBusy, setInputBusy] = useState(false);
   const [secretStored, setSecretStored] = useState(false);
   const [selectorRefreshAttempt, setSelectorRefreshAttempt] = useState(0);
+  const [aiInput, setAiInput] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiProposal, setAiProposal] = useState<FlowModificationProposal>();
+  const [aiMessages, setAiMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
+  const [performanceSamples, setPerformanceSamples] = useState<Array<TrialLivePerformanceSample & { step?: number }>>([]);
+  const performanceStartedAt = useRef(0);
   const captureInFlight = useRef(false);
   const interactionInFlight = useRef(false);
   const snapshotRef = useRef<DeviceInspectorSnapshot | undefined>(undefined);
@@ -136,8 +145,10 @@ export function FlowExplorer({
   const currentGraphStateRef = useRef<string | undefined>(undefined);
   const editorErrorRef = useRef<HTMLDivElement>(null);
   const replayStepRefs = useRef<Array<HTMLLIElement | null>>([]);
+  const activeReplayStepRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
+    activeReplayStepRef.current = activeReplayStep;
     if (activeReplayStep !== undefined) {
       replayStepRefs.current[activeReplayStep]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
@@ -220,6 +231,101 @@ export function FlowExplorer({
     setGatePreparation(undefined);
     setGateLock(undefined);
     setSelectingTargetMarker(false);
+  }
+
+  async function applyGeneratedFlow(generated: GeneratedFlow, notice: string) {
+    const next = generated.flow;
+    const compiled = await compileFlowPreview(next);
+    rememberEditorState();
+    setRecordedSteps([...next.setup, ...next.measured, ...next.teardown]);
+    setMeasurementStart(next.setup.length);
+    const nextTeardownStart = next.setup.length + next.measured.length;
+    setTeardownStart(nextTeardownStart);
+    teardownStartRef.current = nextTeardownStart;
+    setCompiledFlow(compiled);
+    setJsonDraft(JSON.stringify(next, null, 2));
+    setJsonDirty(false);
+    setEditorError(notice);
+    setTargetAssertion(findDestinationAssertion([...next.setup, ...next.measured]));
+    setTargetCheckpoint(undefined);
+    setGatePreparation(undefined);
+    setGateLock(undefined);
+    setSelectingTargetMarker(false);
+    setMode("record");
+  }
+
+  async function submitFlowAi() {
+    const request = aiInput.trim();
+    if (!request || !appId.trim() || !selectedDevice || ai.provider === "local") return;
+    setAiBusy(true);
+    setAiProposal(undefined);
+    setAiMessages((messages) => [...messages, { role: "user", text: request }]);
+    try {
+      const context = snapshot ? explorerAiContext(snapshot) : undefined;
+      const decision = await classifyFlowRequest({
+        flow: recordedSteps.length > 0 ? explorerFlow : undefined,
+        instruction: request,
+        appId: appId.trim(),
+        platform: explorerFlow.platform,
+        uiTree: context,
+        provider: ai.provider,
+        endpoint: ai.endpoint,
+        model: ai.model || undefined,
+        apiKey: ai.apiKey,
+        saveApiKey: ai.saveApiKey,
+        useSavedApiKey: ai.useSavedApiKey,
+        cliExecutable: ai.cliExecutable,
+      });
+      if (decision.kind === "question") {
+        setAiMessages((messages) => [...messages, { role: "assistant", text: decision.answer }]);
+        setAiInput("");
+        return;
+      }
+      if (recordedSteps.length === 0) {
+        const generated = await generateFlow({
+          intent: request,
+          appId: appId.trim(),
+          platform: explorerFlow.platform,
+          uiTree: context,
+          provider: ai.provider,
+          endpoint: ai.endpoint,
+          model: ai.model || undefined,
+          apiKey: ai.apiKey,
+          saveApiKey: ai.saveApiKey,
+          useSavedApiKey: ai.useSavedApiKey,
+          cliExecutable: ai.cliExecutable,
+        });
+        await applyGeneratedFlow(generated, "AI 已生成 Flow 草稿；请在真实设备逐步审查、回放并证明目标页。");
+        onGoalChange(request);
+        setAiMessages((messages) => [...messages, { role: "assistant", text: `已生成 ${generated.flow.setup.length + generated.flow.measured.length + generated.flow.teardown.length} 个步骤的 Flow 草稿；应用前不会执行设备操作。` }]);
+      } else {
+        const proposal = await modifyFlow({
+          flow: explorerFlow,
+          instruction: request,
+          uiTree: context,
+          provider: ai.provider,
+          endpoint: ai.endpoint,
+          model: ai.model || undefined,
+          apiKey: ai.apiKey,
+          saveApiKey: ai.saveApiKey,
+          useSavedApiKey: ai.useSavedApiKey,
+          cliExecutable: ai.cliExecutable,
+        });
+        if (proposal.answer && proposal.changes.length === 0) {
+          setAiMessages((messages) => [...messages, { role: "assistant", text: proposal.answer! }]);
+        } else if (proposal.changes.length > 0) {
+          setAiProposal(proposal);
+          setAiMessages((messages) => [...messages, { role: "assistant", text: `识别为 Flow 修改请求，已生成 ${proposal.changes.length} 处差异；确认前不会改变当前 Flow。` }]);
+        } else {
+          setAiMessages((messages) => [...messages, { role: "assistant", text: "当前问题没有产生安全、可验证的 Flow 变更。" }]);
+        }
+      }
+      setAiInput("");
+    } catch (reason) {
+      setAiMessages((messages) => [...messages, { role: "assistant", text: `处理失败：${cleanError(reason)}` }]);
+    } finally {
+      setAiBusy(false);
+    }
   }
 
   const draftReplayFlow = useMemo<Flow>(() => {
@@ -378,6 +484,35 @@ export function FlowExplorer({
       window.clearInterval(timer);
     };
   }, [activeJobRunning, gateBusy, replaying, selectedDevice]);
+
+  useEffect(() => {
+    const observing = replaying || gateBusy;
+    if (!observing || !selectedDevice || selectedDevice.platform !== "android" || !appId.trim() || activeJobRunning) return undefined;
+    let cancelled = false;
+    let pending = false;
+    const collect = async () => {
+      if (cancelled || pending) return;
+      pending = true;
+      try {
+        const sample = await sampleTrialLivePerformance({
+          deviceId: selectedDevice.id,
+          appId: appId.trim(),
+          elapsedMs: Math.max(0, Math.round(performance.now() - performanceStartedAt.current)),
+        });
+        if (!cancelled) setPerformanceSamples((samples) => [...samples, { ...sample, step: activeReplayStepRef.current }].slice(-150));
+      } catch {
+        // Replay validity never depends on a transient observational sample.
+      } finally {
+        pending = false;
+      }
+    };
+    void collect();
+    const timer = window.setInterval(() => void collect(), 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeJobRunning, appId, gateBusy, replaying, selectedDevice]);
 
   const selectedElement = snapshot?.elements.find((element) => element.key === selectedElementKey);
 
@@ -697,6 +832,8 @@ export function FlowExplorer({
       window.setTimeout(() => editorErrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
       return;
     }
+    performanceStartedAt.current = performance.now();
+    setPerformanceSamples([]);
     setReplayKind("whole");
     setActiveReplayStep(0);
     setReplaying(true);
@@ -754,6 +891,8 @@ export function FlowExplorer({
       }
       executionPoint = { x: hitElement.bounds.x + hitElement.bounds.width / 2, y: hitElement.bounds.y + hitElement.bounds.height / 2 };
     }
+    performanceStartedAt.current = performance.now();
+    setPerformanceSamples([]);
     setReplayKind("step");
     setActiveReplayStep(stepIndex);
     setReplaying(true);
@@ -894,6 +1033,8 @@ export function FlowExplorer({
       setGateError("正式性能任务不能暂停等待 promptRef；请改用本机 Secret、CI Secret、测试验证码服务或预认证状态后再锁定。");
       return;
     }
+    performanceStartedAt.current = performance.now();
+    setPerformanceSamples([]);
     setGateBusy(true);
     setGateError("");
     setGatePreparation(undefined);
@@ -978,7 +1119,7 @@ export function FlowExplorer({
   return (
     <>
       <header className="topbar">
-        <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10</p><h1>看见页面，逐步录成 Flow</h1></div>
+        <div><p className="eyebrow">INTERACTIVE FLOW EXPLORER · M8.10</p><h1>看见页面，生成、录制并验证 Flow</h1></div>
         <div className="top-actions">
           <span className={`status-pill ${activeJobRunning ? "waiting" : "ready"}`}><span className="status-dot" />{activeJobRunning ? "测试运行中 · 同步已暂停" : gateBusy || replayKind === "whole" ? "Maestro 回放中 · 实时镜像" : replayKind === "step" ? "逐步回放中 · 实时镜像" : interacting ? "正在执行并等待页面稳定" : live ? "低频同步中 · 3 秒" : mode === "record" ? "录制/交互模式" : "审查模式"}</span>
           <button className="secondary-button" disabled={!selectedDevice || loading || interacting || replaying || gateBusy || activeJobRunning} onClick={() => void capture()}>{loading ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}刷新画面</button>
@@ -1013,6 +1154,15 @@ export function FlowExplorer({
         <div className="recording-progress"><ListPlus size={17} /><div><b>{recordedSteps.length} 个已录制步骤</b><span>{mode === "record" ? "点击画面后 Reactor 使用最佳语义 Selector 真实执行，并等待下一页面稳定。" : "切换到录制/交互模式后才会操作设备。"}</span></div></div>
         <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting || replaying || activeJobRunning} title="真实重启 App，并用新的 launch_app 替换当前草稿；可撤销" onClick={() => void beginRecording(true)}><RotateCcw size={15} />从可信起点重新录制</button>
         <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => removeRecordedStep(recordedSteps.length - 1)}><Undo2 size={15} />移除记录最后一步</button>
+      </section>
+
+      <section className="explorer-ai-panel card" aria-label="Flow AI">
+        <div className="explorer-ai-heading"><div><Sparkles size={18} /><span><b>Flow AI</b><small>同一个输入框自动处理新建、修改、新增步骤和普通问题</small></span></div><div className="explorer-ai-providers" role="group" aria-label="AI Provider"><button className={ai.provider === "codex" ? "active" : ""} onClick={() => onAiProviderChange("codex")}>Codex CLI</button><button className={ai.provider === "claude" ? "active" : ""} onClick={() => onAiProviderChange("claude")}>Claude Code</button><button className={ai.provider === "cloud" ? "active" : ""} onClick={() => onAiProviderChange("cloud")}>Cloud AI</button></div></div>
+        <label className="explorer-ai-goal"><span>测试目标 / 对话上下文</span><input value={goal} onChange={(event) => onGoalChange(event.target.value)} placeholder="例如：登录后进入列表页，滚动 10 次并观察性能" /></label>
+        {aiMessages.length > 0 && <div className="explorer-ai-messages">{aiMessages.slice(-6).map((message, index) => <div className={message.role} key={`${message.role}-${index}`}>{message.text}</div>)}</div>}
+        {aiProposal && <div className="explorer-ai-proposal"><b>Flow 修改提案 · {aiProposal.changes.length} 处差异</b><div>{aiProposal.changes.slice(0, 8).map((change) => <code key={change.path}>{change.path}</code>)}</div><span>确认前不会改变 Flow，也不会操作设备。</span><div><button className="secondary-button" onClick={() => setAiProposal(undefined)}>放弃</button><button className="primary-button" disabled={aiBusy} onClick={() => void applyCopilotProposal(aiProposal).then(() => { setAiProposal(undefined); setAiMessages((messages) => [...messages, { role: "assistant", text: "修改已应用；请重新回放并证明目标页。" }]); })}><Check size={14} />确认并应用</button></div></div>}
+        <div className="explorer-ai-compose"><textarea maxLength={4000} value={aiInput} onChange={(event) => setAiInput(event.target.value)} placeholder={recordedSteps.length === 0 ? "描述要创建的 Flow，或询问当前页面如何设计测试…" : "直接提问，或说出要修改/新增的 Flow 步骤…"} /><button className="primary-button" disabled={aiBusy || activeJobRunning || !aiInput.trim() || !appId.trim() || ai.provider === "local"} onClick={() => void submitFlowAi()}>{aiBusy ? <RefreshCw size={14} className="spin" /> : <Sparkles size={14} />}{aiBusy ? "AI 正在判断并处理" : "发送"}</button></div>
+        {ai.provider === "local" && <p className="flow-editor-error">Local Model 暂不用于 Flow AI；请选择 Codex CLI、Claude Code 或 Cloud AI。</p>}
       </section>
 
       {pendingDanger && <div className="explorer-guard danger"><AlertTriangle size={18} /><div><b>检测到潜在敏感操作：{elementName(pendingDanger)}</b><span>这可能触发删除、支付、授权、提交或退出登录。只有你明确再次确认后，Reactor 才会在当前测试目标执行并写入 Flow。</span></div><button className="secondary-button" onClick={() => setPendingDanger(undefined)}>取消</button><button className="danger-confirm-button" disabled={interacting || activeJobRunning} onClick={() => void recordTap(pendingDanger)}>确认风险并执行</button></div>}
@@ -1058,6 +1208,7 @@ export function FlowExplorer({
 
           <aside className="card selector-inspector-card">
             <div className="card-heading"><div className="heading-icon green"><Crosshair size={18} /></div><div><h2>Selector Inspector</h2><p>优先语义定位，坐标仅作显式降级。</p></div></div>
+            <ExplorerPerformancePanel samples={performanceSamples} active={replaying || gateBusy} activeStep={activeReplayStep} platform={selectedDevice?.platform} />
             {mode === "record" && (
               <section className="recorded-flow-panel" aria-label="当前录制 Flow">
                 <div className="recorded-flow-heading">
@@ -1089,21 +1240,6 @@ export function FlowExplorer({
                 {editorError && <div ref={editorErrorRef} className="flow-editor-error">{editorError}</div>}
                 {!editorError && replayBlockedReason && <div className="flow-editor-error">整体回放暂不可用：{replayBlockedReason}</div>}
                 <div className="flow-editor-actions"><button className="secondary-button" onClick={() => void copyFlowSource()}>{copiedStrategy === "flow-source" ? <Check size={13} /> : <Copy size={13} />}{copiedStrategy === "flow-source" ? "已复制" : "复制当前视图"}</button><button className="secondary-button" disabled={!editorUndo} onClick={undoEditorChange}><Undo2 size={13} />撤销编辑</button><button className="primary-button" disabled={Boolean(replayBlockedReason) || replaying} title={replayBlockedReason} onClick={() => void replayWholeFlow()}>{replaying ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}{replaying ? replayKind === "step" ? "单步回放中" : "整体回放中" : "整体回放（草稿）"}</button></div>
-                {compiledFlow && <FlowCopilot
-                  flow={explorerFlow}
-                  provider={ai.provider}
-                  providerLabel={providerLabel(ai.provider)}
-                  endpoint={ai.endpoint}
-                  apiKey={ai.apiKey}
-                  saveApiKey={ai.saveApiKey}
-                  useSavedApiKey={ai.useSavedApiKey}
-                  model={ai.model || undefined}
-                  cliExecutable={ai.cliExecutable}
-                  disabled={activeJobRunning || replaying || gateBusy}
-                  locked={Boolean(gateLock)}
-                  onCloneDraft={() => { setGateLock(undefined); setGatePreparation(undefined); setGateError("已从锁定 Flow 复制为可编辑草稿；修改后需重新回放和证明目标页。"); }}
-                  onApply={applyCopilotProposal}
-                />}
               </section>
             )}
             <section className="state-graph-panel" aria-label="AI 状态图探索">
@@ -1205,6 +1341,27 @@ export function FlowExplorer({
       )}
     </>
   );
+}
+
+function ExplorerPerformancePanel({ samples, active, activeStep, platform }: {
+  samples: Array<TrialLivePerformanceSample & { step?: number }>;
+  active: boolean;
+  activeStep?: number;
+  platform?: Device["platform"];
+}) {
+  const latest = samples.at(-1);
+  const finite = (value: unknown, suffix = "") => typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : "—";
+  const points = samples.slice(-36);
+  const maxPss = Math.max(1, ...points.map((sample) => sample.pssMb ?? 0));
+  return <section className={`card explorer-performance-panel ${active ? "active" : "idle"}`} aria-live="polite">
+    <div className="explorer-performance-heading"><div><div className="heading-icon purple"><RefreshCw size={17} className={active ? "spin" : ""} /></div><span><b>Flow 回放性能观察</b><small>{active ? `LIVE · ${activeStep === undefined ? "整体回放" : `步骤 ${activeStep + 1}`} · 约每 2 秒更新` : samples.length ? "本次回放已结束 · 观察值已保留" : "回放 Flow 时自动开始"}</small></span></div><em>观察值不作为正式基准</em></div>
+    {platform === "ios" ? <div className="flow-performance-empty"><b>iOS Explorer 暂无轻量实时采样</b><span>整体回放仍可验证 Flow；性能采集请使用 iOS xctrace 运行。</span></div> : !latest ? <div className="flow-performance-empty"><b>等待回放开始</b><span>这里会显示 CPU、PSS、Heap、组件 Render、Commit 和最慢 Commit。</span></div> : <>
+      <div className="explorer-performance-values">
+        <div><span>CPU</span><b>{finite(latest.cpuPct, "%")}</b></div><div><span>PSS / RSS</span><b>{finite(latest.pssMb, " MB")} / {finite(latest.rssMb, " MB")}</b></div><div><span>Java / Native Heap</span><b>{finite(latest.javaHeapMb, " MB")} / {finite(latest.nativeHeapMb, " MB")}</b></div><div><span>组件 Render / 重复</span><b>{latest.rn ? `${latest.rn.componentRenderCount ?? 0} / ${latest.rn.duplicateComponentRenderCount ?? 0}` : "当前构建未提供"}</b></div><div><span>Profile Commit</span><b>{latest.rn?.profileCommitCount ?? "当前构建未提供"}</b></div><div><span>最慢 Commit</span><b>{latest.rn?.slowestCommitMs === undefined ? "当前构建未提供" : `${latest.rn.slowestCommitName ?? "未知组件"} · ${finite(latest.rn.slowestCommitMs, " ms")}`}</b></div>
+      </div>
+      <div className="explorer-performance-spark" aria-label="PSS 变化趋势">{points.map((sample, index) => <i key={`${sample.elapsedMs ?? index}-${index}`} title={`${finite(sample.pssMb, " MB")} · ${sample.step === undefined ? "整体" : `步骤 ${sample.step + 1}`}`} style={{ height: `${Math.max(4, ((sample.pssMb ?? 0) / maxPss) * 100)}%` }} />)}</div>
+    </>}
+  </section>;
 }
 
 function hitTest(elements: InspectorElement[], x: number, y: number): InspectorElement | undefined {

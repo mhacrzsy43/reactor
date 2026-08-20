@@ -1120,3 +1120,191 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .timeline-item-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .timeline-frame-summary { align-items: flex-start; flex-direction: column; }
 }
+.explorer-ai-panel,
+.explorer-performance-panel {
+  margin-bottom: 18px;
+}
+
+.explorer-ai-heading,
+.explorer-performance-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.explorer-ai-heading > div:first-child,
+.explorer-performance-heading > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.explorer-ai-heading span,
+.explorer-performance-heading span {
+  display: grid;
+  gap: 3px;
+}
+
+.explorer-ai-heading small,
+.explorer-performance-heading small,
+.explorer-performance-heading em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.explorer-ai-providers {
+  display: flex;
+  gap: 6px;
+}
+
+.explorer-ai-providers button {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 8px 11px;
+}
+
+.explorer-ai-providers button.active {
+  border-color: var(--purple);
+  color: var(--purple);
+  background: rgba(124, 92, 255, .12);
+}
+
+.explorer-ai-goal {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.explorer-ai-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.explorer-ai-compose textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.explorer-ai-messages {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  max-height: 230px;
+  overflow: auto;
+}
+
+.explorer-ai-messages > div {
+  width: fit-content;
+  max-width: 86%;
+  border-radius: 10px;
+  padding: 9px 11px;
+  line-height: 1.45;
+}
+
+.explorer-ai-messages .user {
+  justify-self: end;
+  background: rgba(124, 92, 255, .18);
+}
+
+.explorer-ai-messages .assistant {
+  background: var(--surface-soft);
+}
+
+.explorer-ai-proposal {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+  border: 1px solid rgba(124, 92, 255, .45);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.explorer-ai-proposal > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.explorer-ai-proposal > div:last-child {
+  justify-content: flex-end;
+}
+
+.explorer-performance-panel.active {
+  border-color: rgba(124, 92, 255, .65);
+}
+
+.selector-inspector-card > .explorer-performance-panel {
+  position: sticky;
+  top: 14px;
+  z-index: 3;
+  background: var(--surface);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .2);
+}
+
+.selector-inspector-card .explorer-performance-values {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.explorer-performance-values {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.explorer-performance-values > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px;
+  background: var(--surface-soft);
+}
+
+.explorer-performance-values span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.explorer-performance-values b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer-performance-spark {
+  height: 76px;
+  display: flex;
+  align-items: end;
+  gap: 3px;
+  margin-top: 12px;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.explorer-performance-spark i {
+  flex: 1;
+  min-width: 2px;
+  border-radius: 2px 2px 0 0;
+  background: linear-gradient(180deg, var(--purple), var(--purple-strong));
+}
+
+@media (max-width: 1200px) {
+  .explorer-performance-values { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .explorer-ai-heading, .explorer-performance-heading { align-items: flex-start; flex-direction: column; }
+  .explorer-ai-providers { width: 100%; overflow-x: auto; }
+  .explorer-ai-compose { grid-template-columns: 1fr; }
+  .explorer-performance-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

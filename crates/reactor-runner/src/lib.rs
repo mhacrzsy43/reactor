@@ -1172,6 +1172,25 @@ pub async fn execute_explorer_step(
         )
         .await;
     }
+    if platform == reactor_protocol::Platform::Android
+        && let Step::InputText {
+            value,
+            clear_before,
+            ..
+        } = &step
+    {
+        let resolved = resolve_explorer_input_value(value, prompt_values.as_ref())?;
+        if android_fast_text_supported(&resolved) {
+            return execute_android_explorer_text(
+                workspace,
+                device_id,
+                execution_point,
+                &resolved,
+                *clear_before,
+            )
+            .await;
+        }
+    }
     let flow = Flow {
         schema_version: 1,
         id: "flow-explorer-step".to_owned(),
@@ -1215,6 +1234,117 @@ pub async fn execute_explorer_step(
     };
     let _ = fs::remove_dir_all(&directory).await;
     result
+}
+
+fn resolve_explorer_input_value(
+    value: &InputValue,
+    prompts: Option<&BTreeMap<String, Zeroizing<String>>>,
+) -> Result<Zeroizing<String>, RunnerError> {
+    match value {
+        InputValue::Literal(value) => Ok(Zeroizing::new(value.clone())),
+        InputValue::VariableRef(reference) => {
+            validate_input_reference(&reference.variable_ref)?;
+            std::env::var(&reference.variable_ref)
+                .map(Zeroizing::new)
+                .map_err(|_| RunnerError::MissingInputValue {
+                    path: "setup[0]".to_owned(),
+                    kind: "variableRef",
+                })
+        }
+        InputValue::SecretRef(reference) => {
+            load_flow_secret(&reference.secret_ref)?.ok_or_else(|| RunnerError::MissingInputValue {
+                path: "setup[0]".to_owned(),
+                kind: "secretRef",
+            })
+        }
+        InputValue::PromptRef(reference) => prompts
+            .and_then(|values| values.get(&reference.prompt_ref))
+            .filter(|value| !value.is_empty())
+            .map(|value| Zeroizing::new(value.to_string()))
+            .ok_or_else(|| RunnerError::InteractiveInputRequired {
+                path: "setup[0]".to_owned(),
+            }),
+        InputValue::TotpRef(reference) => {
+            let secret = load_flow_secret(&reference.totp_ref)?.ok_or_else(|| {
+                RunnerError::MissingInputValue {
+                    path: "setup[0]".to_owned(),
+                    kind: "totpRef",
+                }
+            })?;
+            Ok(Zeroizing::new(generate_totp(&secret, "setup[0]")?))
+        }
+    }
+}
+
+fn android_fast_text_supported(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || " ._@+-".contains(character))
+}
+
+async fn execute_android_explorer_text(
+    workspace: &Path,
+    device_id: &str,
+    execution_point: Option<Coordinate>,
+    value: &str,
+    clear_before: bool,
+) -> Result<(), RunnerError> {
+    let adb = resolve_tools(workspace)
+        .adb
+        .ok_or(RunnerError::MissingTool("adb"))?;
+    let adb = adb.to_string_lossy();
+    let tap_args = android_explorer_input_args(
+        device_id,
+        &Step::Tap {
+            target: reactor_protocol::Selector::default(),
+        },
+        execution_point,
+        None,
+    )?;
+    let tap_args = tap_args.iter().map(String::as_str).collect::<Vec<_>>();
+    command_text(
+        &adb,
+        &tap_args,
+        "Android Flow Explorer focus input",
+        Duration::from_secs(5),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    if clear_before {
+        command_text(
+            &adb,
+            &[
+                "-s",
+                device_id,
+                "shell",
+                "input",
+                "keycombination",
+                "KEYCODE_CTRL_LEFT",
+                "KEYCODE_A",
+            ],
+            "Android Flow Explorer select input text",
+            Duration::from_secs(5),
+        )
+        .await?;
+        command_text(
+            &adb,
+            &["-s", device_id, "shell", "input", "keyevent", "KEYCODE_DEL"],
+            "Android Flow Explorer clear input text",
+            Duration::from_secs(5),
+        )
+        .await?;
+    }
+    let encoded = value.replace(' ', "%s");
+    command_text(
+        &adb,
+        &["-s", device_id, "shell", "input", "text", &encoded],
+        "Android Flow Explorer enter reviewed text",
+        Duration::from_secs(5),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn relaunch_explorer_app(
@@ -2781,6 +2911,8 @@ fn summarize_live_rn_events(output: &str) -> Value {
     let mut hermes_heap = 0_u64;
     let mut duplicate_renders = 0_u64;
     let mut rendered_components = BTreeSet::new();
+    let mut slowest_commit_ms = None::<f64>;
+    let mut slowest_commit_name = None::<String>;
     let mut latest_kind = None;
     let mut latest_name = None;
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
@@ -2807,7 +2939,24 @@ fn summarize_live_rn_events(output: &str) -> Value {
                 }
             }
             "component_tree" => tree_commits = tree_commits.saturating_add(1),
-            "react_profile" => commits = commits.saturating_add(1),
+            "react_profile" => {
+                commits = commits.saturating_add(1);
+                let duration = event
+                    .pointer("/payload/actualDuration")
+                    .or_else(|| event.pointer("/payload/duration"))
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && *value >= 0.0);
+                if let Some(duration) = duration
+                    && slowest_commit_ms.is_none_or(|current| duration > current)
+                {
+                    slowest_commit_ms = Some(duration);
+                    slowest_commit_name = event
+                        .pointer("/payload/id")
+                        .or_else(|| event.pointer("/payload/name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
             "console" => console = console.saturating_add(1),
             "network" => network = network.saturating_add(1),
             "hermes_heap" => hermes_heap = hermes_heap.saturating_add(1),
@@ -2822,6 +2971,8 @@ fn summarize_live_rn_events(output: &str) -> Value {
         "duplicateComponentRenderCount": duplicate_renders,
         "componentTreeCommitCount": tree_commits,
         "profileCommitCount": commits,
+        "slowestCommitMs": slowest_commit_ms,
+        "slowestCommitName": slowest_commit_name,
         "consoleEventCount": console,
         "networkEventCount": network,
         "hermesHeapSampleCount": hermes_heap,
@@ -6066,6 +6217,15 @@ mod tests {
     }
 
     #[test]
+    fn android_fast_text_path_is_conservative() {
+        assert!(android_fast_text_supported("test user+1@example.com"));
+        assert!(android_fast_text_supported("123456"));
+        assert!(!android_fast_text_supported("中文输入"));
+        assert!(!android_fast_text_supported("line\nbreak"));
+        assert!(!android_fast_text_supported(""));
+    }
+
+    #[test]
     fn generates_rfc6238_six_digit_totp_without_exposing_the_seed() {
         assert_eq!(
             generate_totp_at_counter(b"12345678901234567890", 1).as_deref(),
@@ -6169,11 +6329,14 @@ mod tests {
             r#"{"kind":"component_render","payload":{"name":"ListRow"}}
 {"kind":"component_render","payload":{"name":"ListRow"}}
 {"kind":"component_render","payload":{"name":"Header"}}
-{"kind":"react_profile","payload":{"name":"commit"}}"#,
+{"kind":"react_profile","payload":{"id":"List","actualDuration":1.5}}
+{"kind":"react_profile","payload":{"id":"Header","actualDuration":3.25}}"#,
         );
         assert_eq!(summary["componentRenderCount"], 3);
         assert_eq!(summary["duplicateComponentRenderCount"], 1);
-        assert_eq!(summary["profileCommitCount"], 1);
+        assert_eq!(summary["profileCommitCount"], 2);
+        assert_eq!(summary["slowestCommitName"], "Header");
+        assert_eq!(summary["slowestCommitMs"], 3.25);
     }
 
     #[tokio::test]

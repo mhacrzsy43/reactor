@@ -1068,6 +1068,8 @@ function App() {
               cliExecutable: providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined,
             }}
             activeJobRunning={Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.job.state))}
+            onGoalChange={setIntent}
+            onAiProviderChange={(provider) => setProviderMode(provider)}
             onSelectDevice={(device) => {
               setSelectedDeviceId(device.id);
               setPlatform(device.platform === "ios" ? "ios" : "android");

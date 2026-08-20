@@ -73,6 +73,40 @@ pub struct FlowModificationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FlowQuestionRequest {
+    pub flow: Flow,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_tree: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowQuestionAnswer {
+    pub answer: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowAssistantRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<Flow>,
+    pub message: String,
+    pub app_id: String,
+    pub platform: Platform,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_tree: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowAssistantDecision {
+    pub kind: String,
+    pub answer: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DryRunFailure {
     pub step_path: String,
     pub code: String,
@@ -443,6 +477,22 @@ pub trait FlowAiProvider: Send + Sync {
     ) -> Result<GeneratedFlow, AiProviderError> {
         Err(AiProviderError::Unavailable(
             "this provider does not support natural-language Flow modification".to_owned(),
+        ))
+    }
+    async fn answer_flow_question(
+        &self,
+        _request: FlowQuestionRequest,
+    ) -> Result<FlowQuestionAnswer, AiProviderError> {
+        Err(AiProviderError::Unavailable(
+            "this provider does not support Flow questions".to_owned(),
+        ))
+    }
+    async fn classify_flow_request(
+        &self,
+        _request: FlowAssistantRequest,
+    ) -> Result<FlowAssistantDecision, AiProviderError> {
+        Err(AiProviderError::Unavailable(
+            "this provider does not support unified Flow assistance".to_owned(),
         ))
     }
 }
@@ -1219,6 +1269,56 @@ impl FlowAiProvider for CliFlowProvider {
         )
         .await
     }
+
+    async fn answer_flow_question(
+        &self,
+        request: FlowQuestionRequest,
+    ) -> Result<FlowQuestionAnswer, AiProviderError> {
+        let flow = serde_json::to_string_pretty(&request.flow)
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
+        let output = self
+            .structured_json(
+                format!(
+                    "{}\n\nQuestion: {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                    FLOW_QUESTION_SYSTEM_PROMPT,
+                    request.question,
+                    truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+                    flow
+                ),
+                flow_question_output_schema(),
+                "flow-question",
+            )
+            .await?;
+        serde_json::from_value(output)
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))
+    }
+
+    async fn classify_flow_request(
+        &self,
+        request: FlowAssistantRequest,
+    ) -> Result<FlowAssistantDecision, AiProviderError> {
+        let flow = request.flow.as_ref().map_or_else(
+            || "not created".to_owned(),
+            |flow| serde_json::to_string_pretty(flow).unwrap_or_else(|_| "invalid".to_owned()),
+        );
+        let output = self
+            .structured_json(
+                format!(
+                    "{}\n\nMessage: {}\nApp id: {}\nPlatform: {:?}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+                    FLOW_ASSISTANT_SYSTEM_PROMPT,
+                    request.message,
+                    request.app_id,
+                    request.platform,
+                    truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+                    flow
+                ),
+                flow_assistant_output_schema(),
+                "flow-assistant",
+            )
+            .await?;
+        serde_json::from_value(output)
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))
+    }
 }
 
 #[async_trait]
@@ -1793,6 +1893,48 @@ impl FlowAiProvider for OpenAiCompatibleProvider {
         )
         .await
     }
+
+    async fn answer_flow_question(
+        &self,
+        request: FlowQuestionRequest,
+    ) -> Result<FlowQuestionAnswer, AiProviderError> {
+        let flow = serde_json::to_string_pretty(&request.flow)
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
+        let prompt = format!(
+            "Question: {}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+            request.question,
+            truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+            flow
+        );
+        let (_, content) = self
+            .complete_text(FLOW_QUESTION_SYSTEM_PROMPT, &prompt)
+            .await?;
+        serde_json::from_str(strip_markdown_fence(&content))
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))
+    }
+
+    async fn classify_flow_request(
+        &self,
+        request: FlowAssistantRequest,
+    ) -> Result<FlowAssistantDecision, AiProviderError> {
+        let flow = request.flow.as_ref().map_or_else(
+            || "not created".to_owned(),
+            |flow| serde_json::to_string_pretty(flow).unwrap_or_else(|_| "invalid".to_owned()),
+        );
+        let prompt = format!(
+            "Message: {}\nApp id: {}\nPlatform: {:?}\nCurrent redacted UI tree:\n{}\nCurrent Flow:\n{}",
+            request.message,
+            request.app_id,
+            request.platform,
+            truncate(request.ui_tree.as_deref().unwrap_or("not provided"), 20_000),
+            flow
+        );
+        let (_, content) = self
+            .complete_text(FLOW_ASSISTANT_SYSTEM_PROMPT, &prompt)
+            .await?;
+        serde_json::from_str(strip_markdown_fence(&content))
+            .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))
+    }
 }
 
 #[async_trait]
@@ -2018,7 +2160,10 @@ payment, purchase, transfer, logout, permission, account, destructive, or ambigu
 probe must not scroll, type, submit, or claim the destination is verified.";
 
 const MODIFY_SYSTEM_PROMPT: &str = r"You modify an existing Reactor Flow v1 and return the complete
-updated Flow as one JSON object with no markdown. Apply only the user's requested change and
+updated Flow as one JSON object with no markdown. First classify the user's natural-language input:
+if it is an ordinary question about the Flow or current page rather than a request to change/add/remove
+steps, return the original Flow structurally unchanged so Reactor can answer it without creating a
+false diff. Otherwise apply only the user's requested change and
 preserve schemaVersion, appId, platform, unrelated steps, and existing secret/variable references.
 Never put credential values into the Flow. Keep reset, launch, navigation, readiness checks, and
 destination assertions in setup. measured must remain non-empty and contain only deterministic
@@ -2033,6 +2178,42 @@ absent from the observed selector inventory, replace only that failing step's ta
 closest exact observed value for the same control; do not delete, insert, or reorder other steps,
 and do not modify selectors for pages that have not been observed yet. A missing promptRef runtime value is not a Flow defect: preserve the promptRef so
 Reactor can request its one-time value before replay.";
+
+const FLOW_QUESTION_SYSTEM_PROMPT: &str = r"You answer a question about the supplied Reactor Flow and
+current redacted UI context. Return one JSON object with exactly one string field named answer and no
+markdown. Explain what the current Flow does, why a step or selector exists, or what a safe next action
+would be. Do not claim to have changed the Flow. Do not reveal or infer secrets, credentials, editable
+field values, or information absent from the supplied context. Keep the answer concise and concrete.";
+
+fn flow_question_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["answer"],
+        "properties": {
+            "answer": { "type": "string", "minLength": 1, "maxLength": 4000 }
+        }
+    })
+}
+
+const FLOW_ASSISTANT_SYSTEM_PROMPT: &str = r"Classify one natural-language message in Reactor Flow
+Explorer. Return JSON only. kind must be question when the user is asking for an explanation,
+recommendation, capability, or information without requesting Flow steps to be created, changed,
+added, removed, or reordered. For question, answer directly and do not claim any Flow change. kind
+must be change when the user asks to create a Flow or change/add/remove/reorder its steps. For change,
+answer must be a short description of the requested change. Never reveal or infer secrets.";
+
+fn flow_assistant_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "answer"],
+        "properties": {
+            "kind": { "type": "string", "enum": ["question", "change"] },
+            "answer": { "type": "string", "minLength": 1, "maxLength": 4000 }
+        }
+    })
+}
 
 const ANALYSIS_SYSTEM_PROMPT: &str = r"You explain an immutable Reactor performance report as JSON only.
 The verdict, compatibility result, metric values, thresholds, and rule findings are facts and must

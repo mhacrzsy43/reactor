@@ -68,6 +68,11 @@ export function FlowCopilot({
         model,
         cliExecutable,
       });
+      if (next.answer && next.changes.length === 0) {
+        setMessages((current) => [...current, { role: "assistant", text: next.answer! }]);
+        setInstruction("");
+        return;
+      }
       if (next.changes.length === 0 && contextHint?.includes("promptRef")) {
         setMessages((current) => [...current, { role: "assistant", text: "这个失败不需要修改 Flow：promptRef 必须保留。请在 Flow 左侧填写本次交互值，然后重新试跑。" }]);
         setInstruction("");
