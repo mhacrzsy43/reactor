@@ -27,7 +27,7 @@ import {
   Trash2,
   WandSparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runAndroidManualDiagnose, runDemo, runIos, sampleTrialLivePerformance, saveFlowSecret, stageUpdate, stopManualDiagnose, trialGeneratedFlow } from "./api";
 import { conservativeAndroidDiagnosticPlan, formatOptionalMetric, telemetrySlopePerMinute } from "./diagnosticLogic";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
@@ -55,7 +55,7 @@ import type {
 } from "./types";
 
 type Stage = "compose" | "generated" | "locked" | "results";
-type Page = "flow" | "explorer" | "devices" | "history" | "analysis" | "diagnostics" | "settings";
+type Page = "explorer" | "devices" | "history" | "analysis" | "diagnostics" | "settings";
 type Framework = "react-native" | "flutter" | "lynx";
 type ProviderMode = "offline" | "local" | "codex" | "claude" | "cloud";
 type FlowProviderMode = Exclude<ProviderMode, "offline">;
@@ -76,6 +76,20 @@ interface PersistedFlowDraft {
 }
 
 const FLOW_DRAFT_KEY = "reactor.flow-draft.v1";
+const PROVIDER_SETTINGS_KEY = "reactor.provider-settings.v1";
+
+interface PersistedProviderSettings {
+  version: 1;
+  providerMode: FlowProviderMode;
+  endpoint: string;
+  model: string;
+  localEndpoint: string;
+  localModel: string;
+  cliModel: string;
+  codexExecutable: string;
+  claudeExecutable: string;
+  useSavedApiKey: boolean;
+}
 
 const frameworkNames: Record<string, string> = {
   "react-native": "React Native",
@@ -123,7 +137,7 @@ const jobStateNames: Record<JobState, string> = {
 
 function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const [page, setPage] = useState<Page>("flow");
+  const [page, setPage] = useState<Page>("explorer");
   const [environment, setEnvironment] = useState<Bootstrap>();
   const [stage, setStage] = useState<Stage>("compose");
   const [intent, setIntent] = useState("启动应用，进入列表页面，向上滚动 10 次并测量滚动性能");
@@ -183,6 +197,7 @@ function App() {
   const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
   const [draftHydrated, setDraftHydrated] = useState(false);
   const flowCardRef = useRef<HTMLDivElement>(null);
+  const explorerDraftIdentityRef = useRef("");
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -193,13 +208,25 @@ function App() {
   }, [generated, flowEditing]);
 
   useEffect(() => {
+    const providerSettings = loadProviderSettings();
+    if (providerSettings) {
+      setProviderMode(providerSettings.providerMode);
+      setEndpoint(providerSettings.endpoint);
+      setModel(providerSettings.model);
+      setLocalEndpoint(providerSettings.localEndpoint);
+      setLocalModel(providerSettings.localModel);
+      setCliModel(providerSettings.cliModel);
+      setCodexExecutable(providerSettings.codexExecutable);
+      setClaudeExecutable(providerSettings.claudeExecutable);
+      setUseSavedApiKey(providerSettings.useSavedApiKey);
+    }
     const draft = loadFlowDraft();
     if (draft) {
       setIntent(draft.intent);
       setAppId(draft.appId);
       setFramework(draft.framework);
       setPlatform(draft.platform);
-      setProviderMode(draft.providerMode);
+      if (!providerSettings) setProviderMode(draft.providerMode);
       setGenerated(draft.generated);
       setCompiledFlow(draft.compiledFlow);
       setPreparation(draft.preparation);
@@ -221,6 +248,23 @@ function App() {
     }
     setDraftHydrated(true);
   }, []);
+
+  useEffect(() => {
+    if (!draftHydrated) return;
+    const settings: PersistedProviderSettings = {
+      version: 1,
+      providerMode,
+      endpoint,
+      model,
+      localEndpoint,
+      localModel,
+      cliModel,
+      codexExecutable,
+      claudeExecutable,
+      useSavedApiKey,
+    };
+    window.localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(settings));
+  }, [draftHydrated, providerMode, endpoint, model, localEndpoint, localModel, cliModel, codexExecutable, claudeExecutable, useSavedApiKey]);
 
   useEffect(() => {
     if (!draftHydrated) return;
@@ -757,7 +801,7 @@ function App() {
   function useDeviceInFlow(deviceId: string, devicePlatform: string) {
     setPlatform(devicePlatform === "ios" ? "ios" : "android");
     setSelectedDeviceId(deviceId);
-    navigateTo("flow");
+    navigateTo("explorer");
   }
 
   function navigateTo(nextPage: Page) {
@@ -765,7 +809,7 @@ function App() {
     setPage(nextPage);
   }
 
-  function loadHistoricalFlowIntoStudio(lock: FlowLock, run: DiagnosticRunSummary) {
+  function loadHistoricalFlowIntoExplorer(lock: FlowLock, run: DiagnosticRunSummary) {
     setFlowLock(lock);
     setGenerated({
       flow: lock.flow,
@@ -777,6 +821,7 @@ function App() {
     setPreparation(undefined);
     setCompiledFlow(undefined);
     setAppId(lock.flow.appId);
+    setIntent(lock.flow.intent ?? "");
     setPlatform(lock.flow.platform);
     const historicalFramework = normalizeHistoricalFramework(run.framework);
     if (historicalFramework) setFramework(historicalFramework);
@@ -791,11 +836,11 @@ function App() {
     setPendingRunMode("benchmark");
     setFlowEditNotice("已加载历史验证 Flow。请选择设备并重新填写 Secret / Prompt；不会自动运行。");
     void compileFlowPreview(lock.flow).then(setCompiledFlow).catch((reason) => setError(String(reason)));
-    setPage("flow");
+    setPage("explorer");
   }
 
   function startHistoricalFlowRun(mode: "benchmark" | "diagnose", lock: FlowLock, run: DiagnosticRunSummary) {
-    loadHistoricalFlowIntoStudio(lock, run);
+    loadHistoricalFlowIntoExplorer(lock, run);
     setPendingRunMode(mode);
     setFlowEditNotice(mode === "diagnose"
       ? "已为新 Diagnose 加载历史验证 Flow。请选择 Android 设备并重新填写 Secret / Prompt，然后手动启动；不会复用旧运行输入。"
@@ -1029,6 +1074,26 @@ function App() {
     }
   }
 
+  const syncExplorerDraft = useCallback((flow: Flow) => {
+    const serialized = JSON.stringify(flow);
+    if (explorerDraftIdentityRef.current === serialized) return;
+    explorerDraftIdentityRef.current = serialized;
+    setGenerated((current) => {
+      if (current && JSON.stringify(current.flow) === serialized) return current;
+      return {
+        flow,
+        provider: current?.provider ?? providerMode,
+        model: current?.model ?? "flow-explorer",
+        promptTemplateVersion: current?.promptTemplateVersion ?? "flow-explorer-v1",
+        notes: current?.notes ?? ["Flow Explorer 自动保存草稿"],
+      };
+    });
+    setFlowLock((current) => current && JSON.stringify(current.flow) === serialized ? current : undefined);
+    setPreparation((current) => current && JSON.stringify(current.generated.flow) === serialized ? current : undefined);
+    setResults([]);
+    setReportPath("");
+  }, [providerMode]);
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1037,27 +1102,31 @@ function App() {
           <div><strong>Reactor</strong><span>Performance Lab</span></div>
         </div>
         <nav>
-          <button className={`nav-item ${page === "flow" ? "active" : ""}`} onClick={() => navigateTo("flow")}><WandSparkles size={18} />Flow Studio</button>
-          <button className={`nav-item ${page === "explorer" ? "active" : ""}`} onClick={() => navigateTo("explorer")}><ScanSearch size={18} />Flow Explorer<span className="nav-beta">M8.10</span></button>
+          <button className={`nav-item ${page === "explorer" ? "active" : ""}`} onClick={() => navigateTo("explorer")}><ScanSearch size={18} />Flow Explorer</button>
           <button className={`nav-item ${page === "devices" ? "active" : ""}`} onClick={() => navigateTo("devices")}><Smartphone size={18} />设备实验室<span className="nav-count">{environment?.devices.length ?? 0}</span></button>
           <button className={`nav-item ${page === "history" ? "active" : ""}`} onClick={() => navigateTo("history")}><Activity size={18} />运行记录</button>
           <button className={`nav-item ${page === "analysis" ? "active" : ""}`} onClick={() => navigateTo("analysis")}><CircleGauge size={18} />结果分析</button>
           <button className={`nav-item ${page === "diagnostics" ? "active" : ""}`} onClick={() => navigateTo("diagnostics")}><Flame size={18} />性能诊断</button>
         </nav>
         <div className="sidebar-bottom">
+          <button className="nav-item" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}{theme === "dark" ? "浅色外观" : "深色外观"}</button>
           <button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => navigateTo("settings")}><Settings2 size={18} />设置</button>
           <div className="privacy-note"><ShieldCheck size={16} /><span>AI 不进入测量窗口</span></div>
         </div>
       </aside>
 
       <main className="workspace">
-        {activeJob && (page === "flow" || !["completed", "failed", "cancelled"].includes(activeJob.job.state)) && <RunStatus snapshot={activeJob} showPerformance={page !== "flow"} cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
+        {activeJob && (page === "explorer" || !["completed", "failed", "cancelled"].includes(activeJob.job.state)) && <RunStatus snapshot={activeJob} showPerformance cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
         {page === "explorer" ? (
+          <>
           <FlowExplorer
             devices={environment?.devices ?? []}
             selectedDeviceId={selectedDeviceId}
             appId={appId}
             goal={intent}
+            initialFlow={generated?.flow}
+            initialFlowLock={flowLock}
+            initialPreparation={preparation}
             ai={{
               provider: providerMode,
               endpoint: providerMode === "local" ? localEndpoint : endpoint,
@@ -1079,6 +1148,7 @@ function App() {
               invalidateGeneratedFlow();
             }}
             onRefreshDevices={() => void onRefresh()}
+            onDraftChange={syncExplorerDraft}
             onPerformanceHandoff={(lock, nextPreparation, compiled) => {
               setGenerated(nextPreparation.generated);
               setCompiledFlow(compiled);
@@ -1088,9 +1158,23 @@ function App() {
               setResults([]);
               setReportPath("");
               setFlowEditNotice("Flow Explorer 已完成真实回放、目标页唯一性证明和哈希锁定；请选择采集预设后开始正式测量。");
-              setPage("flow");
             }}
           />
+          {error && <div className="error-banner">{error}</div>}
+          <section className={`card explorer-run-workbench ${flowLock ? "ready" : "pending"}`}>
+            <div className="card-heading"><div className="heading-icon purple"><FlaskConical size={18} /></div><div><h2>正式 Benchmark / Diagnose</h2><p>{flowLock ? "使用当前已证明并锁定的 Flow 生成正式证据。" : "先在上方整体回放、证明目标页并锁定 Flow。"}</p></div>{flowLock && <span className="schema-badge">{flowLock.flowHash.slice(0, 12)}…</span>}</div>
+            {flowEditNotice && <p className="maintenance-notice">{flowEditNotice}</p>}
+            {flowLock ? <div className="run-buttons">
+              <label className="run-preset"><span>测试目标</span><select value={selectedTarget?.id ?? ""} onChange={(event) => setSelectedDeviceId(event.target.value)}>{availableTargets.map((device) => <option value={device.id} key={device.id}>{device.name ?? device.id} · {device.physical ? "物理设备" : "模拟器"}</option>)}</select></label>
+              {platform === "android" && <label className="run-preset"><span>运行模式</span><select value={pendingRunMode} onChange={(event) => setPendingRunMode(event.target.value as "benchmark" | "diagnose" | "manual")}><option value="benchmark">Benchmark · 稳定基准</option><option value="diagnose">Diagnose · 运行 Flow 并录制</option><option value="manual">手动录制 · Start/Stop 自由操作</option></select></label>}
+              {pendingRunMode === "manual" ? <div className="run-preset"><span>手动会话</span><b>最长 5 分钟 · 可随时停止并保存</b></div> : <label className="run-preset"><span>{pendingRunMode === "diagnose" ? "录制预设" : "采集预设"}</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">{pendingRunMode === "diagnose" ? "快速观察 · 1 次 × 5 秒" : "快速验收 · 1 次 × 5 秒"}</option><option value="standard">{pendingRunMode === "diagnose" ? "正式录制 · 3 次 × 18 秒" : "正式基准 · 10 次 × 18 秒"}</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>}
+              <button className="secondary-button" disabled={busy} onClick={onDemo}>三框架模拟导览</button>
+              <button className="primary-button" disabled={busy || !selectedTarget || flowLock.trial?.synthetic !== false} onClick={onRealRun}>{busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}{selectedTarget ? platform === "ios" ? "iOS xctrace 运行" : pendingRunMode === "manual" ? "Start 手动录制" : pendingRunMode === "diagnose" ? "开始 Diagnose 录制" : "开始 Benchmark" : "等待测试目标"}</button>
+            </div> : <div className="diagnostic-run-empty"><LockKeyhole size={20} /><div><b>正式运行尚未解锁</b><span>回放期间的 CPU、内存和 RN 指标仅用于观察；正式结论从这里启动后生成。</span></div></div>}
+            <div className="diagnostic-history-actions"><button className="secondary-button" onClick={() => navigateTo("history")}>查看 Run 记录</button><button className="secondary-button" onClick={() => navigateTo("diagnostics")}>历史 Flow / Diagnose</button><small>当前 Explorer 草稿自动保存；历史 Flow 加载后仍需重新选择设备和运行输入。</small></div>
+          </section>
+          {results.length > 0 && <Results results={results} reportPath={reportPath} />}
+          </>
         ) : page === "devices" ? (
           <DeviceLab
             environment={environment}
@@ -1126,7 +1210,7 @@ function App() {
             } : undefined}
             onNavigate={navigateTo}
             onViewHistoricalRun={(jobId) => void viewHistoricalRun(jobId)}
-            onLoadHistoricalFlow={loadHistoricalFlowIntoStudio}
+            onLoadHistoricalFlow={loadHistoricalFlowIntoExplorer}
             onStartHistoricalRun={startHistoricalFlowRun}
           />
         ) : page === "settings" ? (
@@ -1137,324 +1221,33 @@ function App() {
             checkingCli={checkingCli}
             checkingLocalModel={checkingLocalModel}
             preparingTools={preparingTools}
+            providerMode={providerMode}
+            endpoint={endpoint}
+            model={model}
+            apiKey={apiKey}
+            saveApiKey={saveApiKey}
+            useSavedApiKey={useSavedApiKey}
+            localEndpoint={localEndpoint}
+            localModel={localModel}
+            cliModel={cliModel}
+            codexExecutable={codexExecutable}
+            claudeExecutable={claudeExecutable}
+            onProviderMode={setProviderMode}
+            onEndpoint={setEndpoint}
+            onModel={setModel}
+            onApiKey={setApiKey}
+            onSaveApiKey={setSaveApiKey}
+            onUseSavedApiKey={setUseSavedApiKey}
+            onLocalEndpoint={setLocalEndpoint}
+            onLocalModel={setLocalModel}
+            onCliModel={setCliModel}
+            onCodexExecutable={setCodexExecutable}
+            onClaudeExecutable={setClaudeExecutable}
             onRefreshCli={refreshCliProviders}
             onRefreshLocal={refreshLocalModel}
             onPrepareTools={onPrepareTools}
           />
-        ) : (
-        <>
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">FLOW STUDIO</p>
-            <h1>把测试目标交给 Reactor</h1>
-          </div>
-          <div className="top-actions">
-            <span className={`status-pill ${environment?.doctor.ready ? "ready" : "waiting"}`}>
-              <span className="status-dot" />{environment === undefined ? "正在检查环境" : environment.doctor.ready ? "工具链已就绪" : "内置工具待准备"}
-            </span>
-            <button className="icon-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="切换主题">
-              {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-          </div>
-        </header>
-
-        <section className="pipeline" aria-label="Flow 进度">
-          {pipeline.map((item, index) => (
-            <div className={`pipeline-step ${index <= stageIndex ? "done" : ""}`} key={item.id}>
-              <span>{index < stageIndex ? <Check size={13} /> : index + 1}</span>
-              <b>{item.label}</b>
-              {index < pipeline.length - 1 && <ArrowRight size={14} className="pipeline-arrow" />}
-            </div>
-          ))}
-        </section>
-
-        {error && <div className="error-banner">{error}</div>}
-
-        <div className="content-grid">
-          <section className="primary-column">
-            <div className="composer-card card">
-              <div className="card-heading">
-                <div className="heading-icon purple"><Bot size={19} /></div>
-                <div><h2>测试指令</h2><p>描述用户路径和你关心的性能目标</p></div>
-                <span className="local-badge">{providerNames[providerMode]}</span>
-              </div>
-              <textarea value={intent} disabled={busy} onChange={(event) => { setIntent(event.target.value); invalidateGeneratedFlow(); }} placeholder="例如：启动应用，进入商品列表，连续滚动并打开详情页……" />
-              <div className="composer-options">
-                <label><span>应用包名</span><input value={appId} disabled={busy} onChange={(event) => { setAppId(event.target.value); invalidateGeneratedFlow(); }} /></label>
-                <div className="platform-field">
-                  <span>应用框架</span>
-                  <div className="framework-selector" role="group" aria-label="应用框架">
-                    <button type="button" disabled={busy} aria-pressed={framework === "react-native"} className={framework === "react-native" ? "active" : ""} onClick={() => { setFramework("react-native"); invalidateGeneratedFlow(); }}>RN</button>
-                    <button type="button" disabled={busy} aria-pressed={framework === "flutter"} className={framework === "flutter" ? "active" : ""} onClick={() => { setFramework("flutter"); invalidateGeneratedFlow(); }}>Flutter</button>
-                    <button type="button" disabled={busy} aria-pressed={framework === "lynx"} className={framework === "lynx" ? "active" : ""} onClick={() => { setFramework("lynx"); invalidateGeneratedFlow(); }}>Lynx</button>
-                  </div>
-                </div>
-                <div className="platform-field">
-                  <span>平台</span>
-                  <div className="platform-selector" role="group" aria-label="平台">
-                    <button type="button" disabled={busy} aria-pressed={platform === "android"} className={platform === "android" ? "active" : ""} onClick={() => { setPlatform("android"); invalidateGeneratedFlow(); }}>Android</button>
-                    <button type="button" disabled={busy} aria-pressed={platform === "ios"} className={platform === "ios" ? "active" : ""} onClick={() => { setPlatform("ios"); invalidateGeneratedFlow(); }}>iOS</button>
-                  </div>
-                </div>
-              </div>
-              <div className="generation-context-card">
-                  <div className="generation-context-heading">
-                    <div>
-                      <b>目标界面上下文</b>
-                      <span>只读取当前目标的无障碍文本并在本机脱敏；截图不会发送给模型。</span>
-                    </div>
-                    <button type="button" className="secondary-button compact" disabled={busy || readingGenerationContext || !selectedTarget || !appId.trim()} onClick={() => void onPreviewGenerationContext()}>
-                      {readingGenerationContext ? <RefreshCw size={14} className="spin" /> : <Smartphone size={14} />}{readingGenerationContext ? "读取中…" : generationContext ? "重新读取" : "读取当前界面"}
-                    </button>
-                  </div>
-                  {generationContext ? (
-                    <>
-                      <div className="generation-context-summary">
-                        <span>{generationContext.preview.elementCount} 个元素</span>
-                        <span>{generationContext.preview.includedChars} 字符</span>
-                        <span>{generationContext.preview.redactionCount} 处脱敏</span>
-                        <span>0 字节截图上传</span>
-                      </div>
-                      <label className="credential-option generation-context-consent">
-                        <input type="checkbox" checked={includeGenerationContext} onChange={(event) => setIncludeGenerationContext(event.target.checked)} />
-                        <span>仅本次生成/探索允许将上述脱敏文本提供给 {providerNames[providerMode]}</span>
-                      </label>
-                      <details className="generation-context-preview">
-                        <summary>查看脱敏内容</summary>
-                        <pre>{generationContext.uiTree}</pre>
-                      </details>
-                    </>
-                  ) : (
-                    <p>未提供界面上下文时，AI 可能不知道“列表页”等入口的真实控件名称；试跑只能验证命令是否执行。</p>
-                  )}
-                </div>
-              <div className="provider-mode provider-mode-select" role="group" aria-label="选择 Flow 生成器">
-                <button type="button" className={providerMode === "local" ? "active" : ""} aria-pressed={providerMode === "local"} onClick={() => setProviderMode("local")}>Local Model</button>
-                <button type="button" className={providerMode === "codex" ? "active" : ""} aria-pressed={providerMode === "codex"} onClick={() => setProviderMode("codex")}>Codex CLI</button>
-                <button type="button" className={providerMode === "claude" ? "active" : ""} aria-pressed={providerMode === "claude"} onClick={() => setProviderMode("claude")}>Claude Code</button>
-                <button type="button" className={providerMode === "cloud" ? "active" : ""} aria-pressed={providerMode === "cloud"} onClick={() => setProviderMode("cloud")}>Cloud AI</button>
-              </div>
-              <button className="provider-toggle" onClick={() => setProviderOpen(!providerOpen)}>
-                <Sparkles size={15} />配置 {providerNames[providerMode]}（{providerMode === "cloud" ? "需要 Key" : "无需 Key"}）<ChevronDown size={15} className={providerOpen ? "rotated" : ""} />
-              </button>
-              {providerOpen && (
-                <div className="provider-panel">
-                  {providerMode === "local" ? (
-                    <>
-                      <div className={`provider-offline wide ${localModelStatus?.available ? "ready" : "warning"}`}>
-                        <Cpu size={16} />
-                        <div><b>本地模型 · {checkingLocalModel ? "检测中…" : localModelStatus?.available ? "已连接" : "未连接"}</b><span>{localModelStatus?.detail ?? "支持 Ollama、LM Studio 和其他 OpenAI-compatible 本地服务；提示词和 UI 上下文不离开本机。"}</span></div>
-                        <button type="button" className="secondary-button compact" disabled={checkingLocalModel} onClick={() => void refreshLocalModel()}>{checkingLocalModel ? "检测中" : "重新检测"}</button>
-                      </div>
-                      <label className="wide"><span>本地服务地址</span><input value={localEndpoint} onChange={(event) => { setLocalEndpoint(event.target.value); setLocalModelStatus(undefined); }} placeholder="http://127.0.0.1:11434" /></label>
-                      <label className="wide"><span>Model</span>{localModelStatus?.models.length ? <select value={localModel} onChange={(event) => setLocalModel(event.target.value)}>{localModelStatus.models.map((name) => <option value={name} key={name}>{name}</option>)}</select> : <input value={localModel} onChange={(event) => setLocalModel(event.target.value)} placeholder="例如 qwen2.5:7b" />}</label>
-                      <div className="provider-offline wide"><LockKeyhole size={16} /><div><b>无需 API Key，本机处理</b><span>Reactor 只在 Flow 生成/修复阶段访问该地址；正式性能测量期间不会调用本地模型。</span></div></div>
-                    </>
-                  ) : providerMode === "codex" || providerMode === "claude" ? (
-                    <>
-                      <div className={`provider-offline wide ${selectedCliStatus?.available && selectedCliStatus.authenticated ? "ready" : "warning"}`}>
-                        <ShieldCheck size={16} />
-                        <div><b>{providerNames[providerMode]} · {selectedCliStatus?.version ?? (checkingCli ? "检测中…" : "尚未检测")}</b><span>{selectedCliStatus?.detail ?? "复用本机已有安装与登录状态；Reactor 不读取凭据，也不会自动安装。"}</span></div>
-                        <button type="button" className="secondary-button compact" disabled={checkingCli} onClick={() => void refreshCliProviders()}>{checkingCli ? "检测中" : "重新检测"}</button>
-                      </div>
-                      <label className="wide"><span>可执行文件路径</span><input value={providerMode === "codex" ? codexExecutable : claudeExecutable} onChange={(event) => providerMode === "codex" ? setCodexExecutable(event.target.value) : setClaudeExecutable(event.target.value)} placeholder={providerMode === "codex" ? "/Applications/Codex.app/Contents/Resources/codex" : "/opt/homebrew/bin/claude"} /></label>
-                      <label className="wide"><span>Model（留空则使用 CLI 默认模型）</span><input value={cliModel} onChange={(event) => setCliModel(event.target.value)} placeholder="使用 CLI 默认模型" /></label>
-                      <div className="provider-offline wide"><LockKeyhole size={16} /><div><b>只在 Flow 生成/修复阶段调用</b><span>禁用写入工具和权限交互，输出必须通过 Reactor Flow Schema；正式性能测量期间绝不调用模型。</span></div></div>
-                    </>
-                  ) : (
-                    <>
-                      <label><span>Base URL 或完整端点（自动兼容 Responses / Chat Completions）</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://provider.example/v1" /></label>
-                      <label><span>Model</span><input value={model} onChange={(event) => setModel(event.target.value)} /></label>
-                      <label className="wide"><span>API Key（仅保留在当前会话）</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="sk-…" /></label>
-                      <label className="credential-option"><input type="checkbox" checked={saveApiKey} onChange={(event) => setSaveApiKey(event.target.checked)} /><span>保存到系统钥匙串</span></label>
-                      <label className="credential-option"><input type="checkbox" checked={useSavedApiKey} onChange={(event) => setUseSavedApiKey(event.target.checked)} /><span>使用已保存的密钥</span></label>
-                    </>
-                  )}
-                </div>
-              )}
-              <div className="composer-footer">
-                <p><ShieldCheck size={14} />生成发生在测量前；正式运行只执行锁定 Flow</p>
-                <div className="composer-actions">
-                  {generationContext && includeGenerationContext && (
-                    <button className="secondary-button" disabled={busy || !selectedTarget || providerBlocked || !intent.trim() || !appId.trim()} onClick={() => void onExploreFlow()} title="在准备阶段生成、真实试跑，并在失败时使用脱敏界面证据最多修复两次">
-                      {busy ? <RefreshCw size={17} className="spin" /> : <Smartphone size={17} />}AI 探索并试跑
-                    </button>
-                  )}
-                  <button className="primary-button" disabled={busy || !intent.trim() || !appId.trim() || providerBlocked} onClick={onGenerate}>
-                    {busy ? <RefreshCw size={17} className="spin" /> : <WandSparkles size={17} />}使用 {providerNames[providerMode]} 生成
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <FlowPerformancePanel snapshot={activeJob} trialRunning={trialRunning} trialTelemetry={trialTelemetry} />
-
-            {generated && (
-              <div className="flow-ready-banner" role="status">
-                <Check size={18} />
-                <div><b>Flow 已生成：{generated.flow.name}</b><span>{flowEditNotice || "可以查看完整步骤、Flow JSON 和 Maestro YAML，也可以在试跑前修改。"}</span></div>
-                <button className="secondary-button" onClick={() => { beginFlowEdit(); window.setTimeout(() => flowCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 40); }}><Pencil size={15} />查看并编辑 Flow</button>
-              </div>
-            )}
-
-            {generated && (
-              <div className="flow-workbench" ref={flowCardRef}>
-              <div className="flow-card card">
-                <div className="card-heading">
-                  <div className="heading-icon green"><FlaskConical size={19} /></div>
-                  <div><h2>{generated.flow.name}</h2><p>{generated.provider} · {generated.model}</p></div>
-                  <div className="flow-card-tools">
-                    <span className="schema-badge">FLOW v{generated.flow.schemaVersion}</span>
-                    <div className="flow-view-tabs" role="tablist" aria-label="Flow 内容视图">
-                      <button role="tab" aria-selected={flowView === "steps"} className={flowView === "steps" ? "active" : ""} onClick={() => setFlowView("steps")}>步骤</button>
-                      <button role="tab" aria-selected={flowView === "json"} className={flowView === "json" ? "active" : ""} onClick={() => setFlowView("json")}>Flow JSON</button>
-                      <button role="tab" aria-selected={flowView === "maestro"} className={flowView === "maestro" ? "active" : ""} onClick={() => setFlowView("maestro")}>Maestro YAML</button>
-                    </div>
-                  </div>
-                </div>
-                {flowView === "steps" ? (
-                  <>
-                    <FlowTimeline title="测量前" steps={generated.flow.setup} muted />
-                    <FlowTimeline title="正式测量窗口" steps={generated.flow.measured} />
-                    {generated.flow.teardown.length > 0 && <FlowTimeline title="测量后" steps={generated.flow.teardown} muted />}
-                  </>
-                ) : flowView === "json" && flowEditing ? (
-                  <div className="flow-editor">
-                    <div className="flow-source-heading">
-                      <div><b>编辑 Reactor Flow JSON</b><span>保存前由 Rust 校验并重新编译 Maestro YAML；修改会使旧试跑和锁定失效</span></div>
-                      <div className="flow-source-actions">
-                        <button className="secondary-button" disabled={busy} onClick={cancelFlowEdit}>取消</button>
-                        <button className="primary-button" disabled={busy || !flowJsonDraft.trim()} onClick={() => void applyFlowEdit()}>{busy ? <RefreshCw size={15} className="spin" /> : <Save size={15} />}校验并应用</button>
-                      </div>
-                    </div>
-                    <textarea aria-label="Reactor Flow JSON 编辑器" value={flowJsonDraft} onChange={(event) => { setFlowJsonDraft(event.target.value); setFlowEditError(""); }} spellCheck={false} />
-                    {flowEditError && <div className="flow-editor-error">{flowEditError}</div>}
-                  </div>
-                ) : (
-                  <FlowSource
-                    kind={flowView}
-                    source={flowView === "json" ? JSON.stringify(generated.flow, null, 2) : maestroSource(compiledFlow)}
-                    copied={flowCopied}
-                    onCopy={copyFlowSource}
-                    onEdit={flowView === "json" ? beginFlowEdit : undefined}
-                  />
-                )}
-                {(trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && !flowLock && (
-                  <section className="trial-prompt-panel">
-                    <div><LockKeyhole size={15} /><span><b>试跑数据准备 · {trialPromptReferences.length + trialSecretReferences.length} 项</b><small>仅在 Flow 声明输入引用时显示；一次性值不落盘，Secret/TOTP只保存到系统凭据库，均不会发送给 AI。</small></span></div>
-                    {reactNativeDemoDataAvailable && <button className="secondary-button" disabled={savingTrialSecret === "valid_password"} onClick={() => void loadReactNativeDemoData()}>{savingTrialSecret === "valid_password" ? "正在加载 Demo 数据…" : "一键加载 RN Demo 示例数据"}</button>}
-                    {trialPromptReferences.map((reference) => {
-                      const metadata = trialInputMetadata(reference);
-                      return <label key={reference}><span>{metadata.label}<small>{reference} · {metadata.detail}</small></span><input type={metadata.sensitive ? "password" : "text"} autoComplete="off" value={trialPromptValues[reference] ?? ""} onChange={(event) => setTrialPromptValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={metadata.placeholder} /></label>;
-                    })}
-                    {trialSecretReferences.map(({ reference, kind }) => {
-                      const metadata = trialSecretMetadata(reference, kind);
-                      return <label className="trial-secret-row" key={reference}><span>{metadata.label}<small>{reference} · {metadata.detail} · {trialSecretStatus[reference] ? "已就绪" : "未配置"}</small></span><input type="password" autoComplete="off" value={trialSecretValues[reference] ?? ""} onChange={(event) => setTrialSecretValues((values) => ({ ...values, [reference]: event.target.value }))} placeholder={trialSecretStatus[reference] ? "已安全保存；输入新值可覆盖" : metadata.placeholder} /><button className="secondary-button" disabled={savingTrialSecret === reference || !trialSecretValues[reference]?.trim()} onClick={() => void saveTrialSecret(reference)}>{savingTrialSecret === reference ? "保存中" : trialSecretStatus[reference] ? "更新" : "安全保存"}</button></label>;
-                    })}
-                  </section>
-                )}
-                {preparation && <PreparationReview preparation={preparation} />}
-                <div className="flow-actions">
-                  {flowLock ? (
-                    <div className="hash-block"><LockKeyhole size={16} /><span>已锁定</span><code>{flowLock.flow.appId} · {flowLock.flowHash.slice(0, 12)}…</code></div>
-                  ) : <p>{availableTargets.length ? "先在模拟器/设备试跑，通过后生成不可变哈希。" : `先准备 Reactor 内置工具并启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"}；静态校验不能替代上机试跑。`}</p>}
-                  {!flowLock && !preparation ? (
-                    <button className="secondary-button" disabled={busy || !selectedTarget || !trialDataReady} onClick={onTrial}><Play size={16} />{selectedTarget ? trialPromptReferences.length || trialSecretReferences.length ? "数据就绪后试跑" : "在目标试跑" : "等待测试目标"}</button>
-                  ) : !flowLock && preparation?.failure ? (
-                    preparation.failure.code === "runtime_input_rejected" ? trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />使用新数据重新试跑</button> : <button className="primary-button" disabled={busy} onClick={() => document.querySelector(".trial-prompt-panel")?.scrollIntoView({ behavior: "smooth", block: "center" })}><RefreshCw size={16} />重新填写运行数据</button> : preparation.failure.code === "target_unavailable" ? <button className="secondary-button" disabled={busy} onClick={() => { setPreparation(undefined); void onRefresh(); }}><RefreshCw size={16} />准备/刷新测试目标</button> : isReactorEvidenceFailure(preparation.failure.code) ? (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && !trialDataReady ? <button className="primary-button" disabled={busy} onClick={() => document.querySelector(".trial-prompt-panel")?.scrollIntoView({ behavior: "smooth", block: "center" })}><RefreshCw size={16} />准备数据后重新采集证据</button> : <button className="primary-button" disabled={busy} onClick={onTrial}><RefreshCw size={16} />重新采集起始页证据并试跑</button> : (trialPromptReferences.length > 0 || trialSecretReferences.length > 0) && trialDataReady ? <button className="primary-button" disabled={busy} onClick={onTrial}><Play size={16} />数据就绪，重新试跑</button> : <button className="primary-button" disabled={busy || providerBlocked} onClick={() => document.querySelector(".flow-copilot")?.scrollIntoView({ behavior: "smooth", block: "center" })}><WandSparkles size={16} />交给 Flow Copilot 修复</button>
-                  ) : !flowLock && preparation?.trial ? (
-                    preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
-                  ) : flowLock ? (
-                    <div className="run-buttons">
-                      {platform === "android" && <label className="run-preset"><span>运行模式</span><select value={pendingRunMode} onChange={(event) => setPendingRunMode(event.target.value as "benchmark" | "diagnose" | "manual")}><option value="benchmark">Benchmark · 稳定基准</option><option value="diagnose">Diagnose · 运行 Flow 并录制</option><option value="manual">手动录制 · Start/Stop 自由操作</option></select></label>}
-                      {pendingRunMode === "manual" ? <div className="run-preset"><span>手动会话</span><b>最长 5 分钟 · 可随时停止并保存</b></div> : <label className="run-preset"><span>{pendingRunMode === "diagnose" ? "录制预设" : "采集预设"}</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">{pendingRunMode === "diagnose" ? "快速观察 · 1 次 × 5 秒" : "快速验收 · 1 次 × 5 秒"}</option><option value="standard">{pendingRunMode === "diagnose" ? "正式录制 · 3 次 × 18 秒" : "正式基准 · 10 次 × 18 秒"}</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>}
-                      {flowLock.trial?.synthetic && availableTargets.length > 0 && (
-                        <button className="secondary-button" disabled={busy} onClick={() => { setFlowLock(undefined); setPreparation(undefined); }}>改用模拟器试跑</button>
-                      )}
-                      <button className="secondary-button" disabled={busy} onClick={onDemo} title="使用明确标记的虚拟指标预览三框架报告布局，不会测量真实应用">三框架模拟导览</button>
-                      <button className="primary-button" disabled={busy || !selectedTarget || flowLock.trial?.synthetic !== false} onClick={onRealRun} title={selectedTarget ? pendingRunMode === "manual" ? "开始后可在 App 中自由操作；点击停止后会完整关闭采集器并保存证据" : pendingRunMode === "diagnose" ? "执行 Flow 并同屏录制实时性能；正式结论仍以结束后的原始证据为准" : `在所选 ${platform === "ios" ? "iOS Simulator 使用 xctrace" : "Android 模拟器或设备"}执行测量` : `启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"} 后启用`}>{busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}{selectedTarget ? platform === "ios" ? "iOS xctrace 运行" : pendingRunMode === "manual" ? "Start 手动录制" : pendingRunMode === "diagnose" ? "开始 Diagnose 录制" : "开始 Benchmark" : `等待 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"}`}</button>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-              </div>
-            )}
-
-            {results.length > 0 && <Results results={results} reportPath={reportPath} />}
-          </section>
-
-          <aside className="inspector-column">
-            {generated && <FlowCopilot
-              flow={generated.flow}
-              provider={providerMode}
-              providerLabel={providerNames[providerMode]}
-              endpoint={providerMode === "local" ? localEndpoint : providerMode === "cloud" ? endpoint : undefined}
-              apiKey={providerMode === "cloud" ? apiKey || undefined : undefined}
-              saveApiKey={providerMode === "cloud" && saveApiKey}
-              useSavedApiKey={providerMode === "cloud" && useSavedApiKey}
-              model={providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel || undefined : model}
-              cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
-              disabled={busy || providerBlocked}
-              locked={Boolean(flowLock)}
-              contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" && !isReactorEvidenceFailure(preparation.failure.code) ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
-              failureUiTree={preparation?.failure?.code !== "runtime_input_rejected" ? preparation?.context?.uiTree : undefined}
-              onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
-              onApply={applyCopilotProposal}
-            />}
-            <div className="card environment-card">
-              <div className="mini-heading"><h3>运行环境</h3><button className="icon-button small" onClick={onRefresh}><RefreshCw size={14} /></button></div>
-              <div className="environment-list">
-                {environment?.doctor.checks.map((check) => (
-                  <div className="environment-row" key={check.id}>
-                    <div className={`tool-icon ${check.available ? "ok" : "missing"}`}>
-                      {check.id === "adb" ? <Smartphone size={15} /> : check.id === "java" ? <Cpu size={15} /> : <HardDrive size={15} />}
-                    </div>
-                    <div><b>{check.label}</b><span>{check.available ? "Reactor 内置版本" : "等待准备"}</span></div>
-                    {check.available && <Check size={15} className="check" />}
-                  </div>
-                )) ?? <div className="skeleton-list" />}
-              </div>
-              <div className="device-summary">
-                <div><Smartphone size={18} /><span><b>{availableTargets.length}</b> 个 {platform === "ios" ? "iOS" : "Android"} 目标</span></div>
-                {availableTargets.length > 1 ? (
-                  <select className="device-select" value={selectedTarget?.id ?? ""} onChange={(event) => setSelectedDeviceId(event.target.value)}>
-                    {availableTargets.map((device) => <option value={device.id} key={device.id}>{device.name ?? device.id} · {device.physical ? "物理设备" : "模拟器"}</option>)}
-                  </select>
-                ) : (
-                  <span>{selectedTarget ? `${selectedTarget.name ?? selectedTarget.id} · ${selectedTarget.physical ? "物理设备" : "模拟器"} · ${selectedTarget.metadata.osVersion ?? "OS 未知"}` : `启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"} 后可执行测量`}</span>
-                )}
-              </div>
-              {!environment?.doctor.ready && (
-                <button className="primary-button setup-button" disabled={preparingTools} onClick={onPrepareTools}>
-                  {preparingTools ? <RefreshCw size={15} className="spin" /> : <HardDrive size={15} />}
-                  {preparingTools ? "正在准备内置工具…" : "一键准备内置工具"}
-                </button>
-              )}
-            </div>
-
-            <div className="card guard-card">
-              <div className="guard-title"><ShieldCheck size={19} /><h3>确定性保护</h3></div>
-              <ul>
-                <li><Check size={14} />AI 调用只发生在准备阶段</li>
-                <li><Check size={14} />Flow 经校验后生成 SHA-256</li>
-                <li><Check size={14} />运行保留原始指标和版本信息</li>
-                <li><Check size={14} />模拟结果不会混入真实性能报告</li>
-              </ul>
-            </div>
-
-            <div className="card architecture-card">
-              <p className="eyebrow">EXECUTION MODEL</p>
-              <div className="architecture-flow">
-                <span><Laptop size={16} />桌面界面</span><ArrowRight size={14} />
-                <span><Cpu size={16} />Rust Runner</span><ArrowRight size={14} />
-                <span><Database size={16} />原始证据</span>
-              </div>
-              <p>关闭界面不会改变正式测量逻辑，CLI 与桌面端共用相同核心。</p>
-            </div>
-          </aside>
-        </div>
-        </>
-        )}
+        ) : null}
       </main>
     </div>
   );
@@ -2134,6 +1927,23 @@ function loadFlowDraft(): PersistedFlowDraft | undefined {
   }
 }
 
+function loadProviderSettings(): PersistedProviderSettings | undefined {
+  try {
+    const raw = window.localStorage.getItem(PROVIDER_SETTINGS_KEY);
+    if (!raw) return undefined;
+    const value = JSON.parse(raw) as Partial<PersistedProviderSettings>;
+    if (
+      value.version !== 1
+      || !["local", "codex", "claude", "cloud"].includes(value.providerMode ?? "")
+      || [value.endpoint, value.model, value.localEndpoint, value.localModel, value.cliModel, value.codexExecutable, value.claudeExecutable].some((entry) => typeof entry !== "string")
+      || typeof value.useSavedApiKey !== "boolean"
+    ) return undefined;
+    return value as PersistedProviderSettings;
+  } catch {
+    return undefined;
+  }
+}
+
 function jobMetadata(job: Job) {
   const request = typeof job.request === "object" && job.request !== null
     ? job.request as Record<string, unknown>
@@ -2285,7 +2095,7 @@ function DeviceLab({
                     <code>{device.id}</code>
                     <p>{device.platform === "ios" ? "iOS" : "Android"} · {device.physical ? "物理设备" : "模拟器"} · {device.metadata.osVersion ?? "OS 未知"} · {device.metadata.refreshRate ? `${device.metadata.refreshRate} Hz` : "刷新率待测"}</p>
                   </div>
-                  <button className="secondary-button" onClick={() => onUseDevice(device.id, device.platform)}>用于 Flow Studio</button>
+                  <button className="secondary-button" onClick={() => onUseDevice(device.id, device.platform)}>用于 Flow Explorer</button>
                 </article>
               ))}
             </div>
@@ -2314,6 +2124,28 @@ function SettingsCenter({
   checkingCli,
   checkingLocalModel,
   preparingTools,
+  providerMode,
+  endpoint,
+  model,
+  apiKey,
+  saveApiKey,
+  useSavedApiKey,
+  localEndpoint,
+  localModel,
+  cliModel,
+  codexExecutable,
+  claudeExecutable,
+  onProviderMode,
+  onEndpoint,
+  onModel,
+  onApiKey,
+  onSaveApiKey,
+  onUseSavedApiKey,
+  onLocalEndpoint,
+  onLocalModel,
+  onCliModel,
+  onCodexExecutable,
+  onClaudeExecutable,
   onRefreshCli,
   onRefreshLocal,
   onPrepareTools,
@@ -2324,6 +2156,28 @@ function SettingsCenter({
   checkingCli: boolean;
   checkingLocalModel: boolean;
   preparingTools: boolean;
+  providerMode: FlowProviderMode;
+  endpoint: string;
+  model: string;
+  apiKey: string;
+  saveApiKey: boolean;
+  useSavedApiKey: boolean;
+  localEndpoint: string;
+  localModel: string;
+  cliModel: string;
+  codexExecutable: string;
+  claudeExecutable: string;
+  onProviderMode: (value: FlowProviderMode) => void;
+  onEndpoint: (value: string) => void;
+  onModel: (value: string) => void;
+  onApiKey: (value: string) => void;
+  onSaveApiKey: (value: boolean) => void;
+  onUseSavedApiKey: (value: boolean) => void;
+  onLocalEndpoint: (value: string) => void;
+  onLocalModel: (value: string) => void;
+  onCliModel: (value: string) => void;
+  onCodexExecutable: (value: string) => void;
+  onClaudeExecutable: (value: string) => void;
   onRefreshCli: () => void;
   onRefreshLocal: () => void;
   onPrepareTools: () => void;
@@ -2388,6 +2242,7 @@ function SettingsCenter({
     try {
       await erasePrivateData("all_local_data");
       window.localStorage.removeItem(FLOW_DRAFT_KEY);
+      window.localStorage.removeItem(PROVIDER_SETTINGS_KEY);
       window.location.reload();
     } catch (reason) {
       setMaintenanceError(String(reason));
@@ -2428,6 +2283,10 @@ function SettingsCenter({
       <header className="topbar"><div><p className="eyebrow">SETTINGS</p><h1>设置与能力诊断</h1></div><span className="status-pill ready"><span className="status-dot" />本地优先</span></header>
       <div className="settings-grid">
         <section className="card"><div className="card-heading"><div className="heading-icon purple"><Bot size={18} /></div><div><h2>AI Provider</h2><p>只复用已有安装和登录态，不读取凭据。</p></div><button className="icon-button" onClick={onRefreshCli} disabled={checkingCli}><RefreshCw size={16} className={checkingCli ? "spin" : ""} /></button></div>
+          <div className="analysis-provider-mode" role="group" aria-label="Flow AI 默认 Provider"><button className={providerMode === "codex" ? "active" : ""} onClick={() => onProviderMode("codex")}>Codex CLI</button><button className={providerMode === "claude" ? "active" : ""} onClick={() => onProviderMode("claude")}>Claude Code</button><button className={providerMode === "cloud" ? "active" : ""} onClick={() => onProviderMode("cloud")}>Cloud AI</button></div>
+          {(providerMode === "codex" || providerMode === "claude") && <div className="analysis-provider-fields"><label><span>可执行文件（留空自动发现）</span><input value={providerMode === "codex" ? codexExecutable : claudeExecutable} onChange={(event) => providerMode === "codex" ? onCodexExecutable(event.target.value) : onClaudeExecutable(event.target.value)} /></label><label><span>Model（可留空）</span><input value={cliModel} onChange={(event) => onCliModel(event.target.value)} /></label></div>}
+          {providerMode === "cloud" && <div className="analysis-provider-fields"><label><span>Base URL</span><input value={endpoint} onChange={(event) => onEndpoint(event.target.value)} /></label><label><span>Model</span><input value={model} onChange={(event) => onModel(event.target.value)} /></label><label><span>API Key（仅当前会话）</span><input type="password" autoComplete="off" value={apiKey} onChange={(event) => onApiKey(event.target.value)} /></label><label className="input-clear-option"><input type="checkbox" checked={saveApiKey} onChange={(event) => onSaveApiKey(event.target.checked)} /><span>调用成功后保存到系统钥匙串</span></label><label className="input-clear-option"><input type="checkbox" checked={useSavedApiKey} onChange={(event) => onUseSavedApiKey(event.target.checked)} /><span>使用系统钥匙串中已保存的 Key</span></label></div>}
+          <div className="analysis-provider-fields"><label><span>Local Model 地址（仅结果解读等可选能力）</span><input value={localEndpoint} onChange={(event) => onLocalEndpoint(event.target.value)} /></label><label><span>Local Model</span><input value={localModel} onChange={(event) => onLocalModel(event.target.value)} /></label></div>
           <div className="settings-list">{cliProviders.map((provider) => <div key={provider.kind}><span>{provider.label}</span><b className={provider.available && provider.authenticated ? "ok-text" : "muted-text"}>{provider.available ? provider.authenticated ? "可用" : "待登录" : "未安装"}</b><small>{provider.version ?? provider.detail}</small></div>)}</div>
           <div className="settings-list"><div><span>Local Model（可选）</span><b className={localModelStatus?.available ? "ok-text" : "muted-text"}>{localModelStatus?.available ? "可用" : "未运行"}</b><small>{localModelStatus?.detail ?? "未检测"}</small><button className="text-button" onClick={onRefreshLocal} disabled={checkingLocalModel}>重新检测</button></div><div><span>Cloud API（可选）</span><b className="muted-text">按需配置</b><small>API Key 仅存系统钥匙串；无 Key 时禁止调用。</small></div></div>
         </section>

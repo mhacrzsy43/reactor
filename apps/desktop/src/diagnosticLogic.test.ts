@@ -112,7 +112,7 @@ test("historical Runs group by flowHash and sort newest first", () => {
   assert.deepEqual(groups[0]?.runs.map((run) => run.runId), ["newer", "older"]);
 });
 
-test("current Flow Studio flow is preferred, with explicit Run selection retained", () => {
+test("current Flow Explorer flow is preferred, with explicit Run selection retained", () => {
   const runs = [diagnosticRun({ runId: "a" }), diagnosticRun({ runId: "b", flowHash: "flow-b" })];
   assert.equal(preferredDiagnosticFlowHash(runs, "flow-b"), "flow-b");
   assert.equal(preferredDiagnosticFlowHash(runs, "missing"), "flow-a");

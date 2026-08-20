@@ -46,7 +46,7 @@ interface DiagnosticFlowContext {
 interface DiagnosticCenterProps {
   activeFlow?: DiagnosticFlowContext;
   manualRecordingActive?: boolean;
-  onNavigate?: (page: "flow" | "history" | "analysis") => void;
+  onNavigate?: (page: "explorer" | "history" | "analysis") => void;
   onViewHistoricalRun?: (jobId: string) => void;
   onLoadHistoricalFlow?: (flowLock: FlowLock, run: DiagnosticRunSummary) => void;
   onStartHistoricalRun?: (mode: "benchmark" | "diagnose", flowLock: FlowLock, run: DiagnosticRunSummary) => void;
@@ -146,7 +146,7 @@ function DiagnosticCenterContent(props: DiagnosticCenterProps) {
     {error && <div className="error-banner">{error}</div>}
     <section className={`diagnostic-live-entry card ${props.manualRecordingActive ? "active" : "idle"}`}>
       <div><Activity size={19} /><span><b>{props.manualRecordingActive ? "手动性能录制进行中" : "当前没有正在录制的性能会话"}</b><small>{props.manualRecordingActive ? "实时 CPU 与内存时间序列固定显示在页面顶部；可在设备中继续自由操作。" : "只在设备中点击 App 不会自动开始采集。请先启动手动 Start/Stop 录制。"}</small></span></div>
-      {!props.manualRecordingActive && props.onNavigate && <button className="primary-button" onClick={() => props.onNavigate?.("flow")}>前往 Flow Studio 启动录制</button>}
+      {!props.manualRecordingActive && props.onNavigate && <button className="primary-button" onClick={() => props.onNavigate?.("explorer")}>前往 Flow Explorer 启动录制</button>}
     </section>
     <HistoricalRunSelector
       activeFlowHash={props.activeFlow?.flowHash}
@@ -487,7 +487,7 @@ function DiagnosticWorkbench({ activeFlow, onNavigate, onViewHistoricalRun, onLo
         </div>
         {view === "overview" && <PerformanceOverview framework={framework} result={selectedResult} currentEvidence={currentEvidence} hermesEvidence={hermesEvidence} loading={runsLoading} onDrill={drill} onNavigate={onNavigate} />}
         {framework !== "react-native" && view !== "overview" && <FrameworkPending framework={framework} onOverview={() => setView("overview")} />}
-        {framework === "react-native" && view === "runtime" && <RuntimeDiagnostics result={selectedResult} onCollect={onNavigate ? () => onNavigate("flow") : undefined} />}
+        {framework === "react-native" && view === "runtime" && <RuntimeDiagnostics result={selectedResult} onCollect={onNavigate ? () => onNavigate("explorer") : undefined} />}
         {framework === "react-native" && view === "render" && (current ? <><EvidenceDetails evidence={currentEvidence} result={selectedResult} /><ComponentTable components={current.components} selectedCommit={selectedCommit} /></> : <EvidenceEmpty title="尚无 React Render Profile" detail="同 Flow 的受管 Run 未采集 Profile，或尚未导入本地 React Profiler JSON。本地文件只作为未验证的导入上下文。" cta="前往采集或导入" targetId="rn-profile-import" />)}
         {framework === "react-native" && view === "findings" && (current ? <><EvidenceDetails evidence={currentEvidence} result={selectedResult} /><Findings report={current} onDrill={(commitId) => drill(commitId ? "timeline" : "render", commitId)} /></> : <EvidenceEmpty title="可疑渲染规则需要 React Profile" detail="规则只检查 Profile 中已记录的变化字段与组件/Commit 关系；没有证据时不会产生结论。" cta="前往采集或导入" targetId="rn-profile-import" />)}
         {framework === "react-native" && view === "hermes" && (hermes ? <><EvidenceDetails evidence={hermesEvidence} /><FunctionHotspots report={hermes} /></> : <EvidenceEmpty title="尚无 Hermes / JS CPU Profile" detail="当前受管 Run 未提供 CPU Profile。可导入本地 Hermes 或 Chrome CPU Profile；其 Flow 身份保持未验证。" cta="导入 CPU Profile" targetId="rn-profile-import" />)}
@@ -553,7 +553,7 @@ function HistoricalRunSelector({
 }) {
   const runs = groups.find((group) => group.flowHash === selectedFlowHash)?.runs ?? [];
   return <section className="diagnostic-history-selector card">
-    <div className="diagnostic-selector-heading"><div><b>历史 Flow / Run</b><span>Flow 按 flowHash 分组；默认优先当前 Flow Studio 的锁定 Flow。</span></div>{loading && <RefreshCw size={15} className="spin" />}</div>
+    <div className="diagnostic-selector-heading"><div><b>历史 Flow / Run</b><span>Flow 按 flowHash 分组；默认优先当前 Flow Explorer 的锁定 Flow。</span></div>{loading && <RefreshCw size={15} className="spin" />}</div>
     {groups.length ? <div className="diagnostic-selector-grid">
       <label><span>Flow</span><select value={selectedFlowHash ?? ""} onChange={(event) => onFlow(event.target.value)}>{groups.map((group) => {
         const latest = group.runs[0];
@@ -590,7 +590,7 @@ function HistoricalRunActions({ run, eligibility, lock, loading, onViewEvidence,
       <button className="secondary-button" disabled={!canLoad || !lock || loading} onClick={onLoad} title={reason}>加载验证 Flow</button>
       <button className="secondary-button" disabled={!canRun || !rerunnable || loading} onClick={onBenchmark} title={reason}>新 Benchmark</button>
       <button className="primary-button" disabled={!canRun || !diagnoseAvailable || loading} onClick={onDiagnose} title={run.platform === "ios" ? "iOS Diagnose 暂不可用" : reason}>{run.platform === "ios" ? "iOS Diagnose 不可用" : "新 Diagnose"}</button>
-      <small>加载只切换到 Flow Studio，不自动运行。新运行不会复用旧设备、Secret 或 Prompt 输入。</small>
+      <small>加载只切换到 Flow Explorer，不自动运行。新运行不会复用旧设备、Secret 或 Prompt 输入。</small>
     </div>
   </section>;
 }
@@ -641,7 +641,7 @@ function PerformanceOverview({
   hermesEvidence?: ProfileEvidence;
   loading: boolean;
   onDrill: (target: DiagnosticView) => void;
-  onNavigate?: (page: "flow" | "history" | "analysis") => void;
+  onNavigate?: (page: "explorer" | "history" | "analysis") => void;
 }) {
   const current = currentEvidence?.report;
   const hermes = hermesEvidence?.report;
@@ -675,7 +675,7 @@ function PerformanceOverview({
           ))}
         </div>
       ) : (
-        <div className="diagnostic-run-empty"><Activity size={21} /><div><b>搜索范围内没有 {frameworkLabel(framework)} 的可用 Run</b><span>可用 Run 必须已完成、有结果、非 synthetic，且成功迭代数大于 0。请运行当前 Flow 或到历史记录确认结果。</span></div>{onNavigate && <button className="secondary-button" onClick={() => onNavigate("flow")}>前往运行 Flow</button>}</div>
+        <div className="diagnostic-run-empty"><Activity size={21} /><div><b>搜索范围内没有 {frameworkLabel(framework)} 的可用 Run</b><span>可用 Run 必须已完成、有结果、非 synthetic，且成功迭代数大于 0。请运行当前 Flow 或到历史记录确认结果。</span></div>{onNavigate && <button className="secondary-button" onClick={() => onNavigate("explorer")}>前往运行 Flow</button>}</div>
       )}
       {framework === "react-native" ? (
         <div className="rn-evidence-status">

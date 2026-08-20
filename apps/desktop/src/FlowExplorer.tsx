@@ -52,11 +52,15 @@ interface FlowExplorerProps {
     cliExecutable?: string;
   };
   activeJobRunning: boolean;
+  initialFlow?: Flow;
+  initialFlowLock?: FlowLock;
+  initialPreparation?: TrialPreparation;
   onGoalChange: (goal: string) => void;
   onAiProviderChange: (provider: "codex" | "claude" | "cloud") => void;
   onSelectDevice: (device: Device) => void;
   onAppIdChange: (appId: string) => void;
   onRefreshDevices: () => void;
+  onDraftChange: (flow: Flow) => void;
   onPerformanceHandoff: (lock: FlowLock, preparation: TrialPreparation, compiled: CompiledFlow) => void;
 }
 
@@ -73,16 +77,22 @@ export function FlowExplorer({
   goal,
   ai,
   activeJobRunning,
+  initialFlow,
+  initialFlowLock,
+  initialPreparation,
   onGoalChange,
   onAiProviderChange,
   onSelectDevice,
   onAppIdChange,
   onRefreshDevices,
+  onDraftChange,
   onPerformanceHandoff,
 }: FlowExplorerProps) {
   const selectedDevice = useMemo(
-    () => devices.find((device) => device.id === selectedDeviceId) ?? devices[0],
-    [devices, selectedDeviceId],
+    () => devices.find((device) => device.id === selectedDeviceId)
+      ?? devices.find((device) => device.platform === initialFlow?.platform)
+      ?? devices[0],
+    [devices, initialFlow?.platform, selectedDeviceId],
   );
   const [snapshot, setSnapshot] = useState<DeviceInspectorSnapshot>();
   const [selectedElementKey, setSelectedElementKey] = useState<string>();
@@ -93,6 +103,7 @@ export function FlowExplorer({
   const [live, setLive] = useState(false);
   const [mode, setMode] = useState<"inspect" | "record">("inspect");
   const [recordedSteps, setRecordedSteps] = useState<FlowStep[]>([]);
+  const [flowMetadata, setFlowMetadata] = useState({ id: "interactive-recording", name: "Interactive recording" });
   const [measurementStart, setMeasurementStart] = useState<number>();
   const [teardownStart, setTeardownStart] = useState(0);
   const [flowView, setFlowView] = useState<"steps" | "json" | "yaml">("steps");
@@ -146,6 +157,7 @@ export function FlowExplorer({
   const editorErrorRef = useRef<HTMLDivElement>(null);
   const replayStepRefs = useRef<Array<HTMLLIElement | null>>([]);
   const activeReplayStepRef = useRef<number | undefined>(undefined);
+  const importedFlowRef = useRef("");
 
   useEffect(() => {
     activeReplayStepRef.current = activeReplayStep;
@@ -202,21 +214,51 @@ export function FlowExplorer({
     const setupEnd = measurementStart ?? teardownStart;
     return {
       schemaVersion: 1,
-      id: "interactive-recording",
-      name: "Interactive recording",
+      id: flowMetadata.id,
+      name: flowMetadata.name,
       appId: appId.trim(),
-      platform: selectedDevice?.platform === "ios" ? "ios" : "android",
+      platform: (selectedDevice?.platform ?? initialFlow?.platform) === "ios" ? "ios" : "android",
       intent: goal.trim() || undefined,
       setup: recordedSteps.slice(0, setupEnd),
       measured: measurementStart === undefined ? [] : recordedSteps.slice(measurementStart, teardownStart),
       teardown: recordedSteps.slice(teardownStart),
     };
-  }, [appId, goal, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
+  }, [appId, flowMetadata, goal, initialFlow?.platform, measurementStart, recordedSteps, selectedDevice?.platform, teardownStart]);
+
+  useEffect(() => {
+    if (!initialFlow) return;
+    const identity = JSON.stringify(initialFlow);
+    if (importedFlowRef.current === identity) return;
+    importedFlowRef.current = identity;
+    setFlowMetadata({ id: initialFlow.id, name: initialFlow.name });
+    const steps = [...initialFlow.setup, ...initialFlow.measured, ...initialFlow.teardown];
+    setRecordedSteps(steps);
+    setMeasurementStart(initialFlow.measured.length > 0 ? initialFlow.setup.length : undefined);
+    const nextTeardownStart = initialFlow.setup.length + initialFlow.measured.length;
+    setTeardownStart(nextTeardownStart);
+    teardownStartRef.current = nextTeardownStart;
+    setJsonDraft(JSON.stringify(initialFlow, null, 2));
+    setJsonDirty(false);
+    setTargetAssertion(findDestinationAssertion(steps));
+    setGatePreparation(initialPreparation);
+    setGateLock(initialFlowLock);
+    void compileFlowPreview(initialFlow).then(setCompiledFlow).catch((reason) => {
+      setCompiledFlow(undefined);
+      setEditorError(`已保存草稿需要修正：${String(reason)}`);
+    });
+  }, [initialFlow, initialFlowLock, initialPreparation]);
+
+  useEffect(() => {
+    if (recordedSteps.length === 0) return undefined;
+    const timer = window.setTimeout(() => onDraftChange(explorerFlow), 250);
+    return () => window.clearTimeout(timer);
+  }, [explorerFlow, onDraftChange, recordedSteps.length]);
 
   async function applyCopilotProposal(proposal: FlowModificationProposal) {
     const next = proposal.generated.flow;
     const compiled = await compileFlowPreview(next);
     rememberEditorState();
+    setFlowMetadata({ id: next.id, name: next.name });
     setRecordedSteps([...next.setup, ...next.measured, ...next.teardown]);
     setMeasurementStart(next.setup.length);
     const nextTeardownStart = next.setup.length + next.measured.length;
@@ -237,6 +279,7 @@ export function FlowExplorer({
     const next = generated.flow;
     const compiled = await compileFlowPreview(next);
     rememberEditorState();
+    setFlowMetadata({ id: next.id, name: next.name });
     setRecordedSteps([...next.setup, ...next.measured, ...next.teardown]);
     setMeasurementStart(next.setup.length);
     const nextTeardownStart = next.setup.length + next.measured.length;
@@ -380,10 +423,16 @@ export function FlowExplorer({
   }, [explorerFlow, jsonDirty]);
 
   useEffect(() => {
+    if (initialFlowLock && JSON.stringify(initialFlowLock.flow) === JSON.stringify(explorerFlow)) {
+      setGatePreparation(initialPreparation);
+      setGateLock(initialFlowLock);
+      setGateError("");
+      return;
+    }
     setGatePreparation(undefined);
     setGateLock(undefined);
     setGateError("");
-  }, [explorerFlow]);
+  }, [explorerFlow, initialFlowLock, initialPreparation]);
 
   const capture = useCallback(async () => {
     if (!selectedDevice || activeJobRunning || captureInFlight.current) return;
@@ -812,6 +861,7 @@ export function FlowExplorer({
       if (parsed.platform !== explorerFlow.platform) throw new Error("JSON platform 必须与当前设备平台一致");
       const compiled = await compileFlowPreview(parsed);
       rememberEditorState();
+      setFlowMetadata({ id: parsed.id, name: parsed.name });
       setRecordedSteps([...parsed.setup, ...parsed.measured, ...parsed.teardown]);
       setTargetAssertion(findDestinationAssertion([...parsed.setup, ...parsed.measured]));
       setMeasurementStart(parsed.setup.length);

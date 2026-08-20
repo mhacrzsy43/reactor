@@ -369,6 +369,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .explorer-toolbar-summary b { color: var(--text); font: 10px DM Mono, monospace; }
 .explorer-toolbar-summary span { margin-top: 4px; color: var(--muted); font-size: 9px; }
 .recording-console { max-width: 1390px; margin: 0 auto 12px; padding: 12px 14px; display: grid; grid-template-columns: 300px minmax(260px, 380px) 1fr auto; align-items: end; gap: 14px; }
+.explorer-run-workbench { max-width: 1390px; margin: 18px auto 0; }
+.explorer-run-workbench .diagnostic-history-actions { margin-top: 16px; }
 .recording-mode { height: 42px; padding: 3px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
 .recording-mode button { padding: 0 8px; display: grid; align-content: center; justify-items: start; gap: 1px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: 9px; }
 .recording-mode button span { font-size: 7px; opacity: .78; }
