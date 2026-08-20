@@ -12,14 +12,18 @@ import {
   Timer,
   Upload,
 } from "lucide-react";
-import { Component, useEffect, useRef, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
-import { analyzeManagedProfile, analyzeProfileJson, diffProfileReports, getJobSnapshot, listJobs } from "./api";
-import { diagnosticContextKey, isUsableDiagnosticResult, RequestTokens, sourceMapStatus } from "./diagnosticLogic";
+import { analyzeManagedProfile, analyzeProfileJson, diffProfileReports, getDiagnosticRerunEligibility, listDiagnosticRuns, loadHistoricalFlowLock } from "./api";
+import { diagnosticRunIdentity, diagnosticWorkbenchKey, groupDiagnosticRunsByFlow, historicalRerunBlockingReferences, preferredDiagnosticFlowHash, preferredDiagnosticRun, RequestTokens, sourceMapStatus } from "./diagnosticLogic";
 import { UnifiedTimeline } from "./UnifiedTimeline";
 import type {
   ComponentProfileStat,
   DiagnosticProfileReport,
+  DiagnosticArtifactRef,
+  DiagnosticRerunEligibility,
+  DiagnosticRunSummary,
+  FlowLock,
   NormalizedResult,
   ProfileCommit,
   ProfileDiffReport,
@@ -42,6 +46,9 @@ interface DiagnosticFlowContext {
 interface DiagnosticCenterProps {
   activeFlow?: DiagnosticFlowContext;
   onNavigate?: (page: "flow" | "history" | "analysis") => void;
+  onViewHistoricalRun?: (jobId: string) => void;
+  onLoadHistoricalFlow?: (flowLock: FlowLock, run: DiagnosticRunSummary) => void;
+  onStartHistoricalRun?: (mode: "benchmark" | "diagnose", flowLock: FlowLock, run: DiagnosticRunSummary) => void;
 }
 
 type EvidenceSlot = "current" | "hermes" | "baseline";
@@ -50,8 +57,7 @@ type AsyncRequest = "current" | "hermes" | "baseline" | "source-map" | "diff" | 
 
 const EMPTY_EVIDENCE: EvidenceCollection = { current: undefined, hermes: undefined, baseline: undefined };
 const EMPTY_SOURCE_MAP: SourceMapEvidence = { state: "not-collected", mappedCount: 0 };
-const JOB_SEARCH_LIMIT = 30;
-const JOB_SNAPSHOT_LIMIT = 20;
+const RUN_PAGE_SIZE = 20;
 const ASYNC_REQUESTS: readonly AsyncRequest[] = ["current", "hermes", "baseline", "source-map", "diff", "managed"];
 
 function evidenceKind(slot: EvidenceSlot): ProfileEvidenceKind {
@@ -59,8 +65,7 @@ function evidenceKind(slot: EvidenceSlot): ProfileEvidenceKind {
 }
 
 export function DiagnosticCenter(props: DiagnosticCenterProps) {
-  const framework = props.activeFlow?.framework ?? "react-native";
-  return <DiagnosticErrorBoundary><DiagnosticCenterContent key={diagnosticContextKey(props.activeFlow?.flowHash, framework)} {...props} /></DiagnosticErrorBoundary>;
+  return <DiagnosticErrorBoundary><DiagnosticCenterContent {...props} /></DiagnosticErrorBoundary>;
 }
 
 class DiagnosticErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -78,16 +83,97 @@ class DiagnosticErrorBoundary extends Component<{ children: ReactNode }, { faile
   }
 }
 
-function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterProps) {
-  const [framework, setFramework] = useState<DiagnosticFramework>(activeFlow?.framework ?? "react-native");
+function DiagnosticCenterContent(props: DiagnosticCenterProps) {
+  const [runs, setRuns] = useState<DiagnosticRunSummary[]>([]);
+  const [runsTotal, setRunsTotal] = useState(0);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [runsLoadingMore, setRunsLoadingMore] = useState(false);
+  const [selectedFlowHash, setSelectedFlowHash] = useState<string>();
+  const [selectedRunIdentity, setSelectedRunIdentity] = useState<string>();
+  const [selectedFramework, setSelectedFramework] = useState<DiagnosticFramework>(props.activeFlow?.framework ?? "react-native");
+  const [error, setError] = useState("");
+  const loadToken = useRef(0);
+
+  async function loadRuns(offset: number) {
+    const token = ++loadToken.current;
+    offset === 0 ? setRunsLoading(true) : setRunsLoadingMore(true);
+    setError("");
+    try {
+      const page = await listDiagnosticRuns({ limit: RUN_PAGE_SIZE, offset });
+      if (loadToken.current !== token) return;
+      setRuns((current) => offset === 0 ? page.runs : mergeDiagnosticRuns(current, page.runs));
+      setRunsTotal(page.total);
+    } catch (reason) {
+      if (loadToken.current === token) setError(`读取历史诊断 Run 失败：${String(reason)}`);
+    } finally {
+      if (loadToken.current === token) {
+        setRunsLoading(false);
+        setRunsLoadingMore(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    void loadRuns(0);
+    return () => { loadToken.current += 1; };
+  }, []);
+
+  useEffect(() => {
+    const preferred = preferredDiagnosticFlowHash(runs, props.activeFlow?.flowHash);
+    setSelectedFlowHash((current) => current && runs.some((run) => run.flowHash === current) ? current : preferred);
+  }, [runs, props.activeFlow?.flowHash]);
+
+  const selectedRun = preferredDiagnosticRun(runs, selectedFlowHash, selectedRunIdentity);
+  useEffect(() => {
+    setSelectedRunIdentity(selectedRun ? diagnosticRunIdentity(selectedRun) : undefined);
+  }, [selectedRun?.jobId, selectedRun?.runId]);
+
+  useEffect(() => {
+    const next = normalizeFramework(selectedRun?.framework ?? props.activeFlow?.framework ?? "react-native");
+    if (next) setSelectedFramework(next);
+  }, [selectedRun?.runId, selectedRun?.framework, props.activeFlow?.framework]);
+
+  const groups = useMemo(() => groupDiagnosticRunsByFlow(runs), [runs]);
+  const framework = selectedFramework;
+  const key = diagnosticWorkbenchKey(selectedRun?.jobId, selectedRun?.runId, selectedRun?.flowHash ?? selectedFlowHash, framework);
+
+  return <>
+    <header className="topbar diagnostic-topbar">
+      <div><p className="eyebrow">PERFORMANCE DIAGNOSTICS</p><h1>性能诊断</h1></div>
+      <div className="top-actions"><span className="status-pill ready"><span className="status-dot" />本地解析 · 不上传源码</span></div>
+    </header>
+    {error && <div className="error-banner">{error}</div>}
+    <HistoricalRunSelector
+      activeFlowHash={props.activeFlow?.flowHash}
+      groups={groups}
+      selectedFlowHash={selectedFlowHash}
+      selectedRun={selectedRun}
+      loading={runsLoading}
+      loadingMore={runsLoadingMore}
+      hasMore={runs.length < runsTotal}
+      onFlow={(flowHash) => { setSelectedFlowHash(flowHash); setSelectedRunIdentity(undefined); }}
+      onRun={setSelectedRunIdentity}
+      onLoadMore={() => void loadRuns(runs.length)}
+    />
+    <DiagnosticWorkbench key={key} {...props} selectedRun={selectedRun} runsLoading={runsLoading} framework={framework} onFrameworkChange={setSelectedFramework} />
+  </>;
+}
+
+function mergeDiagnosticRuns(current: DiagnosticRunSummary[], incoming: DiagnosticRunSummary[]) {
+  const byIdentity = new Map(current.map((run) => [`${run.jobId}:${run.runId}`, run]));
+  for (const run of incoming) byIdentity.set(`${run.jobId}:${run.runId}`, run);
+  return [...byIdentity.values()];
+}
+
+function DiagnosticWorkbench({ activeFlow, onNavigate, onViewHistoricalRun, onLoadHistoricalFlow, onStartHistoricalRun, selectedRun, runsLoading, framework, onFrameworkChange }: DiagnosticCenterProps & { selectedRun?: DiagnosticRunSummary; runsLoading: boolean; framework: DiagnosticFramework; onFrameworkChange: (framework: DiagnosticFramework) => void }) {
   const [evidence, setEvidence] = useState<EvidenceCollection>(EMPTY_EVIDENCE);
   const [sourceMap, setSourceMap] = useState<SourceMapEvidence>(EMPTY_SOURCE_MAP);
   const [diff, setDiff] = useState<ProfileDiffReport>();
   const [view, setView] = useState<DiagnosticView>("overview");
   const [selectedCommit, setSelectedCommit] = useState<ProfileCommit>();
-  const [runsLoading, setRunsLoading] = useState(true);
-  const [latestRuns, setLatestRuns] = useState<Partial<Record<DiagnosticFramework, NormalizedResult>>>({});
-  const [recentRuns, setRecentRuns] = useState<NormalizedResult[]>([]);
+  const [rerunEligibility, setRerunEligibility] = useState<DiagnosticRerunEligibility>();
+  const [historicalLock, setHistoricalLock] = useState<FlowLock | null>();
+  const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState("");
   const requests = useRef(new RequestTokens(ASYNC_REQUESTS));
 
@@ -109,10 +195,6 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
   function setEvidenceSlot(slot: EvidenceSlot, value: ProfileEvidence | undefined) {
     setEvidence((previous) => ({ ...previous, [slot]: value }));
   }
-
-  useEffect(() => {
-    if (activeFlow) setFramework(activeFlow.framework);
-  }, [activeFlow?.flowHash, activeFlow?.framework]);
 
   useEffect(() => () => {
     requests.current.cancelAll();
@@ -137,26 +219,45 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
 
   useEffect(() => {
     let cancelled = false;
-    void listJobs(JOB_SEARCH_LIMIT, 0).then(async (page) => {
-      const jobs = page.jobs.filter((job) => job.state === "completed" && job.resultPath).slice(0, JOB_SNAPSHOT_LIMIT);
-      const snapshots = await Promise.all(jobs.map((job) => getJobSnapshot(job.id, { limit: 1 }).catch(() => undefined)));
-      const usableResults = snapshots.flatMap((snapshot) => snapshot?.results.map((result) => ({ ...result, jobId: snapshot.job.id })) ?? []).filter(isUsableDiagnosticResult);
-      const next: Partial<Record<DiagnosticFramework, NormalizedResult>> = {};
-      for (const result of usableResults) {
-        const key = normalizeFramework(result.framework);
-        if (key && !next[key]) next[key] = result;
-      }
-      if (!cancelled) {
-        setLatestRuns(next);
-        setRecentRuns(usableResults);
-      }
+    setRerunEligibility(undefined);
+    setHistoricalLock(undefined);
+    if (!selectedRun) return;
+    void Promise.all([
+      getDiagnosticRerunEligibility(selectedRun.jobId, selectedRun.runId, selectedRun.flowHash),
+      loadHistoricalFlowLock(selectedRun.jobId, selectedRun.runId, selectedRun.flowHash),
+    ]).then(([eligibility, lock]) => {
+      if (cancelled) return;
+      setRerunEligibility(eligibility);
+      setHistoricalLock(lock);
     }).catch((reason) => {
-      if (!cancelled) setError(`读取最近 ${JOB_SEARCH_LIMIT} 个任务中的可用性能结果失败：${String(reason)}`);
-    }).finally(() => {
-      if (!cancelled) setRunsLoading(false);
+      if (!cancelled) setError(`读取历史 Flow 重跑能力失败：${String(reason)}`);
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [selectedRun?.jobId, selectedRun?.runId, selectedRun?.flowHash]);
+
+  async function historicalAction(mode: "load" | "benchmark" | "diagnose") {
+    if (!selectedRun) return;
+    setActionLoading(true);
+    setError("");
+    try {
+      const lock = historicalLock ?? await loadHistoricalFlowLock(selectedRun.jobId, selectedRun.runId, selectedRun.flowHash);
+      setHistoricalLock(lock);
+      if (!lock) throw new Error(rerunEligibility?.reason ?? "历史 Flow Lock 缺失，证据仍可分析，但不能重新运行");
+      if (mode === "load") onLoadHistoricalFlow?.(lock, selectedRun);
+      else {
+        const blockedReferences = historicalRerunBlockingReferences(lock.flow);
+        if (blockedReferences.length) {
+          throw new Error(`历史重跑已阻止：Flow 包含 ${blockedReferences.join("、")}，当前入口不能安全重新确认输入，也不会读取旧 Prompt 或系统凭据库 Secret/TOTP`);
+        }
+        if (!rerunEligibility?.eligible) throw new Error(rerunEligibility?.reason ?? "后端未确认该历史 Flow 可安全重跑");
+        onStartHistoricalRun?.(mode, lock, selectedRun);
+      }
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setActionLoading(false);
+    }
+  }
 
   async function loadProfile(slot: EvidenceSlot, file?: File) {
     if (!file) return;
@@ -271,13 +372,12 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
     setView(target);
   }
 
-  const selectedResult = activeFlow
-    ? recentRuns.find((result) => result.flowHash === activeFlow.flowHash && normalizeFramework(result.framework) === framework)
-    : latestRuns[framework];
+  const selectedResult = selectedRun ? { ...selectedRun.result, jobId: selectedRun.jobId } : undefined;
+  const managedProfileArtifact = selectedResult ? findManagedReactProfileArtifact(selectedResult) : undefined;
 
   useEffect(() => {
     const profileFile = selectedResult?.androidNative?.rnDiagnostics?.profileFile;
-    if (!profileFile || currentEvidence?.source === "local-file") return;
+    if (!profileFile || !managedProfileArtifact || currentEvidence?.source === "local-file") return;
     const token = startRequest("managed");
     setEvidenceSlot("current", {
       kind: "react",
@@ -285,13 +385,14 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
       state: "loading",
       fileName: profileFile.split(/[\\/]/).pop() ?? "rn-profile.json",
       rawFile: profileFile,
+      jobId: selectedResult.jobId,
       runId: selectedResult.runId,
       flowHash: selectedResult.flowHash,
       collector: selectedResult.androidNative?.rnDiagnostics?.collector,
       producer: "RN Profiling Renderer",
-      sameRunVerified: true,
+      sameRunVerified: false,
     });
-    void analyzeManagedProfile(profileFile)
+    void analyzeManagedProfile(selectedResult.jobId!, selectedResult.runId, managedProfileArtifact)
       .then((report) => {
         if (!requestIsCurrent("managed", token)) return;
         setEvidenceSlot("current", {
@@ -301,6 +402,7 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
           report,
           fileName: profileFile.split(/[\\/]/).pop() ?? "rn-profile.json",
           rawFile: profileFile,
+          jobId: selectedResult.jobId,
           runId: selectedResult.runId,
           flowHash: selectedResult.flowHash,
           collector: selectedResult.androidNative?.rnDiagnostics?.collector ?? report.sourceFormat,
@@ -319,50 +421,41 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
           state: "error",
           fileName: profileFile.split(/[\\/]/).pop() ?? "rn-profile.json",
           rawFile: profileFile,
+          jobId: selectedResult.jobId,
           runId: selectedResult.runId,
           flowHash: selectedResult.flowHash,
           collector: selectedResult.androidNative?.rnDiagnostics?.collector,
           producer: "RN Profiling Renderer",
-          sameRunVerified: true,
+          sameRunVerified: false,
           error: message,
         });
         setError(message);
       });
     return () => { requests.current.cancel("managed"); };
-  }, [selectedResult?.runId, selectedResult?.androidNative?.rnDiagnostics?.profileFile]);
+  }, [selectedResult?.jobId, selectedResult?.runId, selectedResult?.androidNative?.rnDiagnostics?.profileFile, managedProfileArtifact?.path, managedProfileArtifact?.sizeBytes, managedProfileArtifact?.sha256]);
 
   return (
     <>
-      <header className="topbar diagnostic-topbar">
-        <div>
-          <p className="eyebrow">PERFORMANCE DIAGNOSTICS</p>
-          <h1>性能诊断</h1>
-        </div>
-        <div className="top-actions">
-          <span className="status-pill ready"><span className="status-dot" />本地解析 · 不上传源码</span>
-        </div>
-      </header>
-
       {error && <div className="error-banner">{error}</div>}
 
-      <section className={`diagnostic-flow-context card ${activeFlow ? selectedResult ? "linked" : "pending" : "unbound"}`}>
-        <div>
-          <span>{activeFlow ? "当前锁定 Flow" : "未锁定 Flow"}</span>
-          <b>{activeFlow?.name ?? `仅搜索最近 ${JOB_SEARCH_LIMIT} 个任务、最多 ${JOB_SNAPSHOT_LIMIT} 个已完成快照`}</b>
-          <small>{activeFlow ? `${activeFlow.appId} · ${activeFlow.flowHash.slice(0, 12)}…` : "未锁定时按框架展示搜索范围内第一条可用 Run；不会称为全局最新。"}</small>
-        </div>
-        <div>
-          <strong>{activeFlow ? selectedResult ? "已找到同 Flow 的可用 Run" : "搜索范围内没有同 Flow 可用 Run" : "搜索范围内的可用 Run"}</strong>
-          {selectedResult && <code>{selectedResult.runId.slice(0, 12)}… · {selectedResult.platform} · {selectedResult.summary.successfulIterationCount} 次成功迭代</code>}
-          {onNavigate && <button className="secondary-button" onClick={() => onNavigate(activeFlow && selectedResult ? "history" : "flow")}>{activeFlow && selectedResult ? "查看 Run 证据" : activeFlow ? "返回 Flow 运行采集" : "前往 Flow Studio 锁定 Flow"}</button>}
-        </div>
-      </section>
+      <HistoricalRunActions
+        run={selectedRun}
+        eligibility={rerunEligibility}
+        lock={historicalLock}
+        loading={actionLoading}
+        onViewEvidence={onViewHistoricalRun && selectedRun ? () => onViewHistoricalRun(selectedRun.jobId) : undefined}
+        onLoad={() => void historicalAction("load")}
+        onBenchmark={() => void historicalAction("benchmark")}
+        onDiagnose={() => void historicalAction("diagnose")}
+        canLoad={Boolean(onLoadHistoricalFlow)}
+        canRun={Boolean(onStartHistoricalRun)}
+      />
 
       <section className="diagnostic-frameworks card" aria-label="框架选择">
         <div><b>选择框架</b><span>黑盒性能统一呈现，框架专项证据按能力接入</span></div>
         <div role="tablist">
           {(["react-native", "flutter", "lynx"] as DiagnosticFramework[]).map((item) => (
-            <button key={item} className={framework === item ? "active" : ""} onClick={() => { setFramework(item); setView("overview"); }}>
+            <button key={item} className={framework === item ? "active" : ""} onClick={() => { onFrameworkChange(item); setView("overview"); }}>
               <span className={`framework-dot ${item === "react-native" ? "" : item}`} />{frameworkLabel(item)}
               {item !== "react-native" && <small>专项接入中</small>}
             </button>
@@ -396,7 +489,7 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
           <div className="heading-icon purple"><Braces size={19} /></div>
           <div>
             <h2>采集或导入 RN 诊断证据</h2>
-            <p>{activeFlow ? `受管证据必须来自 Flow ${activeFlow.flowHash.slice(0, 12)}… 的可用 Run；本地导入不会验证或绑定 Flow 身份` : "锁定 Flow 并运行可获得同 Run 证据；本地 Profile 始终标记为未验证导入上下文"}</p>
+            <p>{selectedRun ? `受管证据必须来自 Job ${selectedRun.jobId.slice(0, 10)}… / Run ${selectedRun.runId.slice(0, 10)}… / Flow ${selectedRun.flowHash.slice(0, 12)}…；本地导入不会验证或绑定身份` : "选择历史 Run 后可加载同 Run 受管证据；本地 Profile 始终标记为未验证导入上下文"}</p>
           </div>
           <span className="schema-badge">PROFILE EVIDENCE v1</span>
         </div>
@@ -421,6 +514,73 @@ function DiagnosticCenterContent({ activeFlow, onNavigate }: DiagnosticCenterPro
       </section>}
     </>
   );
+}
+
+function HistoricalRunSelector({
+  activeFlowHash,
+  groups,
+  selectedFlowHash,
+  selectedRun,
+  loading,
+  loadingMore,
+  hasMore,
+  onFlow,
+  onRun,
+  onLoadMore,
+}: {
+  activeFlowHash?: string;
+  groups: ReturnType<typeof groupDiagnosticRunsByFlow>;
+  selectedFlowHash?: string;
+  selectedRun?: DiagnosticRunSummary;
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+  onFlow: (flowHash: string) => void;
+  onRun: (runId: string) => void;
+  onLoadMore: () => void;
+}) {
+  const runs = groups.find((group) => group.flowHash === selectedFlowHash)?.runs ?? [];
+  return <section className="diagnostic-history-selector card">
+    <div className="diagnostic-selector-heading"><div><b>历史 Flow / Run</b><span>Flow 按 flowHash 分组；默认优先当前 Flow Studio 的锁定 Flow。</span></div>{loading && <RefreshCw size={15} className="spin" />}</div>
+    {groups.length ? <div className="diagnostic-selector-grid">
+      <label><span>Flow</span><select value={selectedFlowHash ?? ""} onChange={(event) => onFlow(event.target.value)}>{groups.map((group) => {
+        const latest = group.runs[0];
+        return <option key={group.flowHash} value={group.flowHash}>{group.flowHash === activeFlowHash ? "当前 · " : ""}{latest.flowName ?? latest.appId ?? "未命名 Flow"} · {group.flowHash.slice(0, 12)}… ({group.runs.length})</option>;
+      })}</select></label>
+      <label><span>Run</span><select value={selectedRun ? diagnosticRunIdentity(selectedRun) : ""} onChange={(event) => onRun(event.target.value)}>{runs.map((run) => <option key={diagnosticRunIdentity(run)} value={diagnosticRunIdentity(run)}>{new Date(run.createdAt).toLocaleString()} · {run.platform} · {run.runId.slice(0, 10)}…</option>)}</select></label>
+    </div> : !loading && <div className="diagnostic-run-empty"><Activity size={20} /><div><b>没有可分析的历史 Run</b><span>列表只包含后端返回的可用诊断结果。</span></div></div>}
+    {selectedRun && <div className="diagnostic-run-badges"><span>{frameworkLabel(normalizeFramework(selectedRun.framework) ?? "react-native")}</span><span>{selectedRun.platform}</span><span>{selectedRun.devicePhysical ? "物理设备" : "模拟器"}</span><span>{selectedRun.successfulIterationCount}/{selectedRun.iterationCount} 成功</span><span className={selectedRun.lockAvailable ? "verified" : "warning"}>{selectedRun.lockAvailable ? "Flow Lock 可用" : "Flow Lock 缺失"}</span>{selectedRun.synthetic && <span className="warning">Synthetic</span>}</div>}
+    {hasMore && <button className="secondary-button diagnostic-load-more" disabled={loadingMore} onClick={onLoadMore}>{loadingMore && <RefreshCw size={14} className="spin" />}加载更多 Run</button>}
+  </section>;
+}
+
+function HistoricalRunActions({ run, eligibility, lock, loading, onViewEvidence, onLoad, onBenchmark, onDiagnose, canLoad, canRun }: {
+  run?: DiagnosticRunSummary;
+  eligibility?: DiagnosticRerunEligibility;
+  lock?: FlowLock | null;
+  loading: boolean;
+  onViewEvidence?: () => void;
+  onLoad: () => void;
+  onBenchmark: () => void;
+  onDiagnose: () => void;
+  canLoad: boolean;
+  canRun: boolean;
+}) {
+  if (!run) return <section className="diagnostic-flow-context card pending"><div><span>历史工作台</span><b>请选择 Flow 和 Run</b><small>证据分析不要求 Flow Lock；重新运行要求后端验证历史锁。</small></div></section>;
+  const reason = eligibility?.reason ?? (!run.lockAvailable || lock === null ? "历史 Flow Lock 缺失：仍可分析证据，但不能重新运行" : "正在验证重跑条件");
+  const exactEligibility = eligibility?.jobId === run.jobId && eligibility.runId === run.runId;
+  const rerunnable = Boolean(exactEligibility && eligibility?.eligible && eligibility.lockAvailable && lock);
+  const diagnoseAvailable = rerunnable && eligibility?.platform === "android" && eligibility.diagnoseAvailable;
+  return <section className={`diagnostic-flow-context card ${run.lockAvailable ? "linked" : "pending"}`}>
+    <div><span>所选历史 Run</span><b>{run.flowName ?? run.appId ?? run.flowHash}</b><small>{run.jobId} · {run.runId} · {run.flowHash} · {run.framework}</small>{!rerunnable && <small className="diagnostic-disabled-reason">{reason}</small>}</div>
+    <div className="diagnostic-history-actions">
+      {onViewEvidence && <button className="secondary-button" onClick={onViewEvidence}>查看原始证据</button>}
+      <button className="secondary-button" disabled={!canLoad || !lock || loading} onClick={onLoad} title={reason}>加载验证 Flow</button>
+      <button className="secondary-button" disabled={!canRun || !rerunnable || loading} onClick={onBenchmark} title={reason}>新 Benchmark</button>
+      <button className="primary-button" disabled={!canRun || !diagnoseAvailable || loading} onClick={onDiagnose} title={run.platform === "ios" ? "iOS Diagnose 暂不可用" : reason}>{run.platform === "ios" ? "iOS Diagnose 不可用" : "新 Diagnose"}</button>
+      <small>加载只切换到 Flow Studio，不自动运行。新运行不会复用旧设备、Secret 或 Prompt 输入。</small>
+    </div>
+  </section>;
 }
 
 function ProfileFilePicker({
@@ -588,6 +748,17 @@ function FrameworkRoadmap({ framework }: { framework: DiagnosticFramework }) {
 
 function SourceMapPanel({ sourceMap, loading, onChange }: { sourceMap: SourceMapEvidence; loading: boolean; onChange: (event: ChangeEvent<HTMLInputElement>) => void }) {
   return <div className="diagnostic-panel"><div className="diagnostic-panel-heading"><div><h2>Source Map / 源码定位</h2><p>把 Hermes bundle 行列和组件位置映射回 TypeScript / TSX；加载成功不等于存在可映射位置。</p></div><span className={sourceMap.state === "available" && sourceMap.mappedCount === 0 ? "source-zero" : ""}>{sourceMapStatus(sourceMap)}</span></div><div className={`diagnostic-source-map source-panel ${sourceMap.state === "available" ? "loaded" : sourceMap.state === "error" ? "failed" : ""}`}><MapPinned size={20} /><div><span>当前 Source Map</span><b>{sourceMap.fileName || "尚未导入 .map 文件"}</b><small>{sourceMap.state === "available" ? sourceMap.mappedCount > 0 ? "已在本机重新解析所有本地导入 Profile" : "文件已成功读取，但当前 Profile 没有匹配的生成位置" : sourceMap.error ?? "不会上传源码或调用 AI"}</small></div><label className="secondary-button diagnostic-upload">{loading ? <RefreshCw size={14} className="spin" /> : sourceMap.state === "available" ? <Check size={14} /> : <Upload size={14} />}{sourceMap.state === "available" ? "更换 Map" : "选择 .map"}<input type="file" accept=".json,.map" onChange={onChange} disabled={loading} /></label></div></div>;
+}
+
+function findManagedReactProfileArtifact(result: NormalizedResult): DiagnosticArtifactRef | undefined {
+  const declaredPath = result.androidNative?.rnDiagnostics?.profileFile;
+  if (!declaredPath) return undefined;
+  const declaredName = declaredPath.split(/[\\/]/).pop();
+  return Object.values(result.frameworkDiagnostics?.reactNative?.collectors ?? {})
+    .flatMap((collector) => collector.artifacts ?? [])
+    .find((artifact) => artifact.integrity === "complete"
+      && artifact.format === "react-devtools-profile-json"
+      && (artifact.path === declaredPath || artifact.path.split(/[\\/]/).pop() === declaredName));
 }
 
 function normalizeFramework(value: string): DiagnosticFramework | undefined {
@@ -838,6 +1009,7 @@ function EvidenceDetails({ evidence, result, runtimeCollector, rawFile }: { evid
       <summary>查看证据详情</summary>
       <dl>
         <div><dt>来源状态</dt><dd>{evidence ? evidenceStateLabel(evidence) : result ? "受管 Run 证据" : "未记录"}</dd></div>
+        <div><dt>Job ID</dt><dd>{evidence?.jobId ?? result?.jobId ?? "本地文件无 Job ID"}</dd></div>
         <div><dt>Run ID</dt><dd>{evidence?.runId ?? result?.runId ?? "本地文件无 Run ID"}</dd></div>
         <div><dt>Profile ID</dt><dd>{evidence?.report?.profileId ?? "不适用"}</dd></div>
         <div><dt>Flow Hash</dt><dd>{flowHash ?? "未验证"}</dd></div>

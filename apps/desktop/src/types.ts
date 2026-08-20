@@ -224,6 +224,25 @@ export interface ResultSummary {
   cpuMeanPct?: number;
 }
 
+export interface DiagnosticCollectorPlanV1 {
+  collector: "hermes-cpu";
+  required: boolean;
+}
+
+export interface DiagnosticResourceLimitsV1 {
+  maxDurationMs: number;
+  maxArtifactBytes: number;
+  maxEvents: number;
+  maxSamples: number;
+}
+
+export interface DiagnosticPlanV1 {
+  schemaVersion: 1;
+  mode: "in_band" | "companion";
+  collectors: DiagnosticCollectorPlanV1[];
+  resourceLimits: DiagnosticResourceLimitsV1;
+}
+
 export interface AndroidNativeMetrics {
   schemaVersion: number;
   definitionsVersion: string;
@@ -341,6 +360,27 @@ export interface IosNativeMetrics {
   warnings: string[];
 }
 
+export interface DiagnosticArtifactRef {
+  path: string;
+  format: string;
+  sizeBytes: number;
+  sha256: string;
+  producer: string;
+  producerVersion: string;
+  captureMethod: string;
+  integrity: "complete" | "partial" | "truncated" | "corrupt";
+}
+
+export interface CollectorDiagnosticV1 {
+  status: "collected" | "unavailable" | "failed" | "skipped";
+  artifacts: DiagnosticArtifactRef[];
+  reason?: string;
+}
+
+export interface FrameworkDiagnosticsV1 {
+  reactNative?: { collectors: Record<string, CollectorDiagnosticV1> };
+}
+
 export interface NormalizedResult {
   jobId?: string;
   runId: string;
@@ -364,6 +404,7 @@ export interface NormalizedResult {
     rawFile?: string;
     synthetic: boolean;
   };
+  frameworkDiagnostics?: FrameworkDiagnosticsV1;
   androidNative?: AndroidNativeMetrics;
   iosNative?: IosNativeMetrics;
   summary: ResultSummary;
@@ -411,6 +452,44 @@ export interface JobPage {
   total: number;
   offset: number;
   limit: number;
+}
+
+export interface DiagnosticRunSummary {
+  jobId: string;
+  runId: string;
+  flowHash: string;
+  framework: string;
+  platform: string;
+  createdAt: string;
+  flowName?: string;
+  appId?: string;
+  appVersion?: string;
+  scenario?: string;
+  adapter?: string;
+  deviceName?: string;
+  devicePhysical?: boolean;
+  successfulIterationCount: number;
+  iterationCount: number;
+  synthetic: boolean;
+  lockAvailable: boolean;
+  result: NormalizedResult;
+}
+
+export interface DiagnosticRunPage {
+  runs: DiagnosticRunSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface DiagnosticRerunEligibility {
+  jobId: string;
+  runId: string;
+  eligible: boolean;
+  reason?: string;
+  lockAvailable: boolean;
+  platform: string;
+  diagnoseAvailable: boolean;
 }
 
 export type MetricVerdict = "improved" | "stable" | "regressed" | "unavailable";
@@ -499,6 +578,7 @@ export interface ProfileEvidence {
   json?: string;
   fileName?: string;
   rawFile?: string;
+  jobId?: string;
   runId?: string;
   flowHash?: string;
   collector?: string;

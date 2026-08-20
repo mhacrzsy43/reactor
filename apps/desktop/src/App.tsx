@@ -28,7 +28,8 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, saveFlowSecret, stageUpdate, trialGeneratedFlow } from "./api";
+import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runDemo, runIos, saveFlowSecret, stageUpdate, trialGeneratedFlow } from "./api";
+import { conservativeAndroidDiagnosticPlan } from "./diagnosticLogic";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
 import { FlowCopilot } from "./FlowCopilot";
@@ -37,6 +38,7 @@ import type {
   Bootstrap,
   AnalysisExplanation,
   CompiledFlow,
+  DiagnosticRunSummary,
   Flow,
   FlowLock,
   FlowStep,
@@ -80,6 +82,13 @@ const frameworkNames: Record<string, string> = {
   flutter: "Flutter",
   lynx: "Lynx",
 };
+
+function normalizeHistoricalFramework(value: string): Framework | undefined {
+  const normalized = value.toLowerCase().replace(/[_\s]/g, "-");
+  if (normalized === "react-native" || normalized === "reactnative" || normalized === "rn") return "react-native";
+  if (normalized === "flutter" || normalized === "lynx") return normalized;
+  return undefined;
+}
 
 const providerNames: Record<ProviderMode, string> = {
   offline: "规则总结（非 AI）",
@@ -159,6 +168,7 @@ function App() {
   const [reportPath, setReportPath] = useState("");
   const [activeJob, setActiveJob] = useState<JobSnapshot>();
   const [runPreset, setRunPreset] = useState<"quick" | "standard" | "leak">("quick");
+  const [pendingRunMode, setPendingRunMode] = useState<"benchmark" | "diagnose">("benchmark");
   const [cancelling, setCancelling] = useState(false);
   const [preparingTools, setPreparingTools] = useState(false);
   const [refreshingDevices, setRefreshingDevices] = useState(false);
@@ -651,6 +661,10 @@ function App() {
 
   async function onRealRun() {
     if (!flowLock || !selectedTarget) return;
+    if (pendingRunMode === "diagnose" && platform === "ios") {
+      setError("iOS Diagnose 暂不可用；请选择 Android 设备，或切换为 Benchmark。");
+      return;
+    }
     if (flowLock.flow.appId !== appId || flowLock.flow.platform !== platform) {
       invalidateGeneratedFlow();
       setError("应用包名或平台已改变，请重新生成并试跑 Flow；Reactor 不会用旧锁定文件测量新输入。");
@@ -662,14 +676,21 @@ function App() {
     setReportPath("");
     setActiveJob(undefined);
     try {
-      const run = platform === "ios" ? runIos : runAndroid;
+      const run = platform === "ios" ? runIos : pendingRunMode === "diagnose" ? runAndroidDiagnose : runAndroid;
+      const durationMs = runPreset === "standard" ? 18_000 : 5_000;
+      const iterations = runPreset === "standard" ? 10 : 1;
+      const diagnosticPlan = pendingRunMode === "diagnose"
+        ? conservativeAndroidDiagnosticPlan(durationMs, iterations)
+        : undefined;
       const output = await run({
         flowLock,
         framework,
         scenario: generated?.flow.id.split("-")[0] ?? "custom",
         deviceId: selectedTarget.id,
-        durationMs: runPreset === "standard" ? 18_000 : 5_000,
-        iterations: runPreset === "standard" ? 10 : 1,
+        durationMs: diagnosticPlan ? Math.min(durationMs, Math.floor(diagnosticPlan.resourceLimits.maxDurationMs / Math.min(iterations, 3))) : durationMs,
+        iterations: diagnosticPlan ? Math.min(iterations, 3) : iterations,
+        runMode: pendingRunMode,
+        diagnosticPlan,
         leakTest: runPreset === "leak" ? {
           cycles: 20,
           checkpointEvery: 2,
@@ -708,6 +729,43 @@ function App() {
   function navigateTo(nextPage: Page) {
     setError("");
     setPage(nextPage);
+  }
+
+  function loadHistoricalFlowIntoStudio(lock: FlowLock, run: DiagnosticRunSummary) {
+    setFlowLock(lock);
+    setGenerated({
+      flow: lock.flow,
+      provider: lock.generation?.provider ?? "historical-lock",
+      model: lock.generation?.model ?? "historical-lock",
+      promptTemplateVersion: lock.generation?.promptTemplateVersion ?? "historical-lock",
+      notes: ["从历史 Run 加载的已验证 Flow；设备、Secret 与 Prompt 输入未恢复。"],
+    });
+    setPreparation(undefined);
+    setCompiledFlow(undefined);
+    setAppId(lock.flow.appId);
+    setPlatform(lock.flow.platform);
+    const historicalFramework = normalizeHistoricalFramework(run.framework);
+    if (historicalFramework) setFramework(historicalFramework);
+    setSelectedDeviceId("");
+    setTrialPromptValues({});
+    setTrialSecretValues({});
+    setTrialSecretStatus({});
+    setResults([]);
+    setReportPath("");
+    setActiveJob(undefined);
+    setStage("locked");
+    setPendingRunMode("benchmark");
+    setFlowEditNotice("已加载历史验证 Flow。请选择设备并重新填写 Secret / Prompt；不会自动运行。");
+    void compileFlowPreview(lock.flow).then(setCompiledFlow).catch((reason) => setError(String(reason)));
+    setPage("flow");
+  }
+
+  function startHistoricalFlowRun(mode: "benchmark" | "diagnose", lock: FlowLock, run: DiagnosticRunSummary) {
+    loadHistoricalFlowIntoStudio(lock, run);
+    setPendingRunMode(mode);
+    setFlowEditNotice(mode === "diagnose"
+      ? "已为新 Diagnose 加载历史验证 Flow。请选择 Android 设备并重新填写 Secret / Prompt，然后手动启动；不会复用旧运行输入。"
+      : "已为新 Benchmark 加载历史验证 Flow。请选择设备并重新填写 Secret / Prompt，然后手动启动；不会复用旧运行输入。");
   }
 
   async function onPrepareTools() {
@@ -756,6 +814,19 @@ function App() {
     setError("");
     try {
       setHistorySelection(await getJobSnapshot(job.id));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function viewHistoricalRun(jobId: string) {
+    setHistoryLoading(true);
+    setError("");
+    setPage("history");
+    try {
+      setHistorySelection(await getJobSnapshot(jobId));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1001,6 +1072,9 @@ function App() {
               framework,
             } : undefined}
             onNavigate={navigateTo}
+            onViewHistoricalRun={(jobId) => void viewHistoricalRun(jobId)}
+            onLoadHistoricalFlow={loadHistoricalFlowIntoStudio}
+            onStartHistoricalRun={startHistoricalFlowRun}
           />
         ) : page === "settings" ? (
           <SettingsCenter

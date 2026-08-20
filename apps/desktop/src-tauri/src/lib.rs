@@ -33,8 +33,9 @@ use reactor_analysis::{
 use reactor_core::{CompiledFlow, compile_maestro};
 use reactor_inspector::{InspectorElement, inspect_hierarchy};
 use reactor_protocol::{
-    Flow, FlowLock, FlowTrialEvidence, GenerationProvenance, InputValue, Platform, Selector, Step,
-    canonical_flow_hash, navigation_destination_marker, requires_navigation_intent,
+    ArtifactIntegrity, DiagnosticPlanV1, Flow, FlowLock, FlowTrialEvidence, GenerationProvenance,
+    InputValue, Platform, RunMode, Selector, Step, canonical_flow_hash,
+    navigation_destination_marker, requires_navigation_intent,
 };
 use reactor_runner::{
     AndroidLeakTestPlan, AndroidRunRequest, DiscoveredDevice, DoctorReport, IosRunRequest,
@@ -46,7 +47,7 @@ use reactor_runner::{
     execute_explorer_step, execute_ios_job, has_flow_secret, recover_orphaned_jobs,
     replay_explorer_flow_with_progress, save_flow_secret, trial_android, trial_ios_simulator,
 };
-use reactor_store::{Job, JobEvent, Store};
+use reactor_store::{DiagnosticRunCatalogEntry, DiagnosticRunFilter, Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
 use serde::{Deserialize, Serialize};
 use tauri::Manager as _;
@@ -488,7 +489,17 @@ struct AnalyzeProfileInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AnalyzeManagedProfileInput {
+    job_id: String,
+    run_id: String,
+    artifact: ManagedProfileArtifactInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedProfileArtifactInput {
     path: String,
+    size_bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -503,6 +514,7 @@ struct DiffProfileInput {
 struct DiagnosticRunInput {
     job_id: String,
     run_id: String,
+    flow_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -690,7 +702,73 @@ struct RealRunInput {
     device_id: String,
     duration_ms: u64,
     iterations: u32,
+    #[serde(default)]
+    run_mode: RunMode,
+    #[serde(default)]
+    diagnostic_plan: Option<DiagnosticPlanV1>,
     leak_test: Option<AndroidLeakTestPlan>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticRunsInput {
+    limit: Option<u32>,
+    offset: Option<u32>,
+    flow_hash: Option<String>,
+    framework: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticRunSummary {
+    job_id: String,
+    run_id: String,
+    created_at: DateTime<Utc>,
+    framework: String,
+    platform: String,
+    scenario: String,
+    flow_hash: String,
+    app_id: Option<String>,
+    app_version: Option<String>,
+    adapter: String,
+    device_name: Option<String>,
+    device_physical: Option<bool>,
+    successful_iteration_count: u64,
+    iteration_count: u64,
+    synthetic: bool,
+    lock_available: bool,
+    result: reactor_protocol::NormalizedResult,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticRunPage {
+    runs: Vec<DiagnosticRunSummary>,
+    total: u64,
+    offset: u32,
+    limit: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticRerunEligibility {
+    job_id: String,
+    run_id: String,
+    lock_available: bool,
+    platform: String,
+    diagnose_available: bool,
+    eligible: bool,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionManifestV1 {
+    schema_version: u32,
+    job_id: String,
+    flow_hash: String,
+    flow_lock_sha256: String,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2586,33 +2664,90 @@ fn start_demo(flow_lock: FlowLock) -> Result<StartedJob, String> {
     Ok(StartedJob { job_id: job.id })
 }
 
-#[tauri::command]
-fn start_android(input: RealRunInput) -> Result<StartedJob, String> {
-    let workspace = workspace();
-    let lock_dir = workspace.join(".reactor/runtime/desktop");
-    std::fs::create_dir_all(&lock_dir).map_err(|error| error.to_string())?;
-    let lock_path = lock_dir.join(format!("{}.lock.json", input.flow_lock.flow_hash));
-    std::fs::write(
-        &lock_path,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&input.flow_lock).map_err(|error| error.to_string())?
-        ),
+fn sha256_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).map_err(|error| error.to_string())?;
+    file.write_all(bytes).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
+}
+
+fn persist_job_provenance(
+    root: &Path,
+    job_id: &str,
+    flow_lock: &FlowLock,
+) -> Result<PathBuf, String> {
+    flow_lock.verify().map_err(|error| error.to_string())?;
+    let directory = root.join("results/runs").join(job_id);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let lock_path = directory.join("flow.lock.json");
+    let lock_bytes = format!(
+        "{}\n",
+        serde_json::to_string_pretty(flow_lock).map_err(|error| error.to_string())?
     )
-    .map_err(|error| error.to_string())?;
-    let request = AndroidRunRequest {
-        workspace,
-        flow_lock: lock_path,
+    .into_bytes();
+    write_new_private_file(&lock_path, &lock_bytes)?;
+    let manifest = ExecutionManifestV1 {
+        schema_version: 1,
+        job_id: job_id.to_owned(),
+        flow_hash: flow_lock.flow_hash.clone(),
+        flow_lock_sha256: sha256_bytes(&lock_bytes),
+        created_at: Utc::now(),
+    };
+    let manifest_bytes = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?
+    )
+    .into_bytes();
+    let manifest_path = directory.join("execution-manifest.json");
+    write_new_private_file(&manifest_path, &manifest_bytes)?;
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    store
+        .register_artifact(job_id, "flow_lock", &lock_path)
+        .map_err(|error| error.to_string())?;
+    store
+        .register_artifact(job_id, "execution_manifest", &manifest_path)
+        .map_err(|error| error.to_string())?;
+    Ok(lock_path)
+}
+
+fn start_android_for(root: &Path, input: RealRunInput) -> Result<(Job, AndroidRunRequest), String> {
+    let staging_dir = root.join(".reactor/runtime/desktop");
+    std::fs::create_dir_all(&staging_dir).map_err(|error| error.to_string())?;
+    let staging_path = staging_dir.join(format!("{}.lock.json", uuid::Uuid::new_v4()));
+    let staging_bytes = serde_json::to_vec(&input.flow_lock).map_err(|error| error.to_string())?;
+    write_new_private_file(&staging_path, &staging_bytes)?;
+    let mut request = AndroidRunRequest {
+        workspace: root.to_path_buf(),
+        flow_lock: staging_path.clone(),
         framework: input.framework,
         scenario: input.scenario,
         device_id: input.device_id,
         duration_ms: input.duration_ms,
         iteration_count: input.iterations,
-        run_mode: reactor_protocol::RunMode::Benchmark,
-        diagnostic_plan: None,
+        run_mode: input.run_mode,
+        diagnostic_plan: input.diagnostic_plan,
         leak_test: input.leak_test,
     };
     let job = enqueue_android(&request).map_err(|error| error.to_string())?;
+    let provenance = persist_job_provenance(root, &job.id, &input.flow_lock);
+    let _ = std::fs::remove_file(staging_path);
+    request.flow_lock = provenance?;
+    Ok((job, request))
+}
+
+#[tauri::command]
+fn start_android(input: RealRunInput) -> Result<StartedJob, String> {
+    let workspace = workspace();
+    let (job, request) = start_android_for(&workspace, input)?;
     let worker_workspace = request.workspace.clone();
     spawn_worker(
         &worker_workspace,
@@ -2624,27 +2759,27 @@ fn start_android(input: RealRunInput) -> Result<StartedJob, String> {
 
 #[tauri::command]
 fn start_ios(input: RealRunInput) -> Result<StartedJob, String> {
+    if input.run_mode == RunMode::Diagnose || input.diagnostic_plan.is_some() {
+        return Err("iOS Diagnose is not supported; use Android Diagnose".to_owned());
+    }
     let workspace = workspace();
-    let lock_dir = workspace.join(".reactor/runtime/desktop");
-    std::fs::create_dir_all(&lock_dir).map_err(|error| error.to_string())?;
-    let lock_path = lock_dir.join(format!("{}.lock.json", input.flow_lock.flow_hash));
-    std::fs::write(
-        &lock_path,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&input.flow_lock).map_err(|error| error.to_string())?
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    let request = IosRunRequest {
-        workspace,
-        flow_lock: lock_path,
+    let staging_dir = workspace.join(".reactor/runtime/desktop");
+    std::fs::create_dir_all(&staging_dir).map_err(|error| error.to_string())?;
+    let staging_path = staging_dir.join(format!("{}.lock.json", uuid::Uuid::new_v4()));
+    let staging_bytes = serde_json::to_vec(&input.flow_lock).map_err(|error| error.to_string())?;
+    write_new_private_file(&staging_path, &staging_bytes)?;
+    let mut request = IosRunRequest {
+        workspace: workspace.clone(),
+        flow_lock: staging_path.clone(),
         framework: input.framework,
         scenario: input.scenario,
         device_id: input.device_id,
         duration_ms: input.duration_ms,
     };
     let job = enqueue_ios(&request).map_err(|error| error.to_string())?;
+    let provenance = persist_job_provenance(&workspace, &job.id, &input.flow_lock);
+    let _ = std::fs::remove_file(staging_path);
+    request.flow_lock = provenance?;
     let worker_workspace = request.workspace.clone();
     spawn_worker(&worker_workspace, &job.id, &WorkerRequest::Ios { request })?;
     Ok(StartedJob { job_id: job.id })
@@ -2715,6 +2850,232 @@ fn list_jobs(limit: Option<u32>, offset: Option<u32>) -> Result<JobPage, String>
         offset,
         limit,
     })
+}
+
+fn load_job_result(
+    root: &Path,
+    job_id: &str,
+    run_id: &str,
+) -> Result<reactor_protocol::NormalizedResult, String> {
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    store
+        .get_diagnostic_result(job_id, run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("任务 {job_id} 中找不到运行 {run_id}"))
+}
+
+fn load_historical_flow_lock_for(
+    root: &Path,
+    job_id: &str,
+    run_id: &str,
+    expected_flow_hash: Option<&str>,
+) -> Result<FlowLock, String> {
+    let result = load_job_result(root, job_id, run_id)?;
+    if expected_flow_hash.is_some_and(|flow_hash| flow_hash != result.flow_hash) {
+        return Err("请求的 flowHash 与所选 jobId/runId 不匹配".to_owned());
+    }
+    let run_root = root.join("results/runs");
+    let job_directory = run_root.join(job_id);
+    let canonical_run_root = std::fs::canonicalize(&run_root).map_err(|error| error.to_string())?;
+    let canonical_job_directory = std::fs::canonicalize(&job_directory)
+        .map_err(|_| "该历史运行没有可验证的执行 provenance".to_owned())?;
+    if !canonical_job_directory.starts_with(&canonical_run_root)
+        || canonical_job_directory.parent() != Some(canonical_run_root.as_path())
+    {
+        return Err("历史运行目录不属于 Reactor 的受管 job 目录".to_owned());
+    }
+    let lock_path = managed_existing_file(&canonical_job_directory, Path::new("flow.lock.json"))
+        .ok_or_else(|| "该历史运行缺少 flow.lock.json；仍可分析，但不能加载或重跑".to_owned())?;
+    let manifest_path = managed_existing_file(
+        &canonical_job_directory,
+        Path::new("execution-manifest.json"),
+    )
+    .ok_or_else(|| {
+        "该历史运行缺少 execution-manifest.json；仍可分析，但不能加载或重跑".to_owned()
+    })?;
+    let lock_bytes = std::fs::read(&lock_path).map_err(|error| error.to_string())?;
+    let manifest: ExecutionManifestV1 =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|error| error.to_string())?)
+            .map_err(|_| "执行 manifest 无效".to_owned())?;
+    if manifest.schema_version != 1
+        || manifest.job_id != job_id
+        || manifest.flow_hash != result.flow_hash
+        || manifest.flow_lock_sha256 != sha256_bytes(&lock_bytes)
+    {
+        return Err("执行 provenance 完整性校验失败".to_owned());
+    }
+    let lock: FlowLock =
+        serde_json::from_slice(&lock_bytes).map_err(|_| "历史 flow.lock.json 无效".to_owned())?;
+    lock.verify().map_err(|error| error.to_string())?;
+    if lock.flow_hash != result.flow_hash {
+        return Err("flow.lock.json 与所选 runId 的 flowHash 不匹配".to_owned());
+    }
+    Ok(lock)
+}
+
+fn historical_rerun_blocking_references(flow: &Flow) -> Vec<&'static str> {
+    fn inspect_steps(steps: &[Step], references: &mut std::collections::BTreeSet<&'static str>) {
+        for step in steps {
+            match step {
+                Step::InputText { value, .. } => match value {
+                    InputValue::PromptRef(_) => {
+                        references.insert("promptRef");
+                    }
+                    InputValue::SecretRef(_) => {
+                        references.insert("secretRef");
+                    }
+                    InputValue::TotpRef(_) => {
+                        references.insert("totpRef");
+                    }
+                    InputValue::Literal(_) | InputValue::VariableRef(_) => {}
+                },
+                Step::Repeat { steps, .. } => inspect_steps(steps, references),
+                _ => {}
+            }
+        }
+    }
+
+    let mut references = std::collections::BTreeSet::new();
+    inspect_steps(&flow.setup, &mut references);
+    inspect_steps(&flow.measured, &mut references);
+    inspect_steps(&flow.teardown, &mut references);
+    references.into_iter().collect()
+}
+
+fn diagnostic_rerun_eligibility_for(
+    root: &Path,
+    input: &DiagnosticRunInput,
+) -> DiagnosticRerunEligibility {
+    match load_historical_flow_lock_for(
+        root,
+        &input.job_id,
+        &input.run_id,
+        input.flow_hash.as_deref(),
+    ) {
+        Ok(lock) => {
+            let platform = match lock.flow.platform {
+                Platform::Android => "android",
+                Platform::Ios => "ios",
+            }
+            .to_owned();
+            let blocked_references = historical_rerun_blocking_references(&lock.flow);
+            let eligible = blocked_references.is_empty();
+            let reason = (!eligible).then(|| {
+                format!(
+                    "历史 Flow 包含需要本次重新确认的输入引用（{}）；当前历史重跑入口不接收新输入，已禁用 Benchmark/Diagnose，且不会读取旧 Prompt 或系统凭据库 Secret/TOTP",
+                    blocked_references.join("、")
+                )
+            });
+            DiagnosticRerunEligibility {
+                job_id: input.job_id.clone(),
+                run_id: input.run_id.clone(),
+                lock_available: true,
+                diagnose_available: eligible && lock.flow.platform == Platform::Android,
+                platform,
+                eligible,
+                reason,
+            }
+        }
+        Err(reason) => DiagnosticRerunEligibility {
+            job_id: input.job_id.clone(),
+            run_id: input.run_id.clone(),
+            lock_available: false,
+            platform: "unknown".to_owned(),
+            diagnose_available: false,
+            eligible: false,
+            reason: Some(reason),
+        },
+    }
+}
+
+fn diagnostic_run_summary(
+    root: &Path,
+    store: &Store,
+    entry: DiagnosticRunCatalogEntry,
+) -> Result<DiagnosticRunSummary, String> {
+    let result = store
+        .get_diagnostic_result(&entry.job_id, &entry.run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("任务 {} 中找不到运行 {}", entry.job_id, entry.run_id))?;
+    let binding = DiagnosticRunInput {
+        job_id: entry.job_id.clone(),
+        run_id: entry.run_id.clone(),
+        flow_hash: Some(entry.flow_hash.clone()),
+    };
+    let lock_available = diagnostic_rerun_eligibility_for(root, &binding).lock_available;
+    Ok(DiagnosticRunSummary {
+        job_id: entry.job_id,
+        run_id: entry.run_id,
+        created_at: entry.created_at,
+        framework: entry.framework,
+        platform: entry.platform,
+        scenario: entry.scenario,
+        flow_hash: entry.flow_hash,
+        app_id: entry.app_id,
+        app_version: entry.app_version,
+        adapter: entry.adapter,
+        device_name: entry.device_name,
+        device_physical: entry.device_physical,
+        successful_iteration_count: entry.successful_iteration_count,
+        iteration_count: entry.iteration_count,
+        synthetic: entry.synthetic,
+        lock_available,
+        result,
+    })
+}
+
+fn list_diagnostic_runs_for(
+    root: &Path,
+    input: &DiagnosticRunsInput,
+) -> Result<DiagnosticRunPage, String> {
+    let limit = input.limit.unwrap_or(25).clamp(1, 100);
+    let offset = input.offset.unwrap_or(0);
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    let filter = DiagnosticRunFilter {
+        flow_hash: input.flow_hash.as_deref(),
+        framework: input.framework.as_deref(),
+        ..DiagnosticRunFilter::default()
+    };
+    let entries = store
+        .list_diagnostic_runs_page(&filter, limit, offset)
+        .map_err(|error| error.to_string())?;
+    let runs = entries
+        .into_iter()
+        .map(|entry| diagnostic_run_summary(root, &store, entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DiagnosticRunPage {
+        runs,
+        total: store
+            .count_diagnostic_runs(&filter)
+            .map_err(|error| error.to_string())?,
+        offset,
+        limit,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn list_diagnostic_runs(input: DiagnosticRunsInput) -> Result<DiagnosticRunPage, String> {
+    list_diagnostic_runs_for(&workspace(), &input)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn get_diagnostic_rerun_eligibility(input: DiagnosticRunInput) -> DiagnosticRerunEligibility {
+    diagnostic_rerun_eligibility_for(&workspace(), &input)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn load_historical_flow_lock(input: DiagnosticRunInput) -> Result<FlowLock, String> {
+    load_historical_flow_lock_for(
+        &workspace(),
+        &input.job_id,
+        &input.run_id,
+        input.flow_hash.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -2791,32 +3152,94 @@ fn analyze_profile_json(input: AnalyzeProfileInput) -> Result<DiagnosticProfileR
     Ok(report)
 }
 
-#[tauri::command]
-fn analyze_managed_profile(
-    input: AnalyzeManagedProfileInput,
+fn analyze_managed_profile_for(
+    root: &Path,
+    input: &AnalyzeManagedProfileInput,
 ) -> Result<DiagnosticProfileReport, String> {
-    let result_root = workspace()
-        .join("results/runs")
-        .canonicalize()
-        .map_err(|error| format!("无法访问 Reactor 结果目录：{error}"))?;
-    let path = PathBuf::from(input.path)
-        .canonicalize()
-        .map_err(|error| format!("无法读取受管 Profile：{error}"))?;
-    if !path.starts_with(&result_root) {
-        return Err("只能读取 Reactor 当前工作区生成的受管 Profile".to_owned());
+    let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3"))
+        .map_err(|error| error.to_string())?;
+    let job = store
+        .get_job(&input.job_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("找不到任务 {}", input.job_id))?;
+    if !job.state.is_terminal() {
+        return Err("只能分析已经结束任务的受管 Profile".to_owned());
     }
-    let metadata = path
-        .metadata()
-        .map_err(|error| format!("无法读取 Profile 元数据：{error}"))?;
-    if metadata.len() > MAX_PROFILE_JSON_BYTES {
+    let result = load_job_result(root, &input.job_id, &input.run_id)?;
+    let result_path = job
+        .result_path
+        .as_deref()
+        .ok_or_else(|| "任务没有受管结果路径".to_owned())?;
+    let managed_result_path = managed_existing_file(&root.join("results"), Path::new(result_path))
+        .ok_or_else(|| "任务结果不属于 Reactor 受管目录".to_owned())?;
+    let result_directory = managed_result_path
+        .parent()
+        .ok_or_else(|| "任务结果路径没有父目录".to_owned())?;
+    let declared_profile = result
+        .android_native
+        .as_ref()
+        .and_then(|native| native.rn_diagnostics.as_ref())
+        .and_then(|diagnostics| diagnostics.profile_file.as_deref())
+        .ok_or_else(|| "所选 jobId/runId 未声明 React Profile".to_owned())?;
+    let declared_artifact = result
+        .framework_diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.react_native.as_ref())
+        .into_iter()
+        .flat_map(|diagnostics| diagnostics.collectors.values())
+        .flat_map(|collector| &collector.artifacts)
+        .find(|artifact| {
+            artifact.format == "react-devtools-profile-json"
+                && artifact.integrity == ArtifactIntegrity::Complete
+                && artifact.path == input.artifact.path
+                && artifact.size_bytes == input.artifact.size_bytes
+                && artifact.sha256 == input.artifact.sha256
+        })
+        .ok_or_else(|| {
+            "请求的 Profile identity 未在所选 Run 的完整 artifact 声明中注册".to_owned()
+        })?;
+    let declared_name = Path::new(declared_profile).file_name();
+    if declared_name.is_none() || Path::new(&declared_artifact.path).file_name() != declared_name {
+        return Err("artifact 与所选 Run 声明的 profileFile 不匹配".to_owned());
+    }
+    let path = managed_existing_file_from(
+        result_directory,
+        result_directory,
+        Path::new(&declared_artifact.path),
+    )
+    .ok_or_else(|| "Profile 不在所选任务结果目录内".to_owned())?;
+    let registered = store
+        .list_artifacts(&input.job_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|artifact| {
+            artifact.kind == "react_native_profile"
+                && Path::new(&artifact.path).canonicalize().ok().as_deref() == Some(path.as_path())
+                && artifact.size_bytes == declared_artifact.size_bytes
+                && artifact.sha256 == declared_artifact.sha256
+        })
+        .ok_or_else(|| "Profile 未以匹配 path/size/SHA-256 注册到所选 Job".to_owned())?;
+    let bytes = std::fs::read(&path).map_err(|error| format!("无法读取受管 Profile：{error}"))?;
+    if bytes.len() as u64 != registered.size_bytes || sha256_bytes(&bytes) != registered.sha256 {
+        return Err("受管 Profile 完整性复验失败".to_owned());
+    }
+    if bytes.len() as u64 > MAX_PROFILE_JSON_BYTES {
         return Err(format!(
             "Profile 超过 {} MiB 安全上限",
             MAX_PROFILE_JSON_BYTES / 1024 / 1024
         ));
     }
     let json =
-        std::fs::read_to_string(path).map_err(|error| format!("无法读取受管 Profile：{error}"))?;
+        String::from_utf8(bytes).map_err(|_| "受管 Profile 不是有效 UTF-8 JSON".to_owned())?;
     analyze_diagnostic_profile(&json).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn analyze_managed_profile(
+    input: AnalyzeManagedProfileInput,
+) -> Result<DiagnosticProfileReport, String> {
+    analyze_managed_profile_for(&workspace(), &input)
 }
 
 #[tauri::command]
@@ -2979,15 +3402,14 @@ fn diagnostic_index(job_id: &str, run_id: &str) -> Result<DiagnosticIndex, Strin
     if !job.state.is_terminal() {
         return Err("诊断索引只能为已经结束的任务构建".to_owned());
     }
+    let result = load_job_result(&root, job_id, run_id)?;
     let result_path = job
         .result_path
         .as_deref()
         .ok_or_else(|| "任务没有可索引的结果".to_owned())?;
-    let result = read_results(result_path)?
-        .into_iter()
-        .find(|result| result.run_id == run_id)
-        .ok_or_else(|| format!("任务 {job_id} 中找不到运行 {run_id}"))?;
-    let result_base = Path::new(result_path)
+    let managed_result_path = managed_existing_file(&root.join("results"), Path::new(result_path))
+        .ok_or_else(|| "任务结果不属于 Reactor 受管目录".to_owned())?;
+    let result_base = managed_result_path
         .parent()
         .ok_or_else(|| "结果路径没有父目录".to_owned())?;
     let index_path = diagnostic_index_path(&root.join("results"), result_base, &result.run_id)?;
@@ -3110,7 +3532,7 @@ fn diagnostic_track_map(
         .collect()
 }
 
-#[tauri::command(rename = "getDiagnosticManifest")]
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 fn get_diagnostic_manifest(input: DiagnosticRunInput) -> Result<DiagnosticManifestDto, String> {
     let index = diagnostic_index(&input.job_id, &input.run_id)?;
@@ -3118,7 +3540,7 @@ fn get_diagnostic_manifest(input: DiagnosticRunInput) -> Result<DiagnosticManife
     Ok(manifest_dto(overview.manifest.clone(), &overview))
 }
 
-#[tauri::command(rename = "getTimelineOverview")]
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 fn get_timeline_overview(input: DiagnosticOverviewInput) -> Result<TimelineOverviewDto, String> {
     let index = diagnostic_index(&input.job_id, &input.run_id)?;
@@ -3197,7 +3619,7 @@ fn get_timeline_overview(input: DiagnosticOverviewInput) -> Result<TimelineOverv
     })
 }
 
-#[tauri::command(rename = "getTimelineWindow")]
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 fn get_timeline_window(input: DiagnosticWindowInput) -> Result<TimelineWindowDto, String> {
     let index = diagnostic_index(&input.job_id, &input.run_id)?;
@@ -3235,7 +3657,7 @@ fn get_timeline_window(input: DiagnosticWindowInput) -> Result<TimelineWindowDto
     })
 }
 
-#[tauri::command(rename = "analyzeDiagnosticSelection")]
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 fn analyze_diagnostic_selection(
     input: DiagnosticSelectionInput,
@@ -3279,7 +3701,7 @@ fn analyze_diagnostic_selection(
     })
 }
 
-#[tauri::command(rename = "getFrameDrilldown")]
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 fn get_frame_drilldown(input: FrameDrilldownInput) -> Result<FrameDrilldownDto, String> {
     let drilldown: IndexFrameDrilldown = diagnostic_index(&input.job_id, &input.run_id)?
@@ -3546,6 +3968,9 @@ pub fn run() {
             start_ios,
             get_job,
             list_jobs,
+            list_diagnostic_runs,
+            get_diagnostic_rerun_eligibility,
+            load_historical_flow_lock,
             analyze_job_pair,
             analyze_profile_json,
             analyze_managed_profile,
@@ -4153,6 +4578,357 @@ mod tests {
         assert_eq!(diagnostic_track_kind("correlations"), None);
         assert_eq!(diagnostic_state("unavailable"), "unavailable");
         assert_eq!(diagnostic_ui_tracks()[0].0, "iterations");
+    }
+
+    fn completed_diagnostic_job(root: &Path, with_provenance: bool) -> (Job, FlowLock, String) {
+        let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3")).unwrap();
+        let job = store
+            .create_job(&serde_json::json!({ "runMode": "diagnose" }))
+            .unwrap();
+        let lock = FlowLock::new(navigation_flow(), None).unwrap();
+        let result_dir = root.join("results/runs").join(&job.id);
+        std::fs::create_dir_all(&result_dir).unwrap();
+        let mut result: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/result-v1-diagnostics.json"
+        ))
+        .unwrap();
+        result["runId"] = serde_json::Value::String(format!("{}-diagnose", job.id));
+        result["flowHash"] = serde_json::Value::String(lock.flow_hash.clone());
+        let run_id = result["runId"].as_str().unwrap().to_owned();
+        let result_path = result_dir.join("result.json");
+        std::fs::write(&result_path, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        store.index_result(&job.id, &run_id, None, &result).unwrap();
+        if with_provenance {
+            persist_job_provenance(root, &job.id, &lock).unwrap();
+        }
+        for state in [
+            reactor_store::JobState::Preflight,
+            reactor_store::JobState::Warmup,
+            reactor_store::JobState::Measuring,
+            reactor_store::JobState::Normalizing,
+            reactor_store::JobState::Completed,
+        ] {
+            store
+                .transition(
+                    &job.id,
+                    state,
+                    "test",
+                    (state == reactor_store::JobState::Completed)
+                        .then(|| result_path.display().to_string())
+                        .as_deref(),
+                    None,
+                )
+                .unwrap();
+        }
+        (store.get_job(&job.id).unwrap().unwrap(), lock, run_id)
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn managed_profile_requires_exact_run_declaration_registration_and_integrity() {
+        let root = temporary_workspace("managed-profile-integrity");
+        let (job, _, run_id) = completed_diagnostic_job(&root, true);
+        let result_dir = root.join("results/runs").join(&job.id);
+        let profile_path = result_dir.join("react-profile.json");
+        let profile_bytes =
+            include_bytes!("../../../../tests/fixtures/react-profiler-baseline.json");
+        std::fs::write(&profile_path, profile_bytes).unwrap();
+        let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3")).unwrap();
+        let registered = store
+            .register_artifact(&job.id, "react_native_profile", &profile_path)
+            .unwrap();
+        let mut result = store
+            .get_diagnostic_result(&job.id, &run_id)
+            .unwrap()
+            .unwrap();
+        let relative_path = "react-profile.json";
+        let artifact = reactor_protocol::ArtifactRef {
+            path: relative_path.to_owned(),
+            format: "react-devtools-profile-json".to_owned(),
+            size_bytes: registered.size_bytes,
+            sha256: registered.sha256.clone(),
+            producer: "test-react-runtime".to_owned(),
+            producer_version: "schema-1".to_owned(),
+            capture_method: "test-managed-export".to_owned(),
+            integrity: ArtifactIntegrity::Complete,
+            time_range: None,
+        };
+        result.android_native = Some(reactor_protocol::AndroidNativeMetrics {
+            schema_version: 1,
+            definitions_version: "test".to_owned(),
+            collector: "test".to_owned(),
+            trace_processor_version: "test".to_owned(),
+            perfetto_trace_file: "trace".to_owned(),
+            frame_count: 0,
+            frame_time_mean_ms: None,
+            frame_time_p50_ms: None,
+            frame_time_p95_ms: None,
+            frame_time_p99_ms: None,
+            jank_frame_count: 0,
+            jank_frame_pct: None,
+            over_budget_frame_pct: None,
+            startup_time_ms: None,
+            memory_pss_mb: None,
+            thermal_status_before: None,
+            thermal_status_after: None,
+            memory_leak: None,
+            rn_diagnostics: Some(reactor_protocol::ReactNativeDiagnosticsSummary {
+                schema_version: 1,
+                collector: "test-react-runtime".to_owned(),
+                benchmark_mode: Some("diagnose".to_owned()),
+                event_file: "events.ndjson".to_owned(),
+                event_count: 0,
+                component_names: Vec::new(),
+                component_render_count: 0,
+                component_tree_commit_count: 0,
+                profile_commit_count: 1,
+                console_event_count: 0,
+                network_event_count: 0,
+                hermes_heap_sample_count: 0,
+                allocated_object_count: 0,
+                retained_object_count: 0,
+                retained_bytes: 0,
+                profile_file: Some(relative_path.to_owned()),
+                hermes_heap_stats_file: None,
+                hermes_heap_snapshot_file: None,
+                java_heap_dump_file: None,
+                recent_events: Vec::new(),
+                warnings: Vec::new(),
+            }),
+            warnings: Vec::new(),
+        });
+        result.framework_diagnostics = Some(reactor_protocol::FrameworkDiagnosticsV1 {
+            react_native: Some(reactor_protocol::ReactNativeFrameworkDiagnosticsV1 {
+                collectors: std::collections::BTreeMap::from([(
+                    "react-runtime".to_owned(),
+                    reactor_protocol::CollectorDiagnosticV1 {
+                        status: reactor_protocol::CollectorStatus::Collected,
+                        artifacts: vec![artifact.clone()],
+                        reason: None,
+                    },
+                )]),
+            }),
+        });
+        store
+            .index_result(
+                &job.id,
+                &run_id,
+                result.device.id.as_deref(),
+                &serde_json::to_value(&result).unwrap(),
+            )
+            .unwrap();
+        let input = AnalyzeManagedProfileInput {
+            job_id: job.id.clone(),
+            run_id: run_id.clone(),
+            artifact: ManagedProfileArtifactInput {
+                path: artifact.path,
+                size_bytes: artifact.size_bytes,
+                sha256: artifact.sha256,
+            },
+        };
+        assert_eq!(
+            analyze_managed_profile_for(&root, &input)
+                .unwrap()
+                .profile_type,
+            reactor_analysis::DiagnosticProfileType::ReactProfiler
+        );
+        std::fs::write(&profile_path, b"{}").unwrap();
+        assert!(
+            analyze_managed_profile_for(&root, &input)
+                .unwrap_err()
+                .contains("完整性")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn historical_flow_lock_requires_exact_job_run_binding_and_valid_hashes() {
+        let root = temporary_workspace("historical-flow-lock");
+        let (job, lock, run_id) = completed_diagnostic_job(&root, true);
+        assert_eq!(
+            load_historical_flow_lock_for(&root, &job.id, &run_id, None).unwrap(),
+            lock
+        );
+        assert!(
+            load_historical_flow_lock_for(&root, &job.id, "another-run", None)
+                .unwrap_err()
+                .contains("找不到运行")
+        );
+        assert!(
+            load_historical_flow_lock_for(&root, &job.id, &run_id, Some("wrong-flow"))
+                .unwrap_err()
+                .contains("flowHash")
+        );
+        std::fs::write(
+            root.join("results/runs")
+                .join(&job.id)
+                .join("flow.lock.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(
+            load_historical_flow_lock_for(&root, &job.id, &run_id, None)
+                .unwrap_err()
+                .contains("完整性")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_diagnostic_results_remain_listable_but_cannot_load_or_rerun() {
+        let root = temporary_workspace("old-diagnostic-run");
+        let (job, _, run_id) = completed_diagnostic_job(&root, false);
+        let page = list_diagnostic_runs_for(
+            &root,
+            &DiagnosticRunsInput {
+                limit: Some(10),
+                offset: Some(0),
+                flow_hash: None,
+                framework: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.runs[0].job_id, job.id);
+        assert_eq!(page.runs[0].run_id, run_id);
+        assert_eq!(page.runs[0].result.run_id, page.runs[0].run_id);
+        assert_eq!(page.runs[0].result.flow_hash, page.runs[0].flow_hash);
+        assert!(!page.runs[0].lock_available);
+        let eligibility = diagnostic_rerun_eligibility_for(
+            &root,
+            &DiagnosticRunInput {
+                job_id: job.id.clone(),
+                run_id: run_id.clone(),
+                flow_hash: None,
+            },
+        );
+        assert!(!eligibility.eligible);
+        assert!(load_historical_flow_lock_for(&root, &job.id, &run_id, None).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn historical_sensitive_or_prompt_inputs_are_loadable_but_not_rerunnable() {
+        let root = temporary_workspace("historical-input-fail-closed");
+        let (job, _, run_id) = completed_diagnostic_job(&root, true);
+        let mut flow = navigation_flow();
+        flow.setup.insert(
+            0,
+            Step::InputText {
+                target: Selector {
+                    text: Some("Username".to_owned()),
+                    ..Selector::default()
+                },
+                value: InputValue::PromptRef(reactor_protocol::PromptInputReference {
+                    prompt_ref: "account.username".to_owned(),
+                }),
+                clear_before: true,
+            },
+        );
+        let lock = FlowLock::new(flow, None).unwrap();
+        let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3")).unwrap();
+        let mut result = store
+            .get_diagnostic_result(&job.id, &run_id)
+            .unwrap()
+            .unwrap();
+        result.flow_hash = lock.flow_hash.clone();
+        store
+            .index_result(
+                &job.id,
+                &run_id,
+                result.device.id.as_deref(),
+                &serde_json::to_value(&result).unwrap(),
+            )
+            .unwrap();
+        let directory = root.join("results/runs").join(&job.id);
+        std::fs::remove_file(directory.join("flow.lock.json")).unwrap();
+        std::fs::remove_file(directory.join("execution-manifest.json")).unwrap();
+        persist_job_provenance(&root, &job.id, &lock).unwrap();
+
+        assert!(load_historical_flow_lock_for(&root, &job.id, &run_id, None).is_ok());
+        let eligibility = diagnostic_rerun_eligibility_for(
+            &root,
+            &DiagnosticRunInput {
+                job_id: job.id,
+                run_id,
+                flow_hash: Some(lock.flow_hash),
+            },
+        );
+        assert!(eligibility.lock_available);
+        assert!(!eligibility.eligible);
+        assert!(!eligibility.diagnose_available);
+        assert!(eligibility.reason.unwrap().contains("promptRef"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_ios_flow_is_loadable_and_benchmark_eligible_but_not_diagnosable() {
+        let root = temporary_workspace("ios-historical-eligibility");
+        let (job, mut lock, run_id) = completed_diagnostic_job(&root, true);
+        lock.flow.platform = Platform::Ios;
+        lock = FlowLock::new(lock.flow, lock.generation).unwrap();
+
+        let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3")).unwrap();
+        let mut result = store
+            .get_diagnostic_result(&job.id, &run_id)
+            .unwrap()
+            .unwrap();
+        result.platform = "ios".to_owned();
+        result.flow_hash = lock.flow_hash.clone();
+        store
+            .index_result(
+                &job.id,
+                &run_id,
+                result.device.id.as_deref(),
+                &serde_json::to_value(&result).unwrap(),
+            )
+            .unwrap();
+        let directory = root.join("results/runs").join(&job.id);
+        std::fs::remove_file(directory.join("flow.lock.json")).unwrap();
+        std::fs::remove_file(directory.join("execution-manifest.json")).unwrap();
+        persist_job_provenance(&root, &job.id, &lock).unwrap();
+
+        let eligibility = diagnostic_rerun_eligibility_for(
+            &root,
+            &DiagnosticRunInput {
+                job_id: job.id.clone(),
+                run_id,
+                flow_hash: Some(lock.flow_hash.clone()),
+            },
+        );
+        assert!(eligibility.lock_available);
+        assert!(eligibility.eligible);
+        assert_eq!(eligibility.platform, "ios");
+        assert!(!eligibility.diagnose_available);
+        assert!(eligibility.reason.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provenance_files_are_job_scoped_immutable_and_contain_no_resolved_values() {
+        let root = temporary_workspace("provenance-security");
+        let store = Store::open(&root.join(".reactor/runtime/reactor.sqlite3")).unwrap();
+        let job = store.create_job(&serde_json::json!({})).unwrap();
+        let lock = FlowLock::new(login_flow(), None).unwrap();
+        let path = persist_job_provenance(&root, &job.id, &lock).unwrap();
+        assert_eq!(
+            path,
+            root.join("results/runs")
+                .join(&job.id)
+                .join("flow.lock.json")
+        );
+        let lock_text = std::fs::read_to_string(&path).unwrap();
+        let manifest_text = std::fs::read_to_string(
+            root.join("results/runs")
+                .join(&job.id)
+                .join("execution-manifest.json"),
+        )
+        .unwrap();
+        assert!(lock_text.contains("promptRef"));
+        assert!(!lock_text.contains("resolved-password"));
+        assert!(!manifest_text.contains("promptRef"));
+        assert!(persist_job_provenance(&root, &job.id, &lock).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

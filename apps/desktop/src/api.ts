@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { conservativeAndroidDiagnosticPlan } from "./diagnosticLogic";
 import type {
   Bootstrap,
   AnalysisExplanation,
@@ -7,10 +8,14 @@ import type {
   CompiledFlow,
   DemoOutput,
   DiagnosticManifest,
+  DiagnosticArtifactRef,
   DiagnosticProfileReport,
+  DiagnosticRerunEligibility,
+  DiagnosticRunPage,
   DiagnosticSelectionAnalysis,
   DeviceInspectorSnapshot,
   DeviceReplayFrame,
+  DiagnosticPlanV1,
   FrameDrilldown,
   Flow,
   FlowChange,
@@ -135,6 +140,8 @@ export interface RealRunInput {
   deviceId: string;
   durationMs: number;
   iterations: number;
+  runMode?: "benchmark" | "diagnose";
+  diagnosticPlan?: DiagnosticPlanV1;
   leakTest?: {
     cycles: number;
     checkpointEvery: number;
@@ -363,7 +370,8 @@ export async function runAndroid(
   onUpdate?: (snapshot: JobSnapshot) => void,
 ): Promise<DemoOutput> {
   if (!inTauri) throw new Error("Android 模拟器/设备测量请在 Reactor 桌面应用中运行");
-  const started = await invoke<{ jobId: string }>("start_android", { input });
+  const normalizedInput = input.runMode === "diagnose" ? input : { ...input, diagnosticPlan: undefined };
+  const started = await invoke<{ jobId: string }>("start_android", { input: normalizedInput });
   return waitForJob(started.jobId, onUpdate);
 }
 
@@ -474,6 +482,42 @@ export async function listJobs(limit = 25, offset = 0): Promise<JobPage> {
   return invoke("list_jobs", { limit, offset });
 }
 
+export async function listDiagnosticRuns(input: {
+  limit?: number;
+  offset?: number;
+  flowHash?: string;
+  framework?: string;
+} = {}): Promise<DiagnosticRunPage> {
+  const query = {
+    limit: input.limit ?? 20,
+    offset: input.offset ?? 0,
+    flowHash: input.flowHash ?? null,
+    framework: input.framework ?? null,
+  };
+  if (!inTauri) return { runs: [], total: 0, limit: query.limit, offset: query.offset };
+  return invoke("list_diagnostic_runs", { input: query });
+}
+
+export async function getDiagnosticRerunEligibility(jobId: string, runId: string, flowHash?: string): Promise<DiagnosticRerunEligibility> {
+  if (!inTauri) return { jobId, runId, eligible: false, reason: "请在 Reactor 桌面应用中重新运行", lockAvailable: false, platform: "unknown", diagnoseAvailable: false };
+  return invoke("get_diagnostic_rerun_eligibility", { input: { jobId, runId, flowHash: flowHash ?? null } });
+}
+
+export async function loadHistoricalFlowLock(jobId: string, runId: string, flowHash?: string): Promise<FlowLock | null> {
+  if (!inTauri) return null;
+  return invoke("load_historical_flow_lock", { input: { jobId, runId, flowHash: flowHash ?? null } });
+}
+
+export async function runAndroidDiagnose(
+  input: RealRunInput,
+  onUpdate?: (snapshot: JobSnapshot) => void,
+): Promise<DemoOutput> {
+  const iterations = Math.max(1, Math.min(3, Math.trunc(input.iterations)));
+  const diagnosticPlan = input.diagnosticPlan ?? conservativeAndroidDiagnosticPlan(input.durationMs, iterations);
+  const durationMs = Math.min(input.durationMs, Math.floor(diagnosticPlan.resourceLimits.maxDurationMs / iterations));
+  return runAndroid({ ...input, durationMs, iterations, runMode: "diagnose", diagnosticPlan }, onUpdate);
+}
+
 export async function analyzeJobPair(baselineJobId: string, currentJobId: string): Promise<JobAnalysis> {
   if (!inTauri) throw new Error("结果分析请在 Reactor 桌面应用中使用");
   return invoke("analyze_job_pair", {
@@ -500,9 +544,15 @@ export async function analyzeProfileJson(json: string, sourceMap?: string): Prom
   return invoke("analyze_profile_json", { input: { json, sourceMap: sourceMap ?? null } });
 }
 
-export async function analyzeManagedProfile(path: string): Promise<DiagnosticProfileReport> {
+export async function analyzeManagedProfile(jobId: string, runId: string, artifact: DiagnosticArtifactRef): Promise<DiagnosticProfileReport> {
   if (!inTauri) throw new Error("受管 Profile 诊断请在 Reactor 桌面应用中使用");
-  return invoke("analyze_managed_profile", { input: { path } });
+  return invoke("analyze_managed_profile", {
+    input: {
+      jobId,
+      runId,
+      artifact: { path: artifact.path, sizeBytes: artifact.sizeBytes, sha256: artifact.sha256 },
+    },
+  });
 }
 
 export async function diffProfileReports(
@@ -515,7 +565,7 @@ export async function diffProfileReports(
 
 export async function getDiagnosticManifest(jobId: string, runId: string): Promise<DiagnosticManifest> {
   if (!inTauri) throw new Error("统一时间线请在 Reactor 桌面应用中查看");
-  return invoke("getDiagnosticManifest", { input: { jobId, runId } });
+  return invoke("get_diagnostic_manifest", { input: { jobId, runId, flowHash: null } });
 }
 
 export async function getTimelineOverview(
@@ -525,7 +575,7 @@ export async function getTimelineOverview(
   pixelWidth: number,
 ): Promise<TimelineOverview> {
   if (!inTauri) throw new Error("统一时间线请在 Reactor 桌面应用中查看");
-  return invoke("getTimelineOverview", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs, pixelWidth } });
+  return invoke("get_timeline_overview", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs, pixelWidth } });
 }
 
 export async function getTimelineWindow(
@@ -535,7 +585,7 @@ export async function getTimelineWindow(
   trackIds: number[],
 ): Promise<TimelineWindow> {
   if (!inTauri) throw new Error("统一时间线请在 Reactor 桌面应用中查看");
-  return invoke("getTimelineWindow", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs, trackIds } });
+  return invoke("get_timeline_window", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs, trackIds } });
 }
 
 export async function analyzeDiagnosticSelection(
@@ -544,12 +594,12 @@ export async function analyzeDiagnosticSelection(
   range: TimelineRange,
 ): Promise<DiagnosticSelectionAnalysis> {
   if (!inTauri) throw new Error("时间段分析请在 Reactor 桌面应用中使用");
-  return invoke("analyzeDiagnosticSelection", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs } });
+  return invoke("analyze_diagnostic_selection", { input: { jobId, runId, startMs: range.startMs, endMs: range.endMs } });
 }
 
 export async function getFrameDrilldown(jobId: string, runId: string, frameId: number): Promise<FrameDrilldown> {
   if (!inTauri) throw new Error("帧下钻请在 Reactor 桌面应用中使用");
-  return invoke("getFrameDrilldown", { input: { jobId, runId, frameId } });
+  return invoke("get_frame_drilldown", { input: { jobId, runId, frameId } });
 }
 
 export async function getJobSnapshot(
