@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { conservativeAndroidDiagnosticPlan, diagnosticContextKey, diagnosticRunIdentity, diagnosticWorkbenchKey, groupDiagnosticRunsByFlow, historicalRerunBlockingReferences, isUsableDiagnosticResult, preferredDiagnosticFlowHash, preferredDiagnosticRun, RequestTokens, sourceMapStatus, telemetrySlopePerMinute } from "./diagnosticLogic.ts";
+import { conservativeAndroidDiagnosticPlan, diagnosticContextKey, diagnosticRunIdentity, diagnosticWorkbenchKey, formatOptionalMetric, groupDiagnosticRunsByFlow, historicalRerunBlockingReferences, isUsableDiagnosticResult, preferredDiagnosticFlowHash, preferredDiagnosticRun, RequestTokens, sourceMapStatus, telemetrySlopePerMinute } from "./diagnosticLogic.ts";
 import type { DiagnosticRunSummary, NormalizedResult } from "./types.ts";
 
 function result(synthetic: boolean, successfulIterationCount: number): NormalizedResult {
@@ -35,6 +35,14 @@ test("live telemetry slope reports memory growth per minute", () => {
     { timeMs: 61_000, value: 110 },
   ]), 10);
   assert.equal(telemetrySlopePerMinute([{ timeMs: 1_000, value: 100 }]), undefined);
+});
+
+test("live metric formatting rejects null and non-finite samples", () => {
+  assert.equal(formatOptionalMetric(12.34), "12.3");
+  assert.equal(formatOptionalMetric(null), "—");
+  assert.equal(formatOptionalMetric(undefined), "—");
+  assert.equal(formatOptionalMetric(Number.NaN), "—");
+  assert.equal(formatOptionalMetric(Number.POSITIVE_INFINITY), "—");
 });
 
 test("historical rerun blocks prompt, secret, and TOTP refs including nested repeats", () => {

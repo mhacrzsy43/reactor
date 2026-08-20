@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runAndroidManualDiagnose, runDemo, runIos, sampleTrialLivePerformance, saveFlowSecret, stageUpdate, stopManualDiagnose, trialGeneratedFlow } from "./api";
-import { conservativeAndroidDiagnosticPlan, telemetrySlopePerMinute } from "./diagnosticLogic";
+import { conservativeAndroidDiagnosticPlan, formatOptionalMetric, telemetrySlopePerMinute } from "./diagnosticLogic";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
 import { FlowCopilot } from "./FlowCopilot";
@@ -2562,8 +2562,8 @@ function MemoryLeakEvidence({ report }: { report: NonNullable<NonNullable<Normal
   );
 }
 
-function formatMetric(value?: number) {
-  return value === undefined ? "—" : value.toFixed(1);
+function formatMetric(value?: number | null) {
+  return formatOptionalMetric(value);
 }
 
 function formatThermal(value?: number) {

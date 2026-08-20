@@ -29,6 +29,10 @@ export function telemetrySlopePerMinute(points: Array<{ timeMs: number; value: n
   return points.reduce((sum, point, index) => sum + (xs[index] - meanX) * (point.value - meanY), 0) / denominator;
 }
 
+export function formatOptionalMetric(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "—";
+}
+
 export class RequestTokens<Request extends string> {
   private tokens: Record<Request, number>;
 
