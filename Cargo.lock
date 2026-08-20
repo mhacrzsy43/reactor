@@ -3335,8 +3335,10 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "reactor-protocol",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "sourcemap",
  "thiserror 2.0.20",
 ]
@@ -3354,6 +3356,7 @@ dependencies = [
  "reactor-toolchain",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -3363,6 +3366,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
+ "reactor-analysis",
  "reactor-protocol",
  "serde",
  "serde_json",
@@ -3457,6 +3461,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
+ "reactor-analysis",
+ "reactor-protocol",
  "rusqlite",
  "serde",
  "serde_json",

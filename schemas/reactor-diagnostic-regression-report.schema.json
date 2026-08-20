@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reactor.local/schemas/diagnostic-regression-report-v1.json",
+  "title": "Reactor diagnostic regression report v1",
+  "type": "object",
+  "required": ["schemaVersion", "baselineRunId", "currentRunId", "verdict", "compatibility", "policy", "facts", "ruleHits", "temporalCandidates", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "baselineRunId": { "type": "string", "minLength": 1 },
+    "currentRunId": { "type": "string", "minLength": 1 },
+    "verdict": { "enum": ["stable", "regressed", "incompatible"] },
+    "compatibility": {
+      "type": "object",
+      "required": ["compatible", "reasons", "warnings"],
+      "properties": {
+        "compatible": { "type": "boolean" },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "required": ["jsHotspots", "slowFrames"],
+      "properties": {
+        "jsHotspots": {
+          "type": "object",
+          "required": ["relativeThresholdPct", "absoluteSelfTimeThresholdMs", "minCurrentSamples"],
+          "properties": {
+            "relativeThresholdPct": { "type": "number", "minimum": 0 },
+            "absoluteSelfTimeThresholdMs": { "type": "number", "minimum": 0 },
+            "minCurrentSamples": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "slowFrames": {
+          "type": "object",
+          "required": ["proximityMs", "countRelativeThresholdPct", "durationRelativeThresholdPct", "durationAbsoluteThresholdMs", "minCurrentFrames"],
+          "properties": {
+            "proximityMs": { "type": "number", "minimum": 0 },
+            "countRelativeThresholdPct": { "type": "number", "minimum": 0 },
+            "durationRelativeThresholdPct": { "type": "number", "minimum": 0 },
+            "durationAbsoluteThresholdMs": { "type": "number", "minimum": 0 },
+            "minCurrentFrames": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "facts": {
+      "type": "object",
+      "required": ["jsHotspotDeltas", "slowFrameClusterDeltas"],
+      "properties": {
+        "jsHotspotDeltas": { "type": "array", "items": { "type": "object" } },
+        "slowFrameClusterDeltas": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "ruleHits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ruleId", "kind", "factIdentity", "gates", "evidenceRefs"],
+        "properties": {
+          "ruleId": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["js_hotspot_growth", "slow_frame_cluster_growth"] },
+          "factIdentity": { "type": "string", "minLength": 1 },
+          "gates": { "type": "array", "minItems": 3, "items": { "type": "object" } },
+          "evidenceRefs": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "temporalCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["capture", "signature", "jankType", "startMs", "endMs", "frameCount", "totalDurationMs", "frameIds", "componentCandidates", "bottomUpHotspotCandidates"],
+        "properties": {
+          "capture": { "enum": ["baseline", "current"] },
+          "signature": { "type": "string" },
+          "stepId": { "type": ["string", "null"] },
+          "jankType": { "type": "string" },
+          "startMs": { "type": "number" },
+          "endMs": { "type": "number" },
+          "frameCount": { "type": "integer", "minimum": 1 },
+          "totalDurationMs": { "type": "number", "minimum": 0 },
+          "frameIds": { "type": "array", "items": { "type": "string" } },
+          "componentCandidates": { "type": "array", "items": { "type": "string" } },
+          "bottomUpHotspotCandidates": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "limitations": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

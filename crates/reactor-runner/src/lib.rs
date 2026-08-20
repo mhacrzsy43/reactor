@@ -15,11 +15,13 @@ use reactor_core::{
     render_html_report,
 };
 use reactor_protocol::{
-    AndroidMemoryCheckpoint, AndroidMemoryLeakReport, AndroidNativeMetrics, Coordinate,
-    DeviceMetadata, Flow, FlowLock, FlowTrialEvidence, FlowValidationError, InputValue,
-    IosMetricAvailability, IosNativeMetrics, IterationMetrics, NormalizedResult,
-    ReactNativeDiagnosticEvent, ReactNativeDiagnosticsSummary, ResultSource, Step, SwipeDirection,
-    TrialMode, canonical_flow_hash,
+    AndroidMemoryCheckpoint, AndroidMemoryLeakReport, AndroidNativeMetrics, ArtifactIntegrity,
+    ArtifactRef, BuildIdentityV1, CollectorDiagnosticV1, CollectorStatus, Coordinate,
+    DeviceMetadata, DiagnosticPlanV1, Flow, FlowLock, FlowTrialEvidence, FlowValidationError,
+    FrameworkDiagnosticsV1, InputValue, IosMetricAvailability, IosNativeMetrics, IterationMetrics,
+    NormalizedResult, ReactNativeDiagnosticEvent, ReactNativeDiagnosticsSummary,
+    ReactNativeFrameworkDiagnosticsV1, ResultSource, RunMode, Step, SwipeDirection, TrialMode,
+    canonical_flow_hash,
 };
 use reactor_store::{ArtifactIssue, Job, JobEvent, JobState, Store};
 use regex::Regex;
@@ -37,6 +39,48 @@ use zeroize::Zeroizing;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowMarkerFoundation {
+    pub schema_version: u32,
+    pub clock: String,
+    pub source: String,
+    pub uncertainty_ms: Option<f64>,
+    pub iteration_boundaries: String,
+    pub step_boundaries: String,
+    pub reason: String,
+    pub steps: Vec<reactor_protocol::ExpandedFlowStep>,
+}
+
+fn flow_marker_foundation(flow: &Flow) -> FlowMarkerFoundation {
+    FlowMarkerFoundation {
+        schema_version: 1,
+        clock: "host_monotonic".to_owned(),
+        source: "runner_host_observed".to_owned(),
+        uncertainty_ms: None,
+        iteration_boundaries: "unavailable".to_owned(),
+        step_boundaries: "unavailable".to_owned(),
+        reason: "Flashlight owns measured iteration invocation and Maestro executes each YAML as an opaque process; Reactor cannot place exact iteration or per-step boundaries without claiming device-side precision".to_owned(),
+        steps: flow.expanded_steps(),
+    }
+}
+
+async fn write_flow_marker_foundation(
+    artifact_dir: &Path,
+    flow: &Flow,
+) -> Result<PathBuf, RunnerError> {
+    let path = artifact_dir.join("flow-marker-foundation.json");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&flow_marker_foundation(flow))?
+        ),
+    )
+    .await?;
+    Ok(path)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,8 +141,16 @@ pub struct AndroidRunRequest {
     pub device_id: String,
     pub duration_ms: u64,
     pub iteration_count: u32,
+    #[serde(default)]
+    pub run_mode: RunMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_plan: Option<DiagnosticPlanV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leak_test: Option<AndroidLeakTestPlan>,
+    /// Records a user-driven session instead of executing the locked Flow. The lock still binds
+    /// the app identity and provenance, while the scenario prevents comparison with Flow runs.
+    #[serde(default)]
+    pub manual_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +223,10 @@ pub enum RunnerError {
     SecretStore(String),
     #[error("invalid Android leak test plan: {0}")]
     InvalidLeakTestPlan(String),
+    #[error("invalid diagnostic plan: {0}")]
+    InvalidDiagnosticPlan(String),
+    #[error("invalid Android package id: {0}")]
+    InvalidAndroidPackageId(String),
 }
 
 const FLOW_SECRET_SERVICE: &str = "com.reactor.performance.flow-secret";
@@ -474,6 +530,60 @@ pub fn cancel_persisted_job(workspace: &Path, job_id: &str) -> Result<Job, Runne
     )?)
 }
 
+/// Requests a graceful end to a user-driven Android diagnostic recording. Unlike cancellation,
+/// the detached worker remains alive long enough to close collectors and persist final evidence.
+///
+/// # Errors
+///
+/// Returns an error for unknown, non-manual, or malformed jobs and for an unwritable stop marker.
+pub fn request_android_manual_stop(workspace: &Path, job_id: &str) -> Result<Job, RunnerError> {
+    uuid::Uuid::parse_str(job_id).map_err(|_| {
+        RunnerError::InvalidDiagnosticPlan("manual recording job id is invalid".to_owned())
+    })?;
+    let store = open_store(workspace)?;
+    let current = store
+        .get_job(job_id)?
+        .ok_or_else(|| reactor_store::StoreError::UnknownJob(job_id.to_owned()))?;
+    if current.state.is_terminal() {
+        return Ok(current);
+    }
+    if current
+        .request
+        .get("manualSession")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(RunnerError::InvalidDiagnosticPlan(
+            "only a manual diagnostic recording can be stopped gracefully".to_owned(),
+        ));
+    }
+    let directory = workspace.join("results/runs").join(job_id);
+    std::fs::create_dir_all(&directory)?;
+    let stop_path = directory.join("manual-stop.request");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&stop_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(b"stop\n")?;
+            file.sync_all()?;
+            store.append_event(
+                job_id,
+                current.state,
+                "已请求停止手动录制；正在关闭采集器并保存证据",
+                Some(&serde_json::json!({ "kind": "manual_stop_requested" })),
+            )?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(store
+        .get_job(job_id)?
+        .ok_or_else(|| reactor_store::StoreError::UnknownJob(job_id.to_owned()))?)
+}
+
 /// Marks active jobs with missing/dead workers as failed while retaining their indexed artifacts.
 ///
 /// # Errors
@@ -565,12 +675,77 @@ fn register_artifact(
     Ok(())
 }
 
+fn validate_android_package_id(app_id: &str) -> Result<(), RunnerError> {
+    let segment = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 63
+            && value.as_bytes()[0].is_ascii_alphabetic()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    if app_id.len() > 255 || app_id.split('.').count() < 2 || !app_id.split('.').all(segment) {
+        return Err(RunnerError::InvalidAndroidPackageId(app_id.to_owned()));
+    }
+    Ok(())
+}
+
+fn validate_android_request(request: &AndroidRunRequest) -> Result<(), RunnerError> {
+    if request.duration_ms == 0 || request.iteration_count == 0 {
+        return Err(RunnerError::InvalidDiagnosticPlan(
+            "durationMs and iterationCount must be non-zero".to_owned(),
+        ));
+    }
+    if request.manual_session
+        && (request.run_mode != RunMode::Diagnose
+            || request.iteration_count != 1
+            || request.leak_test.is_some())
+    {
+        return Err(RunnerError::InvalidDiagnosticPlan(
+            "manual recording requires diagnose mode, one iteration, and no leak plan".to_owned(),
+        ));
+    }
+    match (request.run_mode, request.diagnostic_plan.as_ref()) {
+        (RunMode::Diagnose, Some(plan)) => {
+            plan.validate()
+                .map_err(RunnerError::InvalidDiagnosticPlan)?;
+            let cumulative_duration = request
+                .duration_ms
+                .checked_mul(u64::from(request.iteration_count))
+                .ok_or_else(|| {
+                    RunnerError::InvalidDiagnosticPlan(
+                        "diagnostic cumulative duration overflowed".to_owned(),
+                    )
+                })?;
+            if cumulative_duration > plan.resource_limits.max_duration_ms {
+                return Err(RunnerError::InvalidDiagnosticPlan(format!(
+                    "planned cumulative duration {cumulative_duration}ms exceeds maxDurationMs {}",
+                    plan.resource_limits.max_duration_ms
+                )));
+            }
+        }
+        (RunMode::Diagnose, None) => {
+            return Err(RunnerError::InvalidDiagnosticPlan(
+                "diagnose mode requires diagnosticPlan".to_owned(),
+            ));
+        }
+        (RunMode::Benchmark, Some(_)) => {
+            return Err(RunnerError::InvalidDiagnosticPlan(
+                "benchmark mode must not include diagnosticPlan".to_owned(),
+            ));
+        }
+        (RunMode::Benchmark, None) => {}
+    }
+    Ok(())
+}
+
 /// Persists an Android job before a detached worker starts it.
 ///
 /// # Errors
 ///
 /// Returns an error when the queue database cannot be updated.
 pub fn enqueue_android(request: &AndroidRunRequest) -> Result<Job, RunnerError> {
+    validate_android_request(request)?;
     let store = open_store(&request.workspace)?;
     Ok(store.create_job(&serde_json::to_value(request)?)?)
 }
@@ -2046,6 +2221,277 @@ async fn android_shell_text(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+const RN_CONTROLLER_ACK_FILE: &str = "rn-controller-ack.json";
+const RN_HERMES_CPU_FILE: &str = "rn-hermes-cpu.trace.json";
+const RN_REMOTE_DIAGNOSTIC_FILES: &[&str] = &[
+    RN_CONTROLLER_ACK_FILE,
+    RN_HERMES_CPU_FILE,
+    "rn-diagnostics.ndjson",
+    "rn-react-devtools-profile.json",
+    "rn-hermes-heap-stats.ndjson",
+    "rn-hermes.heapsnapshot",
+    "rn-java.hprof",
+];
+
+async fn delete_android_diagnostic_files(adb: &Path, device_id: &str, app_id: &str) {
+    if validate_android_package_id(app_id).is_err() {
+        return;
+    }
+    let root = format!("/sdcard/Android/data/{app_id}/files/reactor");
+    for name in RN_REMOTE_DIAGNOSTIC_FILES {
+        let remote = format!("{root}/{name}");
+        let _ = android_shell_text(
+            adb,
+            device_id,
+            &["rm", "-f", &remote],
+            "rn-diagnostics-cleanup",
+        )
+        .await;
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidDiagnosticControllerAck {
+    token: String,
+    command: String,
+    status: String,
+    elapsed_realtime_nanos: u64,
+    #[serde(default)]
+    sdk_version: Option<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    diagnostic_build: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct AndroidHermesCpuCapture {
+    token: String,
+    start_elapsed_realtime_nanos: u64,
+    sdk_version: Option<String>,
+    capabilities: Vec<String>,
+    diagnostic_build: bool,
+}
+
+fn result_relative_artifact_path(artifact_dir: &Path, path: &Path) -> Result<String, RunnerError> {
+    let relative = path
+        .strip_prefix(artifact_dir)
+        .map_err(|_| RunnerError::CommandFailed {
+            command: "artifact-path".to_owned(),
+            output: format!("{} is outside result directory", path.display()),
+        })?;
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        })
+    {
+        return Err(RunnerError::CommandFailed {
+            command: "artifact-path".to_owned(),
+            output: format!(
+                "{} is not a normalized result-relative path",
+                path.display()
+            ),
+        });
+    }
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn enforce_diagnostic_artifacts(
+    artifact_dir: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+    max_bytes: u64,
+) -> Result<(), RunnerError> {
+    let mut unique = BTreeSet::new();
+    let mut total = 0_u64;
+    for path in paths {
+        result_relative_artifact_path(artifact_dir, &path)?;
+        if unique.insert(path.clone()) {
+            total = total.saturating_add(std::fs::metadata(path)?.len());
+        }
+    }
+    if total > max_bytes {
+        return Err(RunnerError::CommandFailed {
+            command: "diagnostic-artifact-budget".to_owned(),
+            output: format!(
+                "cumulative diagnostic artifacts are {total} bytes, above maxArtifactBytes {max_bytes}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn enforce_json_sample_limit(path: &Path, max_samples: u64) -> Result<(), RunnerError> {
+    let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let samples = value
+        .get("traceEvents")
+        .and_then(Value::as_array)
+        .map_or(0, |events| u64::try_from(events.len()).unwrap_or(u64::MAX));
+    if samples > max_samples {
+        return Err(RunnerError::CommandFailed {
+            command: "diagnostic-sample-limit".to_owned(),
+            output: format!(
+                "available Hermes trace event count {samples} exceeds maxSamples {max_samples}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn requested_collector(request: &AndroidRunRequest, collector: &str) -> Option<bool> {
+    if request.run_mode != RunMode::Diagnose {
+        return None;
+    }
+    request.diagnostic_plan.as_ref().and_then(|plan| {
+        plan.collectors
+            .iter()
+            .find(|item| item.collector == collector)
+            .map(|item| item.required)
+    })
+}
+
+async fn send_android_diagnostic_command(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+    command: &str,
+    token: &str,
+    lease_ms: Option<u64>,
+) -> Result<AndroidDiagnosticControllerAck, RunnerError> {
+    validate_android_package_id(app_id)?;
+    let component = format!("{app_id}/.ReactorDiagnosticsController");
+    let action = format!("{app_id}.DIAGNOSTICS");
+    let lease_ms = lease_ms.unwrap_or_default().to_string();
+    android_shell_text(
+        adb,
+        device_id,
+        &[
+            "am",
+            "broadcast",
+            "-a",
+            &action,
+            "-n",
+            &component,
+            "--es",
+            "command",
+            command,
+            "--es",
+            "token",
+            token,
+            "--el",
+            "leaseMs",
+            &lease_ms,
+        ],
+        "rn-diagnostics-controller",
+    )
+    .await?;
+
+    let remote = format!("/sdcard/Android/data/{app_id}/files/reactor/{RN_CONTROLLER_ACK_FILE}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(output) =
+            android_shell_text(adb, device_id, &["cat", &remote], "rn-diagnostics-ack").await
+            && let Ok(ack) = serde_json::from_str::<AndroidDiagnosticControllerAck>(&output)
+            && ack.token == token
+            && ack.command == command
+        {
+            if ack.status == "collected" {
+                return Ok(ack);
+            }
+            return Err(RunnerError::CommandFailed {
+                command: format!("rn-diagnostics-controller {command}"),
+                output: ack
+                    .error
+                    .unwrap_or_else(|| format!("collector status: {}", ack.status)),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(RunnerError::CommandTimedOut {
+                command: format!("rn-diagnostics-controller {command}"),
+                seconds: 15,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn start_android_hermes_cpu(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+    lease_ms: u64,
+) -> Result<AndroidHermesCpuCapture, RunnerError> {
+    let token = format!("reactor-{}", uuid::Uuid::new_v4().simple());
+    let ack =
+        send_android_diagnostic_command(adb, device_id, app_id, "start", &token, Some(lease_ms))
+            .await?;
+    Ok(AndroidHermesCpuCapture {
+        token,
+        start_elapsed_realtime_nanos: ack.elapsed_realtime_nanos,
+        sdk_version: ack.sdk_version,
+        capabilities: ack.capabilities,
+        diagnostic_build: ack.diagnostic_build,
+    })
+}
+
+async fn finish_android_hermes_cpu(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+    capture: &AndroidHermesCpuCapture,
+    artifact_dir: &Path,
+    max_bytes: u64,
+) -> Result<(PathBuf, u64), RunnerError> {
+    let ack = send_android_diagnostic_command(
+        adb,
+        device_id,
+        app_id,
+        "stopAndDump",
+        &capture.token,
+        None,
+    )
+    .await?;
+    let remote = format!("/sdcard/Android/data/{app_id}/files/reactor/{RN_HERMES_CPU_FILE}");
+    let local = artifact_dir.join(RN_HERMES_CPU_FILE);
+    let pulled = pull_optional_android_artifact(
+        adb,
+        device_id,
+        &remote,
+        &local,
+        max_bytes.min(256 * 1024 * 1024),
+    )
+    .await;
+    let _ = android_shell_text(
+        adb,
+        device_id,
+        &["rm", "-f", &remote],
+        "rn-hermes-cpu-cleanup",
+    )
+    .await;
+    let pulled = pulled?.ok_or_else(|| RunnerError::CommandFailed {
+        command: "rn-hermes-cpu-artifact".to_owned(),
+        output: "controller acknowledged capture but artifact is missing".to_owned(),
+    })?;
+    Ok((PathBuf::from(pulled), ack.elapsed_realtime_nanos))
+}
+
+async fn abort_android_hermes_cpu(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+    capture: &AndroidHermesCpuCapture,
+) {
+    let _ = send_android_diagnostic_command(adb, device_id, app_id, "abort", &capture.token, None)
+        .await;
+    delete_android_diagnostic_files(adb, device_id, app_id).await;
+}
+
 async fn inspect_android_target(
     adb: &Path,
     device_id: &str,
@@ -2181,6 +2627,61 @@ async fn sample_android_memory_checkpoint(
     Ok(checkpoint)
 }
 
+/// Collects one lightweight Android CPU/memory sample outside the formal measurement window.
+///
+/// This is used by interactive Flow trials so the desktop can provide immediate feedback without
+/// turning trial observations into benchmark evidence.
+///
+/// # Errors
+///
+/// Returns an error when the package id is invalid, managed ADB is unavailable, or the device
+/// cannot provide its current process metrics.
+pub async fn sample_android_live_performance(
+    workspace: &Path,
+    device_id: &str,
+    app_id: &str,
+    elapsed_ms: u64,
+) -> Result<Value, RunnerError> {
+    validate_android_package_id(app_id)?;
+    let adb = resolve_tools(workspace)
+        .adb
+        .ok_or(RunnerError::MissingTool("adb"))?;
+    let output = android_shell_text(
+        &adb,
+        device_id,
+        &["dumpsys", "meminfo", app_id],
+        "trial-live-meminfo",
+    )
+    .await?;
+    let mut checkpoint = parse_memory_checkpoint(&output, "trial", 0, elapsed_ms);
+    checkpoint.cpu_pct = sample_android_cpu_pct(&adb, device_id, app_id)
+        .await
+        .ok()
+        .flatten();
+    let remote = format!("/sdcard/Android/data/{app_id}/files/reactor/rn-diagnostics.ndjson");
+    let rn = android_shell_text(
+        &adb,
+        device_id,
+        &["tail", "-n", "1000", &remote],
+        "trial-live-rn-diagnostics",
+    )
+    .await
+    .ok()
+    .map(|output| summarize_live_rn_events(&output));
+    Ok(serde_json::json!({
+        "kind": "live_telemetry",
+        "source": "trial_observer",
+        "elapsedMs": checkpoint.elapsed_ms,
+        "cpuPct": checkpoint.cpu_pct,
+        "pssMb": checkpoint.pss_mb,
+        "rssMb": checkpoint.rss_mb,
+        "javaHeapMb": checkpoint.java_heap_mb,
+        "nativeHeapMb": checkpoint.native_heap_mb,
+        "rn": rn,
+        "officialMetric": false,
+    }))
+}
+
 async fn run_android_live_observer(
     workspace: PathBuf,
     job_id: String,
@@ -2278,6 +2779,8 @@ fn summarize_live_rn_events(output: &str) -> Value {
     let mut console = 0_u64;
     let mut network = 0_u64;
     let mut hermes_heap = 0_u64;
+    let mut duplicate_renders = 0_u64;
+    let mut rendered_components = BTreeSet::new();
     let mut latest_kind = None;
     let mut latest_name = None;
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
@@ -2289,8 +2792,20 @@ fn summarize_live_rn_events(output: &str) -> Value {
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let event_name = event
+            .pointer("/payload/name")
+            .or_else(|| event.pointer("/payload/id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         match kind {
-            "component_render" => renders = renders.saturating_add(1),
+            "component_render" => {
+                renders = renders.saturating_add(1);
+                if let Some(name) = event_name.as_ref()
+                    && !rendered_components.insert(name.clone())
+                {
+                    duplicate_renders = duplicate_renders.saturating_add(1);
+                }
+            }
             "component_tree" => tree_commits = tree_commits.saturating_add(1),
             "react_profile" => commits = commits.saturating_add(1),
             "console" => console = console.saturating_add(1),
@@ -2299,15 +2814,12 @@ fn summarize_live_rn_events(output: &str) -> Value {
             _ => {}
         }
         latest_kind = Some(kind.to_owned());
-        latest_name = event
-            .pointer("/payload/name")
-            .or_else(|| event.pointer("/payload/id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        latest_name = event_name;
     }
     serde_json::json!({
         "sampledEventCount": total,
         "componentRenderCount": renders,
+        "duplicateComponentRenderCount": duplicate_renders,
         "componentTreeCommitCount": tree_commits,
         "profileCommitCount": commits,
         "consoleEventCount": console,
@@ -2612,9 +3124,11 @@ async fn capture_react_native_diagnostics(
     device_id: &str,
     app_id: &str,
     artifact_dir: &Path,
+    max_events: u64,
+    max_artifact_bytes: u64,
 ) -> Result<Option<ReactNativeDiagnosticsSummary>, RunnerError> {
     const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024 * 1024;
-    const MAX_HEAP_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+    let max_diagnostic_bytes = max_artifact_bytes.min(MAX_DIAGNOSTIC_BYTES as u64);
     let remote = format!("/sdcard/Android/data/{app_id}/files/reactor/rn-diagnostics.ndjson");
     let output = match android_shell_text(adb, device_id, &["cat", &remote], "rn-diagnostics").await
     {
@@ -2629,10 +3143,12 @@ async fn capture_react_native_diagnostics(
     if output.is_empty() {
         return Ok(None);
     }
-    if output.len() > MAX_DIAGNOSTIC_BYTES {
+    if u64::try_from(output.len()).unwrap_or(u64::MAX) > max_diagnostic_bytes {
         return Err(RunnerError::CommandFailed {
             command: "rn-diagnostics".to_owned(),
-            output: "RN diagnostic evidence exceeds the 64 MiB local limit".to_owned(),
+            output: format!(
+                "RN diagnostic evidence exceeds the {max_diagnostic_bytes} byte diagnostic limit"
+            ),
         });
     }
     let mut component_names = BTreeSet::new();
@@ -2659,6 +3175,12 @@ async fn capture_react_native_diagnostics(
                 output: format!("invalid NDJSON event at line {}: {error}", index + 1),
             })?;
         event_count = event_count.saturating_add(1);
+        if event_count > max_events {
+            return Err(RunnerError::CommandFailed {
+                command: "rn-diagnostics-event-limit".to_owned(),
+                output: format!("event count exceeds maxEvents {max_events}"),
+            });
+        }
         let kind = event
             .get("kind")
             .and_then(Value::as_str)
@@ -2749,7 +3271,7 @@ async fn capture_react_native_diagnostics(
     )
     .await
     .ok()
-    .filter(|profile| profile.len() <= MAX_DIAGNOSTIC_BYTES)
+    .filter(|profile| u64::try_from(profile.len()).unwrap_or(u64::MAX) <= max_diagnostic_bytes)
     .and_then(|profile| serde_json::from_str::<Value>(&profile).ok())
     .filter(|profile| {
         profile
@@ -2774,7 +3296,7 @@ async fn capture_react_native_diagnostics(
         device_id,
         &format!("{remote_root}/rn-hermes-heap-stats.ndjson"),
         &artifact_dir.join("rn-hermes-heap-stats.ndjson"),
-        MAX_DIAGNOSTIC_BYTES as u64,
+        max_diagnostic_bytes,
     )
     .await
     {
@@ -2789,7 +3311,7 @@ async fn capture_react_native_diagnostics(
         device_id,
         &format!("{remote_root}/rn-hermes.heapsnapshot"),
         &artifact_dir.join("rn-hermes.heapsnapshot"),
-        MAX_HEAP_ARTIFACT_BYTES,
+        max_artifact_bytes,
     )
     .await
     {
@@ -2804,7 +3326,7 @@ async fn capture_react_native_diagnostics(
         device_id,
         &format!("{remote_root}/rn-java.hprof"),
         &artifact_dir.join("rn-java.hprof"),
-        MAX_HEAP_ARTIFACT_BYTES,
+        max_artifact_bytes,
     )
     .await
     {
@@ -3206,10 +3728,17 @@ pub async fn execute_android_job(
     job_id: &str,
 ) -> Result<(Job, NormalizedResult), RunnerError> {
     let result = execute_android_job_inner(request, job_id).await;
-    if let Err(error) = &result
-        && let Ok(store) = open_store(&request.workspace)
-    {
-        let _ = store.fail(job_id, &error.to_string());
+    if let Err(error) = &result {
+        if let Ok(lock_bytes) = fs::read(&request.flow_lock).await
+            && let Ok(lock) = serde_json::from_slice::<FlowLock>(&lock_bytes)
+            && validate_android_package_id(&lock.flow.app_id).is_ok()
+            && let Some(adb) = resolve_tools(&request.workspace).adb
+        {
+            delete_android_diagnostic_files(&adb, &request.device_id, &lock.flow.app_id).await;
+        }
+        if let Ok(store) = open_store(&request.workspace) {
+            let _ = store.fail(job_id, &error.to_string());
+        }
     }
     result
 }
@@ -3229,11 +3758,16 @@ async fn execute_android_job_inner(
 
     let lock: FlowLock = serde_json::from_slice(&fs::read(&request.flow_lock).await?)?;
     lock.verify()?;
+    validate_android_package_id(&lock.flow.app_id)?;
     if !lock.has_android_trial(&request.device_id) {
         return Err(RunnerError::MissingAndroidTrial(request.device_id.clone()));
     }
     let compiled = compile_maestro(&lock.flow)?;
-    let input_environment = resolve_input_environment(&compiled.input_bindings, None)?;
+    let input_environment = if request.manual_session {
+        Vec::new()
+    } else {
+        resolve_input_environment(&compiled.input_bindings, None)?
+    };
     let tools = resolve_tools(&request.workspace);
     let maestro = tools.maestro.ok_or(RunnerError::MissingTool("maestro"))?;
     let flashlight = tools
@@ -3248,6 +3782,13 @@ async fn execute_android_job_inner(
 
     let artifact_dir = request.workspace.join("results/runs").join(job_id);
     fs::create_dir_all(&artifact_dir).await?;
+    let marker_foundation_path = write_flow_marker_foundation(&artifact_dir, &lock.flow).await?;
+    register_artifact(
+        &request.workspace,
+        job_id,
+        "flow_marker_foundation",
+        &marker_foundation_path,
+    )?;
     ensure_android_trace_space(&adb, &request.device_id, &artifact_dir).await?;
     let setup_path = artifact_dir.join("setup.yaml");
     let measured_path = artifact_dir.join("measured.yaml");
@@ -3270,10 +3811,14 @@ async fn execute_android_job_inner(
         &request.workspace,
         job_id,
         JobState::Warmup,
-        "执行非计分预热",
+        if request.manual_session {
+            "准备手动诊断录制"
+        } else {
+            "执行非计分预热"
+        },
         None,
     )?;
-    if !lock.flow.setup.is_empty() {
+    if !request.manual_session && !lock.flow.setup.is_empty() {
         run_maestro_with_inputs(
             &maestro,
             &java,
@@ -3284,16 +3829,18 @@ async fn execute_android_job_inner(
         )
         .await?;
     }
-    run_maestro_with_inputs(
-        &maestro,
-        &java,
-        &adb,
-        &measured_path,
-        Some(&request.device_id),
-        &input_environment,
-    )
-    .await?;
-    if !lock.flow.teardown.is_empty() {
+    if !request.manual_session {
+        run_maestro_with_inputs(
+            &maestro,
+            &java,
+            &adb,
+            &measured_path,
+            Some(&request.device_id),
+            &input_environment,
+        )
+        .await?;
+    }
+    if !request.manual_session && !lock.flow.teardown.is_empty() {
         run_maestro_with_inputs(
             &maestro,
             &java,
@@ -3309,7 +3856,11 @@ async fn execute_android_job_inner(
         &request.workspace,
         job_id,
         JobState::Measuring,
-        "执行锁定 Flow 并采集原生指标",
+        if request.manual_session {
+            "手动诊断录制已开始；请在 App 中自由操作"
+        } else {
+            "执行锁定 Flow 并采集原生指标"
+        },
         None,
     )?;
     let mut native_warnings = Vec::new();
@@ -3343,6 +3894,36 @@ async fn execute_android_job_inner(
         expected_trace_ms,
     )
     .await?;
+    let mut rn_framework_collectors = BTreeMap::new();
+    let hermes_cpu_requested = requested_collector(request, "hermes-cpu");
+    let hermes_cpu_capture = if let Some(required) = hermes_cpu_requested {
+        let lease_ms = request
+            .diagnostic_plan
+            .as_ref()
+            .map_or(60_000, |plan| plan.resource_limits.max_duration_ms);
+        match start_android_hermes_cpu(&adb, &request.device_id, &lock.flow.app_id, lease_ms).await
+        {
+            Ok(capture) => Some(capture),
+            Err(error) if required => {
+                let _ = stop_perfetto(&adb, &request.device_id, &perfetto, &perfetto_path).await;
+                return Err(error);
+            }
+            Err(error) => {
+                native_warnings.push(format!("Hermes CPU 采集未启动：{error}"));
+                rn_framework_collectors.insert(
+                    "hermes-cpu".to_owned(),
+                    CollectorDiagnosticV1 {
+                        status: CollectorStatus::Failed,
+                        artifacts: Vec::new(),
+                        reason: Some(error.to_string()),
+                    },
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let (observer_stop, observer_stop_rx) = tokio::sync::watch::channel(false);
     let observer_task = tokio::spawn(run_android_live_observer(
         request.workspace.clone(),
@@ -3352,31 +3933,134 @@ async fn execute_android_job_inner(
         lock.flow.app_id.clone(),
         observer_stop_rx,
     ));
-    let flashlight_result = run_flashlight(
-        &flashlight,
-        &maestro,
-        &java,
-        &adb,
-        &setup_path,
-        &measured_path,
-        (!lock.flow.teardown.is_empty()).then_some(teardown_path.as_path()),
-        &raw_path,
-        &lock.flow.app_id,
-        request,
-        &input_environment,
-    )
-    .await;
+    let flashlight_result = if request.manual_session {
+        run_flashlight_manual(
+            &flashlight,
+            &java,
+            &adb,
+            &raw_path,
+            &lock.flow.app_id,
+            request,
+            job_id,
+        )
+        .await
+    } else {
+        run_flashlight(
+            &flashlight,
+            &maestro,
+            &java,
+            &adb,
+            &setup_path,
+            &measured_path,
+            (!lock.flow.teardown.is_empty()).then_some(teardown_path.as_path()),
+            &raw_path,
+            &lock.flow.app_id,
+            request,
+            &input_environment,
+        )
+        .await
+    };
     let _ = observer_stop.send(true);
     let _ = observer_task.await;
+    let hermes_cpu_result = if let Some(capture) = &hermes_cpu_capture {
+        Some(
+            finish_android_hermes_cpu(
+                &adb,
+                &request.device_id,
+                &lock.flow.app_id,
+                capture,
+                &artifact_dir,
+                request
+                    .diagnostic_plan
+                    .as_ref()
+                    .map_or(256 * 1024 * 1024, |plan| {
+                        plan.resource_limits.max_artifact_bytes
+                    }),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let perfetto_result = stop_perfetto(&adb, &request.device_id, &perfetto, &perfetto_path).await;
     if perfetto_path.is_file() {
         register_artifact(&request.workspace, job_id, "perfetto_trace", &perfetto_path)?;
     }
     if let Err(error) = flashlight_result {
+        if let Some(capture) = &hermes_cpu_capture
+            && hermes_cpu_result.as_ref().is_some_and(Result::is_err)
+        {
+            abort_android_hermes_cpu(&adb, &request.device_id, &lock.flow.app_id, capture).await;
+        }
         let _ = perfetto_result;
         return Err(error);
     }
     perfetto_result?;
+    if let Some(result) = hermes_cpu_result {
+        match result {
+            Ok((path, end_elapsed_realtime_nanos)) => {
+                let limits = &request
+                    .diagnostic_plan
+                    .as_ref()
+                    .expect("Hermes diagnostic capture requires a validated plan")
+                    .resource_limits;
+                enforce_json_sample_limit(&path, limits.max_samples)?;
+                enforce_diagnostic_artifacts(
+                    &artifact_dir,
+                    std::iter::once(path.clone()),
+                    limits.max_artifact_bytes,
+                )?;
+                let artifact = open_store(&request.workspace)?.register_artifact(
+                    job_id,
+                    "react_native_hermes_cpu",
+                    &path,
+                )?;
+                let capture = hermes_cpu_capture
+                    .as_ref()
+                    .expect("Hermes result requires a capture session");
+                rn_framework_collectors.insert(
+                    "hermes-cpu".to_owned(),
+                    CollectorDiagnosticV1 {
+                        status: CollectorStatus::Collected,
+                        artifacts: vec![ArtifactRef {
+                            path: path.file_name().map_or_else(
+                                || RN_HERMES_CPU_FILE.to_owned(),
+                                |name| name.to_string_lossy().into_owned(),
+                            ),
+                            format: "hermes-sampling-chrome-trace-json".to_owned(),
+                            size_bytes: artifact.size_bytes,
+                            sha256: artifact.sha256,
+                            producer: "reactor-rn-sdk".to_owned(),
+                            producer_version: "1.0.0".to_owned(),
+                            capture_method: "official-public-hermes-sampling-profiler".to_owned(),
+                            integrity: ArtifactIntegrity::Complete,
+                            time_range: Some(reactor_protocol::ArtifactTimeRangeV1 {
+                                start_ns: capture.start_elapsed_realtime_nanos,
+                                end_ns: end_elapsed_realtime_nanos,
+                                clock: "android_elapsed_realtime".to_owned(),
+                            }),
+                        }],
+                        reason: None,
+                    },
+                );
+            }
+            Err(error) if hermes_cpu_requested == Some(true) => {
+                delete_android_diagnostic_files(&adb, &request.device_id, &lock.flow.app_id).await;
+                return Err(error);
+            }
+            Err(error) => {
+                native_warnings.push(format!("Hermes CPU 采集未保存：{error}"));
+                rn_framework_collectors.insert(
+                    "hermes-cpu".to_owned(),
+                    CollectorDiagnosticV1 {
+                        status: CollectorStatus::Failed,
+                        artifacts: Vec::new(),
+                        reason: Some(error.to_string()),
+                    },
+                );
+            }
+        }
+    }
     register_artifact(&request.workspace, job_id, "flashlight_raw", &raw_path)?;
     let mut memory_leak = if let Some(plan) = &request.leak_test {
         open_store(&request.workspace)?.append_event(
@@ -3450,29 +4134,71 @@ async fn execute_android_job_inner(
         None
     };
     let rn_diagnostics = if request.framework == "react-native" {
+        let limits = request
+            .diagnostic_plan
+            .as_ref()
+            .map(|plan| &plan.resource_limits);
         match capture_react_native_diagnostics(
             &adb,
             &request.device_id,
             &lock.flow.app_id,
             &artifact_dir,
+            limits.map_or(500_000, |limits| limits.max_events),
+            limits.map_or(256 * 1024 * 1024, |limits| limits.max_artifact_bytes),
         )
         .await
         {
             Ok(Some(summary)) => {
-                register_artifact(
-                    &request.workspace,
+                let event_path = Path::new(&summary.event_file);
+                let event_artifact = open_store(&request.workspace)?.register_artifact(
                     job_id,
                     "react_native_diagnostics",
-                    Path::new(&summary.event_file),
+                    event_path,
                 )?;
+                let mut runtime_artifacts = vec![ArtifactRef {
+                    path: event_path.file_name().map_or_else(
+                        || summary.event_file.clone(),
+                        |name| name.to_string_lossy().into_owned(),
+                    ),
+                    format: "reactor-rn-events-ndjson".to_owned(),
+                    size_bytes: event_artifact.size_bytes,
+                    sha256: event_artifact.sha256,
+                    producer: summary.collector.clone(),
+                    producer_version: format!("schema-{}", summary.schema_version),
+                    capture_method: "reactor-owned-versioned-bridge".to_owned(),
+                    integrity: ArtifactIntegrity::Complete,
+                    time_range: None,
+                }];
                 if let Some(profile_file) = &summary.profile_file {
-                    register_artifact(
-                        &request.workspace,
+                    let profile_path = Path::new(profile_file);
+                    let profile_artifact = open_store(&request.workspace)?.register_artifact(
                         job_id,
                         "react_native_profile",
-                        Path::new(profile_file),
+                        profile_path,
                     )?;
+                    runtime_artifacts.push(ArtifactRef {
+                        path: profile_path.file_name().map_or_else(
+                            || profile_file.clone(),
+                            |name| name.to_string_lossy().into_owned(),
+                        ),
+                        format: "react-devtools-profile-json".to_owned(),
+                        size_bytes: profile_artifact.size_bytes,
+                        sha256: profile_artifact.sha256,
+                        producer: summary.collector.clone(),
+                        producer_version: format!("schema-{}", summary.schema_version),
+                        capture_method: "react-profiler-managed-export".to_owned(),
+                        integrity: ArtifactIntegrity::Complete,
+                        time_range: None,
+                    });
                 }
+                rn_framework_collectors.insert(
+                    "react-runtime".to_owned(),
+                    CollectorDiagnosticV1 {
+                        status: CollectorStatus::Collected,
+                        artifacts: runtime_artifacts,
+                        reason: None,
+                    },
+                );
                 for (kind, path) in [
                     (
                         "react_native_hermes_heap_stats",
@@ -3502,6 +4228,32 @@ async fn execute_android_job_inner(
     } else {
         None
     };
+    if let Some(limits) = request
+        .diagnostic_plan
+        .as_ref()
+        .map(|plan| &plan.resource_limits)
+    {
+        let mut diagnostic_paths = Vec::new();
+        if artifact_dir.join(RN_HERMES_CPU_FILE).is_file() {
+            diagnostic_paths.push(artifact_dir.join(RN_HERMES_CPU_FILE));
+        }
+        if let Some(summary) = &rn_diagnostics {
+            diagnostic_paths.push(PathBuf::from(&summary.event_file));
+            diagnostic_paths.extend(
+                [
+                    &summary.profile_file,
+                    &summary.hermes_heap_stats_file,
+                    &summary.hermes_heap_snapshot_file,
+                    &summary.java_heap_dump_file,
+                ]
+                .into_iter()
+                .flatten()
+                .map(PathBuf::from),
+            );
+        }
+        enforce_diagnostic_artifacts(&artifact_dir, diagnostic_paths, limits.max_artifact_bytes)?;
+    }
+    delete_android_diagnostic_files(&adb, &request.device_id, &lock.flow.app_id).await;
     if let Some(report) = memory_leak.as_mut() {
         reconcile_memory_leak_with_rn_diagnostics(report, rn_diagnostics.as_ref());
         let path = artifact_dir.join("android-memory-leak.json");
@@ -3587,6 +4339,47 @@ async fn execute_android_job_inner(
         &native_metrics_path,
     )?;
     result.android_native = Some(native_metrics);
+    result.run_mode = request.run_mode;
+    result.diagnostic_plan = request.diagnostic_plan.clone();
+    if let Some(capture) = &hermes_cpu_capture {
+        let mut capabilities = capture.capabilities.clone();
+        capabilities.sort();
+        capabilities.dedup();
+        let app_version = target_metadata
+            .app_version
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
+        let variant = if capture.diagnostic_build {
+            "diagnostic"
+        } else {
+            "unknown"
+        };
+        result.build_identity = Some(BuildIdentityV1 {
+            schema_version: 1,
+            app_version: app_version.clone(),
+            react_native_version: None,
+            react_version: None,
+            hermes_version: None,
+            reactor_sdk_version: capture.sdk_version.clone(),
+            variant: variant.to_owned(),
+            optimization_mode: "release-optimized".to_owned(),
+            bundle_sha256: None,
+            binary_sha256: None,
+            capabilities: capabilities.clone(),
+            fingerprint: format!(
+                "android:{app_version}:{variant}:{}:{}",
+                capture.sdk_version.as_deref().unwrap_or("unknown"),
+                capabilities.join(",")
+            ),
+        });
+    }
+    if request.framework == "react-native" && !rn_framework_collectors.is_empty() {
+        result.framework_diagnostics = Some(FrameworkDiagnosticsV1 {
+            react_native: Some(ReactNativeFrameworkDiagnosticsV1 {
+                collectors: rn_framework_collectors,
+            }),
+        });
+    }
     let result_path = artifact_dir.join("result.json");
     fs::write(
         &result_path,
@@ -3684,6 +4477,13 @@ async fn execute_ios_job_inner(
 
     let artifact_dir = request.workspace.join("results/runs").join(job_id);
     fs::create_dir_all(&artifact_dir).await?;
+    let marker_foundation_path = write_flow_marker_foundation(&artifact_dir, &lock.flow).await?;
+    register_artifact(
+        &request.workspace,
+        job_id,
+        "flow_marker_foundation",
+        &marker_foundation_path,
+    )?;
     let setup_path = artifact_dir.join("setup.yaml");
     let measured_path = artifact_dir.join("measured.yaml");
     let teardown_path = artifact_dir.join("teardown.yaml");
@@ -3859,6 +4659,11 @@ async fn execute_ios_job_inner(
         adapter: "xctrace-ios".to_owned(),
         build_mode: "release".to_owned(),
         flow_hash: lock.flow_hash,
+        run_mode: reactor_protocol::RunMode::Benchmark,
+        diagnostic_plan: None,
+        build_identity: None,
+        artifacts: vec![],
+        framework_diagnostics: None,
         app_id: Some(lock.flow.app_id),
         app_version: None,
         device: DeviceMetadata {
@@ -4552,6 +5357,11 @@ fn synthetic_result(
         adapter: "reactor-synthetic-tour".to_owned(),
         build_mode: "release".to_owned(),
         flow_hash: flow.flow_hash.clone(),
+        run_mode: reactor_protocol::RunMode::Benchmark,
+        diagnostic_plan: None,
+        build_identity: None,
+        artifacts: vec![],
+        framework_diagnostics: None,
         app_id: Some(flow.flow.app_id.clone()),
         app_version: None,
         device: DeviceMetadata {
@@ -4851,6 +5661,60 @@ async fn run_flashlight(
     .await
 }
 
+async fn run_flashlight_manual(
+    flashlight: &Path,
+    java: &Path,
+    adb: &Path,
+    raw_path: &Path,
+    app_id: &str,
+    request: &AndroidRunRequest,
+    job_id: &str,
+) -> Result<(), RunnerError> {
+    let artifact_dir = raw_path.parent().ok_or_else(|| {
+        RunnerError::InvalidDiagnosticPlan("manual recording artifact path is invalid".to_owned())
+    })?;
+    let stop_path = artifact_dir.join("manual-stop.request");
+    let wait_script = artifact_dir.join("manual-recording-wait.sh");
+    let tick_count = request.duration_ms.div_ceil(250).clamp(1, 1_200);
+    let script = format!(
+        "#!/bin/sh\ni=0\nwhile [ ! -f {} ] && [ \"$i\" -lt {tick_count} ]; do\n  sleep 0.25\n  i=$((i + 1))\ndone\n",
+        quote_shell(&stop_path.display().to_string()),
+    );
+    fs::write(&wait_script, script).await?;
+    register_artifact(
+        &request.workspace,
+        job_id,
+        "manual_recording_control",
+        &wait_script,
+    )?;
+    let test_command = format!("sh {}", quote_shell(&wait_script.display().to_string()));
+    let mut command = Command::new(flashlight);
+    let title = format!("{} · manual-diagnose · Reactor", request.framework);
+    command.args([
+        "test",
+        "--bundleId",
+        app_id,
+        "--testCommand",
+        &test_command,
+        "--iterationCount",
+        "1",
+        "--maxRetries",
+        "0",
+        "--skipRestart",
+        "--resultsTitle",
+        &title,
+        "--resultsFilePath",
+        &raw_path.display().to_string(),
+    ]);
+    configure_environment(&mut command, java, adb, Some(&request.device_id));
+    run_command_with_timeout(
+        command,
+        "flashlight-manual-recording",
+        Duration::from_millis(request.duration_ms.saturating_add(120_000)),
+    )
+    .await
+}
+
 fn flashlight_timeout(request: &AndroidRunRequest) -> Duration {
     // Flashlight's duration only covers metric sampling. Maestro setup, Flow execution and
     // teardown happen around every iteration and need their own bounded allowance.
@@ -4985,6 +5849,11 @@ fn normalize_flashlight(
         adapter: "flashlight-android".to_owned(),
         build_mode: "release".to_owned(),
         flow_hash: flow.flow_hash.clone(),
+        run_mode: reactor_protocol::RunMode::Benchmark,
+        diagnostic_plan: None,
+        build_identity: None,
+        artifacts: vec![],
+        framework_diagnostics: None,
         app_id: Some(flow.flow.app_id.clone()),
         app_version: target_metadata.app_version.clone(),
         device: DeviceMetadata {
@@ -5292,6 +6161,19 @@ mod tests {
                 .to_string()
                 .contains("invalid integer metric")
         );
+    }
+
+    #[test]
+    fn live_rn_summary_counts_repeated_component_renders() {
+        let summary = summarize_live_rn_events(
+            r#"{"kind":"component_render","payload":{"name":"ListRow"}}
+{"kind":"component_render","payload":{"name":"ListRow"}}
+{"kind":"component_render","payload":{"name":"Header"}}
+{"kind":"react_profile","payload":{"name":"commit"}}"#,
+        );
+        assert_eq!(summary["componentRenderCount"], 3);
+        assert_eq!(summary["duplicateComponentRenderCount"], 1);
+        assert_eq!(summary["profileCommitCount"], 1);
     }
 
     #[tokio::test]
@@ -5662,6 +6544,119 @@ mod tests {
     }
 
     #[test]
+    fn marker_foundation_is_truthful_about_opaque_step_execution() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "markers".to_owned(),
+            name: "Markers".to_owned(),
+            app_id: "com.example".to_owned(),
+            platform: reactor_protocol::Platform::Android,
+            intent: None,
+            setup: vec![],
+            measured: vec![Step::LaunchApp],
+            teardown: vec![],
+        };
+        let foundation = flow_marker_foundation(&flow);
+        assert_eq!(foundation.clock, "host_monotonic");
+        assert_eq!(foundation.iteration_boundaries, "unavailable");
+        assert_eq!(foundation.step_boundaries, "unavailable");
+        assert!(foundation.uncertainty_ms.is_none());
+        assert!(!foundation.steps.is_empty());
+        assert!(foundation.steps[0].id.starts_with("flow-step:"));
+    }
+
+    #[test]
+    fn validates_android_package_ids_before_using_components_or_paths() {
+        for valid in ["com.example.app", "io_reactor.fixture2"] {
+            validate_android_package_id(valid).unwrap();
+        }
+        for invalid in [
+            "com",
+            ".com.example",
+            "com.example/Receiver",
+            "com.example-app",
+            "1com.example",
+            "com..example",
+        ] {
+            assert!(validate_android_package_id(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_ingress_enforces_cumulative_duration_and_plan_consistency() {
+        let mut request = AndroidRunRequest {
+            workspace: PathBuf::from("fixture"),
+            flow_lock: PathBuf::from("flow.lock.json"),
+            framework: "react-native".to_owned(),
+            scenario: "list".to_owned(),
+            device_id: "emulator-5554".to_owned(),
+            duration_ms: 18_000,
+            iteration_count: 3,
+            run_mode: RunMode::Diagnose,
+            diagnostic_plan: Some(DiagnosticPlanV1 {
+                schema_version: 1,
+                mode: reactor_protocol::DiagnosticCaptureMode::InBand,
+                collectors: vec![reactor_protocol::DiagnosticCollectorPlanV1 {
+                    collector: "hermes-cpu".to_owned(),
+                    required: true,
+                }],
+                resource_limits: reactor_protocol::DiagnosticResourceLimitsV1 {
+                    max_duration_ms: 54_000,
+                    max_artifact_bytes: 1024,
+                    max_events: 100,
+                    max_samples: 100,
+                },
+            }),
+            leak_test: None,
+            manual_session: false,
+        };
+        validate_android_request(&request).unwrap();
+        request.iteration_count = 4;
+        assert!(
+            validate_android_request(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("cumulative duration")
+        );
+        request.run_mode = RunMode::Benchmark;
+        assert!(validate_android_request(&request).is_err());
+    }
+
+    #[test]
+    fn artifact_refs_are_normalized_and_cumulative_bytes_are_bounded() {
+        let directory =
+            std::env::temp_dir().join(format!("reactor-artifact-ref-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let first = directory.join("first.json");
+        let second = directory.join("nested/second.json");
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"1234").unwrap();
+        std::fs::write(&second, b"5678").unwrap();
+        assert_eq!(
+            result_relative_artifact_path(&directory, &second).unwrap(),
+            "nested/second.json"
+        );
+        assert!(
+            enforce_diagnostic_artifacts(&directory, [first.clone(), second.clone()], 8).is_ok()
+        );
+        assert!(enforce_diagnostic_artifacts(&directory, [first, second], 7).is_err());
+        assert!(result_relative_artifact_path(&directory, directory.parent().unwrap()).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn available_hermes_trace_samples_obey_sample_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "reactor-hermes-samples-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, br#"{"traceEvents":[{},{}]}"#).unwrap();
+        enforce_json_sample_limit(&path, 2).unwrap();
+        assert!(enforce_json_sample_limit(&path, 1).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn flashlight_timeout_includes_per_iteration_automation_overhead() {
         let request = AndroidRunRequest {
             workspace: PathBuf::from("fixture"),
@@ -5671,7 +6666,10 @@ mod tests {
             device_id: "emulator-5554".to_owned(),
             duration_ms: 18_000,
             iteration_count: 10,
+            run_mode: RunMode::Benchmark,
+            diagnostic_plan: None,
             leak_test: None,
+            manual_session: false,
         };
         assert_eq!(flashlight_timeout(&request), Duration::from_secs(900));
     }
@@ -5758,5 +6756,101 @@ mod tests {
             "a repeated cancel must not append another terminal event"
         );
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn manual_stop_is_graceful_idempotent_and_rejects_regular_jobs() {
+        let workspace =
+            std::env::temp_dir().join(format!("reactor-manual-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = open_store(&workspace).unwrap();
+        let manual = store
+            .create_job(&serde_json::json!({ "manualSession": true }))
+            .unwrap();
+        let first = request_android_manual_stop(&workspace, &manual.id).unwrap();
+        let event_count_after_first = store.events_after(&manual.id, 0).unwrap().len();
+        let second = request_android_manual_stop(&workspace, &manual.id).unwrap();
+        assert_eq!(first.state, JobState::Queued);
+        assert_eq!(second.state, JobState::Queued);
+        assert!(
+            workspace
+                .join("results/runs")
+                .join(&manual.id)
+                .join("manual-stop.request")
+                .is_file()
+        );
+        assert_eq!(
+            store.events_after(&manual.id, 0).unwrap().len(),
+            event_count_after_first
+        );
+
+        let regular = store
+            .create_job(&serde_json::json!({ "manualSession": false }))
+            .unwrap();
+        assert!(request_android_manual_stop(&workspace, &regular.id).is_err());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a Reactor-managed Android target and explicit local workspace/Flow lock"]
+    async fn manual_android_recording_stops_and_persists_evidence() {
+        let workspace = PathBuf::from(
+            std::env::var("REACTOR_MANUAL_WORKSPACE")
+                .expect("set REACTOR_MANUAL_WORKSPACE for the managed runtime"),
+        );
+        let flow_lock = PathBuf::from(
+            std::env::var("REACTOR_MANUAL_FLOW_LOCK")
+                .expect("set REACTOR_MANUAL_FLOW_LOCK for a verified Android Flow"),
+        );
+        let request = AndroidRunRequest {
+            workspace: workspace.clone(),
+            flow_lock,
+            framework: "react-native".to_owned(),
+            scenario: "manual-diagnose".to_owned(),
+            device_id: "emulator-5554".to_owned(),
+            duration_ms: 30_000,
+            iteration_count: 1,
+            run_mode: RunMode::Diagnose,
+            diagnostic_plan: Some(DiagnosticPlanV1 {
+                schema_version: 1,
+                mode: reactor_protocol::DiagnosticCaptureMode::InBand,
+                collectors: vec![reactor_protocol::DiagnosticCollectorPlanV1 {
+                    collector: "hermes-cpu".to_owned(),
+                    required: false,
+                }],
+                resource_limits: reactor_protocol::DiagnosticResourceLimitsV1 {
+                    max_duration_ms: 30_000,
+                    max_artifact_bytes: 256 * 1024 * 1024,
+                    max_events: 500_000,
+                    max_samples: 2_000_000,
+                },
+            }),
+            leak_test: None,
+            manual_session: true,
+        };
+        let job = enqueue_android(&request).unwrap();
+        let execute_request = request.clone();
+        let job_id = job.id.clone();
+        let execute_job_id = job_id.clone();
+        let execution =
+            tokio::spawn(
+                async move { execute_android_job(&execute_request, &execute_job_id).await },
+            );
+        for _ in 0..120 {
+            let (current, _) = get_job(&workspace, &job_id, 0).unwrap();
+            if current.state == JobState::Measuring {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        request_android_manual_stop(&workspace, &job_id).unwrap();
+        let (completed, result) = execution.await.unwrap().unwrap();
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(result.scenario, "manual-diagnose");
+        let artifacts = workspace.join("results/runs").join(&job_id);
+        assert!(artifacts.join("flashlight.json").is_file());
+        assert!(artifacts.join("perfetto.pftrace").is_file());
+        assert!(artifacts.join("result.json").is_file());
     }
 }

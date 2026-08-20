@@ -1,0 +1,12 @@
+{
+  "name": "@reactor/react-native",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Versioned React Native diagnostics bridge for Reactor",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.83"
+  }
+}

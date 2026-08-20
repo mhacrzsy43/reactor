@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reactor.local/schemas/diagnostic-regression-evidence-v1.json",
+  "title": "Reactor diagnostic regression evidence v1",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "jsHotspots", "slowFrames"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "jsHotspots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "sampleCount", "selfTimeMs", "inclusiveTimeMs", "selectedTimeMs", "slowFrameWindowCount", "callerPaths"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "source": {
+            "type": ["object", "null"],
+            "required": ["file"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "line": { "type": ["integer", "null"], "minimum": 0 },
+              "column": { "type": ["integer", "null"], "minimum": 0 }
+            },
+            "additionalProperties": false
+          },
+          "sampleCount": { "type": "integer", "minimum": 0 },
+          "selfTimeMs": { "type": "number", "minimum": 0 },
+          "inclusiveTimeMs": { "type": "number", "minimum": 0 },
+          "selectedTimeMs": { "type": "number", "minimum": 0 },
+          "slowFrameWindowCount": { "type": "integer", "minimum": 0 },
+          "callerPaths": {
+            "type": "array",
+            "items": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "slowFrames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "timestampMs", "durationMs", "jankType", "components", "bottomUpHotspots"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "stepId": { "type": ["string", "null"] },
+          "timestampMs": { "type": "number" },
+          "durationMs": { "type": "number", "minimum": 0 },
+          "jankType": { "type": "string", "minLength": 1 },
+          "components": { "type": "array", "items": { "type": "string" } },
+          "bottomUpHotspots": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

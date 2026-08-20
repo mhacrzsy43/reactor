@@ -5,15 +5,55 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod ci;
+mod clock;
+mod correlation;
+mod diagnostic_index;
+mod diagnostic_regression;
+mod hotspot;
 mod profile;
+mod slow_frame;
+mod stack;
 
 pub use ci::{CiReport, CiStatus, render_ci_html, render_ci_junit};
+pub use clock::{
+    ClockMapping, ClockMappingError, ClockMappingMethod, ClockQuality, ClockSegment,
+    ClockSyncPoint, MappedTimestamp,
+};
+pub use correlation::{
+    CorrelationConfidence, CorrelationRelation, DiagnosticCorrelation, TimeRange,
+    correlate_intervals,
+};
+pub use diagnostic_index::{
+    DiagnosticAvailability, DiagnosticIndex, DiagnosticIndexError, DiagnosticManifest,
+    DiagnosticTruncation, FrameDrilldown, MAX_CPU_SAMPLES, MAX_DIAGNOSTIC_INPUT_BYTES,
+    MAX_INDEX_BYTES, MAX_TIMELINE_EVENTS, RankedValue, SelectionAnalysis, TimelineItem,
+    TimelineOverview, TimelineTrack, TimelineWindow,
+};
+pub use diagnostic_regression::{
+    DIAGNOSTIC_REGRESSION_SCHEMA_VERSION, DiagnosticCaptureSide, DiagnosticRegressionError,
+    DiagnosticRegressionEvidence, DiagnosticRegressionFacts, DiagnosticRegressionPolicy,
+    DiagnosticRegressionReport, DiagnosticRegressionVerdict, DiagnosticRuleGate, DiagnosticRuleHit,
+    DiagnosticRuleKind, JsHotspotDeltaFact, SlowFrameClusterDeltaFact, TemporalCandidate,
+    analyze_diagnostic_regression,
+};
+pub use hotspot::{
+    JsHotspotDiff, JsHotspotDiffPolicy, JsHotspotDiffReport, JsHotspotStat, diff_js_hotspots,
+};
 
 pub use profile::{
     ComponentChangeEvidence, ComponentProfileDiff, ComponentProfileStat, DiagnosticFinding,
     DiagnosticProfileReport, DiagnosticProfileType, FunctionProfileStat, ProfileCommit,
     ProfileDiffReport, ProfileError, SourceLocation, analyze_profile_json, apply_source_map_json,
     diff_profile_reports,
+};
+pub use slow_frame::{
+    SlowFrameCluster, SlowFrameClusterComparison, SlowFrameClusterDiff, SlowFrameClusterPolicy,
+    SlowFrameObservation, cluster_slow_frames, compare_slow_frame_clusters,
+};
+pub use stack::{
+    FlameAggregate, HermesStackAnalysis, RankedFrame, StackAggregateNode, StackConservation,
+    StackFrame, StackProfileError, TimedSample, analyze_hermes_stack_json,
+    reconstruct_hermes_stacks,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,6 +232,7 @@ pub fn analyze_pair(
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn check_compatibility(
     baseline: &NormalizedResult,
     current: &NormalizedResult,
@@ -224,6 +265,25 @@ pub fn check_compatibility(
         &current.flow_hash,
         &mut reasons,
     );
+    if baseline.run_mode != current.run_mode {
+        reasons.push(format!(
+            "运行模式不同：{:?} vs {:?}",
+            baseline.run_mode, current.run_mode
+        ));
+    }
+    match (&baseline.build_identity, &current.build_identity) {
+        (Some(left), Some(right)) => exact_match(
+            "构建指纹",
+            &left.fingerprint,
+            &right.fingerprint,
+            &mut reasons,
+        ),
+        (None, None) => {}
+        _ => reasons.push("构建身份可用性不同".to_owned()),
+    }
+    if diagnostic_measurement_class(baseline) != diagnostic_measurement_class(current) {
+        reasons.push("诊断采集模式或 collector 集合不同".to_owned());
+    }
     if baseline.source.synthetic || current.source.synthetic {
         reasons.push("模拟导览数据不能作为真实性能回归基线".to_owned());
     }
@@ -289,6 +349,25 @@ pub fn check_compatibility(
         reasons,
         warnings,
     }
+}
+
+fn diagnostic_measurement_class(result: &NormalizedResult) -> String {
+    let mut collectors = result
+        .diagnostic_plan
+        .as_ref()
+        .map(|plan| {
+            plan.collectors
+                .iter()
+                .map(|collector| format!("{}:{}", collector.collector, collector.required))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    collectors.sort();
+    let mode = result
+        .diagnostic_plan
+        .as_ref()
+        .map_or("disabled".to_owned(), |plan| format!("{:?}", plan.mode));
+    format!("{mode}:{}", collectors.join(","))
 }
 
 fn exact_match(label: &str, baseline: &str, current: &str, reasons: &mut Vec<String>) {
@@ -648,6 +727,11 @@ mod tests {
             adapter: "perfetto".to_owned(),
             build_mode: "release".to_owned(),
             flow_hash: "same-flow".to_owned(),
+            run_mode: reactor_protocol::RunMode::Benchmark,
+            diagnostic_plan: None,
+            build_identity: None,
+            artifacts: vec![],
+            framework_diagnostics: None,
             app_id: Some("com.reactor.fixture".to_owned()),
             app_version: Some("1.0 (1)".to_owned()),
             device: DeviceMetadata {

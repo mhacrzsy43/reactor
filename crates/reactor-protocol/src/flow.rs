@@ -70,6 +70,66 @@ pub enum Step {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandedFlowStep {
+    pub id: String,
+    pub path: String,
+    pub section: String,
+    pub action: String,
+}
+
+impl Flow {
+    #[must_use]
+    pub fn expanded_steps(&self) -> Vec<ExpandedFlowStep> {
+        let mut expanded = Vec::new();
+        expand_steps(&self.setup, "setup", "setup", &mut expanded);
+        expand_steps(&self.measured, "measured", "measured", &mut expanded);
+        expand_steps(&self.teardown, "teardown", "teardown", &mut expanded);
+        expanded
+    }
+}
+
+fn expand_steps(steps: &[Step], section: &str, prefix: &str, expanded: &mut Vec<ExpandedFlowStep>) {
+    for (index, step) in steps.iter().enumerate() {
+        let path = format!("{prefix}[{index}]");
+        if let Step::Repeat { times, steps } = step {
+            for iteration in 0..*times {
+                expand_steps(
+                    steps,
+                    section,
+                    &format!("{path}.repeat[{iteration}].steps"),
+                    expanded,
+                );
+            }
+        } else {
+            expanded.push(ExpandedFlowStep {
+                id: format!("flow-step:{path}"),
+                path,
+                section: section.to_owned(),
+                action: step.action_name().to_owned(),
+            });
+        }
+    }
+}
+
+impl Step {
+    #[must_use]
+    pub const fn action_name(&self) -> &'static str {
+        match self {
+            Self::ResetAppState => "reset_app_state",
+            Self::LaunchApp => "launch_app",
+            Self::Tap { .. } => "tap",
+            Self::InputText { .. } => "input_text",
+            Self::Swipe { .. } => "swipe",
+            Self::WaitFor { .. } => "wait_for",
+            Self::AssertVisible { .. } => "assert_visible",
+            Self::Pause { .. } => "pause",
+            Self::Repeat { .. } => "repeat",
+        }
+    }
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -899,6 +959,18 @@ mod tests {
             ],
             teardown: vec![],
         }
+    }
+
+    #[test]
+    fn expanded_steps_have_stable_repeat_paths() {
+        let flow = valid_flow();
+        let steps = flow.expanded_steps();
+        assert_eq!(steps[0].id, "flow-step:setup[0]");
+        assert_eq!(steps[1].id, "flow-step:measured[0]");
+        assert_eq!(steps[2].id, "flow-step:measured[1].repeat[0].steps[0]");
+        assert_eq!(steps[9].id, "flow-step:measured[1].repeat[7].steps[0]");
+        assert_eq!(steps[2].action, "swipe");
+        assert_eq!(steps, flow.expanded_steps());
     }
 
     #[test]

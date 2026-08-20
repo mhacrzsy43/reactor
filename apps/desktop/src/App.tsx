@@ -28,7 +28,8 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runDemo, runIos, saveFlowSecret, stageUpdate, trialGeneratedFlow } from "./api";
+import { JOB_POLL_INTERVAL_MS, analyzeJobPair, bootstrap, cancelJob, compileFlowPreview, confirmFlow, createDiagnosticBundle, doctorCliProviders, doctorLocalModel, erasePrivateData, explainAnalysis, generateFlow, getFlowSecretStatus, getJobSnapshot, getMaintenanceStatus, installStagedUpdate, listJobs, openReport, prepareManagedTools, previewGenerationContext, probeFlow, refreshDevices, repairFlow, resumeJob, runAndroid, runAndroidDiagnose, runAndroidManualDiagnose, runDemo, runIos, sampleTrialLivePerformance, saveFlowSecret, stageUpdate, stopManualDiagnose, trialGeneratedFlow } from "./api";
+import { conservativeAndroidDiagnosticPlan, formatOptionalMetric, telemetrySlopePerMinute } from "./diagnosticLogic";
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
 import { FlowCopilot } from "./FlowCopilot";
@@ -37,6 +38,7 @@ import type {
   Bootstrap,
   AnalysisExplanation,
   CompiledFlow,
+  DiagnosticRunSummary,
   Flow,
   FlowLock,
   FlowStep,
@@ -80,6 +82,13 @@ const frameworkNames: Record<string, string> = {
   flutter: "Flutter",
   lynx: "Lynx",
 };
+
+function normalizeHistoricalFramework(value: string): Framework | undefined {
+  const normalized = value.toLowerCase().replace(/[_\s]/g, "-");
+  if (normalized === "react-native" || normalized === "reactnative" || normalized === "rn") return "react-native";
+  if (normalized === "flutter" || normalized === "lynx") return normalized;
+  return undefined;
+}
 
 const providerNames: Record<ProviderMode, string> = {
   offline: "规则总结（非 AI）",
@@ -158,8 +167,12 @@ function App() {
   const [results, setResults] = useState<NormalizedResult[]>([]);
   const [reportPath, setReportPath] = useState("");
   const [activeJob, setActiveJob] = useState<JobSnapshot>();
+  const [trialRunning, setTrialRunning] = useState(false);
+  const [trialTelemetry, setTrialTelemetry] = useState<LiveTelemetrySample[]>([]);
   const [runPreset, setRunPreset] = useState<"quick" | "standard" | "leak">("quick");
+  const [pendingRunMode, setPendingRunMode] = useState<"benchmark" | "diagnose" | "manual">("benchmark");
   const [cancelling, setCancelling] = useState(false);
+  const [stoppingManual, setStoppingManual] = useState(false);
   const [preparingTools, setPreparingTools] = useState(false);
   const [refreshingDevices, setRefreshingDevices] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -566,13 +579,38 @@ function App() {
       return;
     }
     setBusy(true);
+    setTrialRunning(true);
+    setTrialTelemetry([]);
     setError("");
+    const trialStartedAt = performance.now();
+    let samplePending = false;
+    const collectTrialSample = async () => {
+      if (platform !== "android" || samplePending) return;
+      samplePending = true;
+      try {
+        const sample = await sampleTrialLivePerformance({
+          deviceId: selectedTarget.id,
+          appId: generated.flow.appId,
+          elapsedMs: Math.max(0, Math.round(performance.now() - trialStartedAt)),
+        });
+        setTrialTelemetry((samples) => [...samples, sample].slice(-150));
+      } catch {
+        // A trial remains valid if a transient observational sample is unavailable.
+      } finally {
+        samplePending = false;
+      }
+    };
+    void collectTrialSample();
+    const trialSampleTimer = window.setInterval(() => void collectTrialSample(), 2_000);
     try {
       setPreparation(await trialGeneratedFlow(generated, selectedTarget.id, generationContext, trialPromptValues));
       setTrialPromptValues({});
     } catch (reason) {
       handleRunFailure(reason);
     } finally {
+      window.clearInterval(trialSampleTimer);
+      await collectTrialSample();
+      setTrialRunning(false);
       setBusy(false);
     }
   }
@@ -639,6 +677,7 @@ function App() {
     setResults([]);
     setReportPath("");
     setActiveJob(undefined);
+    setStoppingManual(false);
     try {
       const output = await runDemo(flowLock, setActiveJob);
       applyOutput(output);
@@ -651,6 +690,10 @@ function App() {
 
   async function onRealRun() {
     if (!flowLock || !selectedTarget) return;
+    if (pendingRunMode !== "benchmark" && platform === "ios") {
+      setError("iOS Diagnose 暂不可用；请选择 Android 设备，或切换为 Benchmark。");
+      return;
+    }
     if (flowLock.flow.appId !== appId || flowLock.flow.platform !== platform) {
       invalidateGeneratedFlow();
       setError("应用包名或平台已改变，请重新生成并试跑 Flow；Reactor 不会用旧锁定文件测量新输入。");
@@ -660,17 +703,29 @@ function App() {
     setError("");
     setResults([]);
     setReportPath("");
+    setTrialRunning(false);
+    setTrialTelemetry([]);
     setActiveJob(undefined);
+    setStoppingManual(false);
     try {
-      const run = platform === "ios" ? runIos : runAndroid;
+      const manual = pendingRunMode === "manual";
+      const run = platform === "ios" ? runIos : manual ? runAndroidManualDiagnose : pendingRunMode === "diagnose" ? runAndroidDiagnose : runAndroid;
+      const durationMs = manual ? 5 * 60_000 : runPreset === "standard" ? 18_000 : 5_000;
+      const iterations = manual ? 1 : runPreset === "standard" ? 10 : 1;
+      const diagnosticPlan = pendingRunMode !== "benchmark"
+        ? conservativeAndroidDiagnosticPlan(durationMs, iterations)
+        : undefined;
       const output = await run({
         flowLock,
         framework,
-        scenario: generated?.flow.id.split("-")[0] ?? "custom",
+        scenario: manual ? "manual-diagnose" : generated?.flow.id.split("-")[0] ?? "custom",
         deviceId: selectedTarget.id,
-        durationMs: runPreset === "standard" ? 18_000 : 5_000,
-        iterations: runPreset === "standard" ? 10 : 1,
-        leakTest: runPreset === "leak" ? {
+        durationMs: diagnosticPlan ? Math.min(durationMs, Math.floor(diagnosticPlan.resourceLimits.maxDurationMs / Math.min(iterations, 3))) : durationMs,
+        iterations: diagnosticPlan ? Math.min(iterations, 3) : iterations,
+        runMode: pendingRunMode === "benchmark" ? "benchmark" : "diagnose",
+        diagnosticPlan,
+        manualSession: manual,
+        leakTest: !manual && runPreset === "leak" ? {
           cycles: 20,
           checkpointEvery: 2,
           warmupCycles: 2,
@@ -710,6 +765,43 @@ function App() {
     setPage(nextPage);
   }
 
+  function loadHistoricalFlowIntoStudio(lock: FlowLock, run: DiagnosticRunSummary) {
+    setFlowLock(lock);
+    setGenerated({
+      flow: lock.flow,
+      provider: lock.generation?.provider ?? "historical-lock",
+      model: lock.generation?.model ?? "historical-lock",
+      promptTemplateVersion: lock.generation?.promptTemplateVersion ?? "historical-lock",
+      notes: ["从历史 Run 加载的已验证 Flow；设备、Secret 与 Prompt 输入未恢复。"],
+    });
+    setPreparation(undefined);
+    setCompiledFlow(undefined);
+    setAppId(lock.flow.appId);
+    setPlatform(lock.flow.platform);
+    const historicalFramework = normalizeHistoricalFramework(run.framework);
+    if (historicalFramework) setFramework(historicalFramework);
+    setSelectedDeviceId("");
+    setTrialPromptValues({});
+    setTrialSecretValues({});
+    setTrialSecretStatus({});
+    setResults([]);
+    setReportPath("");
+    setActiveJob(undefined);
+    setStage("locked");
+    setPendingRunMode("benchmark");
+    setFlowEditNotice("已加载历史验证 Flow。请选择设备并重新填写 Secret / Prompt；不会自动运行。");
+    void compileFlowPreview(lock.flow).then(setCompiledFlow).catch((reason) => setError(String(reason)));
+    setPage("flow");
+  }
+
+  function startHistoricalFlowRun(mode: "benchmark" | "diagnose", lock: FlowLock, run: DiagnosticRunSummary) {
+    loadHistoricalFlowIntoStudio(lock, run);
+    setPendingRunMode(mode);
+    setFlowEditNotice(mode === "diagnose"
+      ? "已为新 Diagnose 加载历史验证 Flow。请选择 Android 设备并重新填写 Secret / Prompt，然后手动启动；不会复用旧运行输入。"
+      : "已为新 Benchmark 加载历史验证 Flow。请选择设备并重新填写 Secret / Prompt，然后手动启动；不会复用旧运行输入。");
+  }
+
   async function onPrepareTools() {
     setPreparingTools(true);
     setError("");
@@ -735,6 +827,19 @@ function App() {
     }
   }
 
+  async function onStopManual() {
+    if (!activeJob || ["completed", "failed", "cancelled"].includes(activeJob.job.state)) return;
+    setStoppingManual(true);
+    setError("");
+    try {
+      const job = await stopManualDiagnose(activeJob.job.id);
+      setActiveJob((snapshot) => snapshot ? { ...snapshot, job } : snapshot);
+    } catch (reason) {
+      setError(String(reason));
+      setStoppingManual(false);
+    }
+  }
+
   async function loadHistory(offset: number) {
     setHistoryLoading(true);
     setError("");
@@ -756,6 +861,19 @@ function App() {
     setError("");
     try {
       setHistorySelection(await getJobSnapshot(job.id));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function viewHistoricalRun(jobId: string) {
+    setHistoryLoading(true);
+    setError("");
+    setPage("history");
+    try {
+      setHistorySelection(await getJobSnapshot(jobId));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -809,6 +927,8 @@ function App() {
     setFlowEditNotice("");
     setFlowLock(undefined);
     setPreparation(undefined);
+    setTrialRunning(false);
+    setTrialTelemetry([]);
     setResults([]);
     setReportPath("");
     setStage("compose");
@@ -931,6 +1051,7 @@ function App() {
       </aside>
 
       <main className="workspace">
+        {activeJob && (page === "flow" || !["completed", "failed", "cancelled"].includes(activeJob.job.state)) && <RunStatus snapshot={activeJob} showPerformance={page !== "flow"} cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
         {page === "explorer" ? (
           <FlowExplorer
             devices={environment?.devices ?? []}
@@ -994,6 +1115,7 @@ function App() {
           <AnalysisCenter />
         ) : page === "diagnostics" ? (
           <DiagnosticCenter
+            manualRecordingActive={Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.job.state) && activeJob.job.request && typeof activeJob.job.request === "object" && (activeJob.job.request as Record<string, unknown>).manualSession === true)}
             activeFlow={flowLock ? {
               flowHash: flowLock.flowHash,
               name: flowLock.flow.name,
@@ -1001,6 +1123,9 @@ function App() {
               framework,
             } : undefined}
             onNavigate={navigateTo}
+            onViewHistoricalRun={(jobId) => void viewHistoricalRun(jobId)}
+            onLoadHistoricalFlow={loadHistoricalFlowIntoStudio}
+            onStartHistoricalRun={startHistoricalFlowRun}
           />
         ) : page === "settings" ? (
           <SettingsCenter
@@ -1042,8 +1167,6 @@ function App() {
         </section>
 
         {error && <div className="error-banner">{error}</div>}
-
-        {activeJob && <RunStatus snapshot={activeJob} cancelling={cancelling} onCancel={onCancel} />}
 
         <div className="content-grid">
           <section className="primary-column">
@@ -1162,6 +1285,8 @@ function App() {
               </div>
             </div>
 
+            <FlowPerformancePanel snapshot={activeJob} trialRunning={trialRunning} trialTelemetry={trialTelemetry} />
+
             {generated && (
               <div className="flow-ready-banner" role="status">
                 <Check size={18} />
@@ -1239,33 +1364,17 @@ function App() {
                     preparation.trial.synthetic ? <button className="secondary-button" disabled={busy || !selectedTarget} onClick={() => setPreparation(undefined)}><Play size={16} />改用目标真实试跑</button> : <button className="primary-button" disabled={busy} onClick={onConfirmFlow}><LockKeyhole size={16} />{preparation.changes.length ? "确认修改并锁定" : "确认并锁定"}</button>
                   ) : flowLock ? (
                     <div className="run-buttons">
-                      <label className="run-preset"><span>采集预设</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">快速验收 · 1 次 × 5 秒</option><option value="standard">正式基准 · 10 次 × 18 秒</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>
+                      {platform === "android" && <label className="run-preset"><span>运行模式</span><select value={pendingRunMode} onChange={(event) => setPendingRunMode(event.target.value as "benchmark" | "diagnose" | "manual")}><option value="benchmark">Benchmark · 稳定基准</option><option value="diagnose">Diagnose · 运行 Flow 并录制</option><option value="manual">手动录制 · Start/Stop 自由操作</option></select></label>}
+                      {pendingRunMode === "manual" ? <div className="run-preset"><span>手动会话</span><b>最长 5 分钟 · 可随时停止并保存</b></div> : <label className="run-preset"><span>{pendingRunMode === "diagnose" ? "录制预设" : "采集预设"}</span><select value={runPreset} onChange={(event) => setRunPreset(event.target.value as "quick" | "standard" | "leak")}><option value="quick">{pendingRunMode === "diagnose" ? "快速观察 · 1 次 × 5 秒" : "快速验收 · 1 次 × 5 秒"}</option><option value="standard">{pendingRunMode === "diagnose" ? "正式录制 · 3 次 × 18 秒" : "正式基准 · 10 次 × 18 秒"}</option>{platform === "android" && <option value="leak">内存循环 · 同进程 20 轮</option>}</select></label>}
                       {flowLock.trial?.synthetic && availableTargets.length > 0 && (
                         <button className="secondary-button" disabled={busy} onClick={() => { setFlowLock(undefined); setPreparation(undefined); }}>改用模拟器试跑</button>
                       )}
                       <button className="secondary-button" disabled={busy} onClick={onDemo} title="使用明确标记的虚拟指标预览三框架报告布局，不会测量真实应用">三框架模拟导览</button>
-                      <button className="primary-button" disabled={busy || !selectedTarget || flowLock.trial?.synthetic !== false} onClick={onRealRun} title={selectedTarget ? `在所选 ${platform === "ios" ? "iOS Simulator 使用 xctrace" : "Android 模拟器或设备"}执行测量` : `启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"} 后启用`}>{busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}{selectedTarget ? platform === "ios" ? "iOS xctrace 运行" : "模拟器/设备运行" : `等待 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"}`}</button>
+                      <button className="primary-button" disabled={busy || !selectedTarget || flowLock.trial?.synthetic !== false} onClick={onRealRun} title={selectedTarget ? pendingRunMode === "manual" ? "开始后可在 App 中自由操作；点击停止后会完整关闭采集器并保存证据" : pendingRunMode === "diagnose" ? "执行 Flow 并同屏录制实时性能；正式结论仍以结束后的原始证据为准" : `在所选 ${platform === "ios" ? "iOS Simulator 使用 xctrace" : "Android 模拟器或设备"}执行测量` : `启动 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"} 后启用`}>{busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}{selectedTarget ? platform === "ios" ? "iOS xctrace 运行" : pendingRunMode === "manual" ? "Start 手动录制" : pendingRunMode === "diagnose" ? "开始 Diagnose 录制" : "开始 Benchmark" : `等待 ${platform === "ios" ? "iOS Simulator" : "Android Emulator"}`}</button>
                     </div>
                   ) : null}
                 </div>
               </div>
-              <FlowCopilot
-                flow={generated.flow}
-                provider={providerMode}
-                providerLabel={providerNames[providerMode]}
-                endpoint={providerMode === "local" ? localEndpoint : providerMode === "cloud" ? endpoint : undefined}
-                apiKey={providerMode === "cloud" ? apiKey || undefined : undefined}
-                saveApiKey={providerMode === "cloud" && saveApiKey}
-                useSavedApiKey={providerMode === "cloud" && useSavedApiKey}
-                model={providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel || undefined : model}
-                cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
-                disabled={busy || providerBlocked}
-                locked={Boolean(flowLock)}
-                contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" && !isReactorEvidenceFailure(preparation.failure.code) ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
-                failureUiTree={preparation?.failure?.code !== "runtime_input_rejected" ? preparation?.context?.uiTree : undefined}
-                onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
-                onApply={applyCopilotProposal}
-              />
               </div>
             )}
 
@@ -1273,6 +1382,23 @@ function App() {
           </section>
 
           <aside className="inspector-column">
+            {generated && <FlowCopilot
+              flow={generated.flow}
+              provider={providerMode}
+              providerLabel={providerNames[providerMode]}
+              endpoint={providerMode === "local" ? localEndpoint : providerMode === "cloud" ? endpoint : undefined}
+              apiKey={providerMode === "cloud" ? apiKey || undefined : undefined}
+              saveApiKey={providerMode === "cloud" && saveApiKey}
+              useSavedApiKey={providerMode === "cloud" && useSavedApiKey}
+              model={providerMode === "local" ? localModel : providerMode === "codex" || providerMode === "claude" ? cliModel || undefined : model}
+              cliExecutable={providerMode === "codex" ? codexExecutable || undefined : providerMode === "claude" ? claudeExecutable || undefined : undefined}
+              disabled={busy || providerBlocked}
+              locked={Boolean(flowLock)}
+              contextHint={preparation?.failure && preparation.failure.code !== "runtime_input_rejected" && !isReactorEvidenceFailure(preparation.failure.code) ? `${preparation.failure.stepPath} · ${preparation.failure.code}：${preparation.failure.message}` : undefined}
+              failureUiTree={preparation?.failure?.code !== "runtime_input_rejected" ? preparation?.context?.uiTree : undefined}
+              onCloneDraft={() => { setFlowLock(undefined); setPreparation(undefined); setResults([]); setReportPath(""); setStage("generated"); setFlowEditNotice("已从锁定版本复制为新草稿；原锁定证据保持不变，当前草稿可交给 Copilot 修改。"); }}
+              onApply={applyCopilotProposal}
+            />}
             <div className="card environment-card">
               <div className="mini-heading"><h3>运行环境</h3><button className="icon-button small" onClick={onRefresh}><RefreshCw size={14} /></button></div>
               <div className="environment-list">
@@ -1674,37 +1800,44 @@ function VirtualEventList({ events }: { events: JobSnapshot["events"] }) {
 
 function RunStatus({
   snapshot,
+  showPerformance,
   cancelling,
+  stoppingManual,
   onCancel,
+  onStopManual,
 }: {
   snapshot: JobSnapshot;
+  showPerformance: boolean;
   cancelling: boolean;
+  stoppingManual: boolean;
   onCancel: () => void;
+  onStopManual: () => void;
 }) {
   const terminal = ["completed", "failed", "cancelled"].includes(snapshot.job.state);
+  const manual = Boolean(snapshot.job.request && typeof snapshot.job.request === "object" && (snapshot.job.request as Record<string, unknown>).manualSession === true);
   const latestEvents = snapshot.events.slice(-4);
   const telemetry = snapshot.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
-    .map((event) => event.data as { source?: string; cycle?: number; totalCycles?: number; elapsedMs?: number; cpuPct?: number; pssMb?: number; rssMb?: number; javaHeapMb?: number; nativeHeapMb?: number; rn?: { sampledEventCount?: number; componentRenderCount?: number; componentTreeCommitCount?: number; profileCommitCount?: number; consoleEventCount?: number; networkEventCount?: number; hermesHeapSampleCount?: number; latestKind?: string; latestName?: string }; officialMetric?: boolean });
+    .map((event) => event.data as LiveTelemetrySample);
   const latestTelemetry = telemetry.at(-1);
   const latestProgress = snapshot.events
     .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "flow_progress")
     .at(-1)?.data as { cycle?: number; totalCycles?: number; commandNumber?: number } | undefined;
-  const maxLivePss = Math.max(...telemetry.map((sample) => sample.pssMb ?? 0), 1);
   return (
     <section className={`run-status card ${terminal ? "terminal" : "active"}`} aria-live="polite">
       <div className="run-status-heading">
         <div className="heading-icon purple"><Activity size={19} /></div>
         <div><h2>{jobStateNames[snapshot.job.state]}</h2><p>任务 {snapshot.job.id.slice(0, 8)} · 重启 Reactor 后可自动重连</p></div>
         {!terminal && <span className="running-indicator"><span />Runner 运行中</span>}
-        {!terminal && <button className="secondary-button danger-button" disabled={cancelling} onClick={onCancel}>{cancelling ? "正在取消…" : "取消任务"}</button>}
+        {!terminal && manual && <button className="primary-button" disabled={stoppingManual} onClick={onStopManual}>{stoppingManual ? "正在完成证据…" : "停止并保存录制"}</button>}
+        {!terminal && <button className="secondary-button danger-button" disabled={cancelling || stoppingManual} onClick={onCancel}>{cancelling ? "正在取消…" : "取消任务"}</button>}
       </div>
       {latestEvents.length > 0 && (
         <div className="run-events">
           {latestEvents.map((event) => <div key={event.id}><span>{jobStateNames[event.phase]}</span><p>{event.message}</p></div>)}
         </div>
       )}
-      {(latestTelemetry || latestProgress) && (
+      {showPerformance && (latestTelemetry || latestProgress) && (
         <div className="live-performance">
           <div className="live-performance-heading"><div><span className="status-dot" /><b>Flow 执行中 · 实时性能观察</b></div><small>观察值不进入最终判定</small></div>
           <div className="live-performance-values">
@@ -1713,15 +1846,137 @@ function RunStatus({
             <div><span>Java Heap</span><b>{formatMetric(latestTelemetry?.javaHeapMb)} MB</b></div>
             <div><span>Native Heap</span><b>{formatMetric(latestTelemetry?.nativeHeapMb)} MB</b></div>
             {latestTelemetry?.rn && <div><span>RN Tree / Profile</span><b>{latestTelemetry.rn.componentTreeCommitCount ?? 0} / {latestTelemetry.rn.profileCommitCount ?? 0}</b></div>}
+            {latestTelemetry?.rn && <div><span>RN Render / 重复</span><b>{latestTelemetry.rn.componentRenderCount ?? 0} / {latestTelemetry.rn.duplicateComponentRenderCount ?? 0}</b></div>}
             {latestTelemetry?.rn && <div><span>Console / Network</span><b>{latestTelemetry.rn.consoleEventCount ?? 0} / {latestTelemetry.rn.networkEventCount ?? 0}</b></div>}
             {latestTelemetry?.rn && <div><span>Hermes Heap 样本</span><b>{latestTelemetry.rn.hermesHeapSampleCount ?? 0}</b></div>}
           </div>
-          <div className="live-performance-chart">{telemetry.map((sample, index) => <i key={`${sample.elapsedMs ?? sample.cycle ?? index}-${index}`} style={{ height: `${Math.max(5, ((sample.pssMb ?? 0) / maxLivePss) * 100)}%` }} title={sample.cycle ? `第 ${sample.cycle} 轮 · ${formatMetric(sample.pssMb)} MB` : `${((sample.elapsedMs ?? 0) / 1000).toFixed(1)} 秒 · ${formatMetric(sample.pssMb)} MB`} />)}</div>
+          <LivePerformanceChart samples={telemetry} />
         </div>
       )}
       {snapshot.job.error && <p className="run-error">{snapshot.job.error}</p>}
     </section>
   );
+}
+
+function FlowPerformancePanel({ snapshot, trialRunning, trialTelemetry }: { snapshot?: JobSnapshot; trialRunning: boolean; trialTelemetry: LiveTelemetrySample[] }) {
+  const terminal = Boolean(snapshot && ["completed", "failed", "cancelled"].includes(snapshot.job.state));
+  const telemetry = snapshot?.events
+    .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
+    .map((event) => event.data as LiveTelemetrySample) ?? [];
+  const latestTelemetry = telemetry.at(-1);
+  const latestProgress = snapshot?.events
+    .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "flow_progress")
+    .at(-1)?.data as { cycle?: number; totalCycles?: number; commandNumber?: number } | undefined;
+  const jobActive = Boolean(snapshot && !terminal);
+  const observingTrial = trialRunning || (!snapshot && trialTelemetry.length > 0);
+  const active = trialRunning || jobActive;
+  const visibleTelemetry = observingTrial ? trialTelemetry : telemetry;
+  const visibleLatestTelemetry = visibleTelemetry.at(-1);
+  const visibleProgress = observingTrial ? undefined : latestProgress;
+  const hasPerformance = active || visibleTelemetry.length > 0 || Boolean(visibleProgress);
+
+  return (
+    <div className={`card flow-performance-panel ${active ? "active" : "idle"}`} aria-live="polite">
+      <div className="flow-performance-panel-heading">
+        <div className="heading-icon purple"><Activity size={18} /></div>
+        <div><h3>实时性能</h3><p>{active ? trialRunning ? "Flow 试跑中 · 约每 2 秒更新" : "约每 2 秒更新 · 观察值" : hasPerformance ? observingTrial ? "试跑已结束 · 观察值不作为基准" : "本次运行已结束 · 最终证据已保存" : "等待 Flow 或手动录制开始"}</p></div>
+        {active && <span className="live-badge"><span />LIVE</span>}
+      </div>
+      {!hasPerformance ? (
+        <div className="flow-performance-empty">
+          <Activity size={22} />
+          <b>运行时将在这里显示性能曲线</b>
+          <span>CPU、PSS、Java Heap、Native Heap，以及内存增量与增长速率。</span>
+        </div>
+      ) : (
+        <>
+          <div className="live-performance-values compact">
+            <div><span>{visibleProgress?.cycle ? "循环 / 命令" : "已运行"}</span><b>{visibleProgress?.cycle ? `${visibleProgress.cycle}/${visibleProgress.totalCycles ?? "—"} · #${visibleProgress.commandNumber ?? "—"}` : `${((visibleLatestTelemetry?.elapsedMs ?? 0) / 1000).toFixed(1)} 秒`}</b></div>
+            <div><span>CPU</span><b>{formatMetric(visibleLatestTelemetry?.cpuPct)}%</b></div>
+            <div><span>PSS</span><b>{formatMetric(visibleLatestTelemetry?.pssMb)} MB</b></div>
+            <div><span>Java / Native</span><b>{formatMetric(visibleLatestTelemetry?.javaHeapMb)} / {formatMetric(visibleLatestTelemetry?.nativeHeapMb)} MB</b></div>
+            <div><span>组件 Render</span><b>{visibleLatestTelemetry?.rn?.componentRenderCount ?? "—"}</b></div>
+            <div><span>重复 Render</span><b>{visibleLatestTelemetry?.rn?.duplicateComponentRenderCount ?? "—"}</b></div>
+            <div><span>Tree / Profile Commit</span><b>{visibleLatestTelemetry?.rn ? `${visibleLatestTelemetry.rn.componentTreeCommitCount ?? 0} / ${visibleLatestTelemetry.rn.profileCommitCount ?? 0}` : "—"}</b></div>
+            <div><span>Console / Network</span><b>{visibleLatestTelemetry?.rn ? `${visibleLatestTelemetry.rn.consoleEventCount ?? 0} / ${visibleLatestTelemetry.rn.networkEventCount ?? 0}` : "—"}</b></div>
+          </div>
+          <LivePerformanceChart samples={visibleTelemetry} />
+          <p className="flow-performance-note">“重复 Render”表示最近观察窗口内同名组件首次 Render 之后的再次 Render。实时观察用于操作反馈；最终结论以录制结束后保存的原始证据为准。</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+interface LiveTelemetrySample {
+  source?: string;
+  cycle?: number;
+  totalCycles?: number;
+  elapsedMs?: number;
+  cpuPct?: number;
+  pssMb?: number;
+  rssMb?: number;
+  javaHeapMb?: number;
+  nativeHeapMb?: number;
+  rn?: { sampledEventCount?: number; componentRenderCount?: number; duplicateComponentRenderCount?: number; componentTreeCommitCount?: number; profileCommitCount?: number; consoleEventCount?: number; networkEventCount?: number; hermesHeapSampleCount?: number; latestKind?: string; latestName?: string };
+  officialMetric?: boolean;
+}
+
+function LivePerformanceChart({ samples }: { samples: LiveTelemetrySample[] }) {
+  const visible = samples.filter((sample) => Number.isFinite(sample.elapsedMs)).slice(-150);
+  if (visible.length < 2) return <div className="live-chart-waiting"><Activity size={16} /><span>正在等待时间序列样本；约每 2 秒更新一次。</span></div>;
+  const width = 960;
+  const height = 210;
+  const pad = { left: 52, right: 46, top: 22, bottom: 30 };
+  const times = visible.map((sample) => sample.elapsedMs ?? 0);
+  const start = Math.min(...times);
+  const end = Math.max(...times);
+  const memoryValues = visible.flatMap((sample) => [sample.pssMb, sample.javaHeapMb, sample.nativeHeapMb]).filter((value): value is number => Number.isFinite(value));
+  const rawMinMemory = memoryValues.length ? Math.min(...memoryValues) : 0;
+  const rawMaxMemory = memoryValues.length ? Math.max(...memoryValues) : 1;
+  const memoryPad = Math.max(2, (rawMaxMemory - rawMinMemory) * 0.12);
+  const minMemory = Math.max(0, rawMinMemory - memoryPad);
+  const maxMemory = rawMaxMemory + memoryPad;
+  const maxCpu = Math.max(10, ...visible.map((sample) => sample.cpuPct ?? 0)) * 1.1;
+  const x = (time: number) => pad.left + ((time - start) / Math.max(1, end - start)) * (width - pad.left - pad.right);
+  const memoryY = (value: number) => height - pad.bottom - ((value - minMemory) / Math.max(1, maxMemory - minMemory)) * (height - pad.top - pad.bottom);
+  const cpuY = (value: number) => height - pad.bottom - (value / maxCpu) * (height - pad.top - pad.bottom);
+  const path = (get: (sample: LiveTelemetrySample) => number | undefined, scale: (value: number) => number) => {
+    let started = false;
+    return visible.flatMap((sample) => {
+      const value = get(sample);
+      if (!Number.isFinite(value)) return [];
+      const command = started ? "L" : "M";
+      started = true;
+      return `${command}${x(sample.elapsedMs ?? 0).toFixed(1)},${scale(value as number).toFixed(1)}`;
+    }).join(" ");
+  };
+  const firstPss = visible.find((sample) => Number.isFinite(sample.pssMb))?.pssMb;
+  const lastPss = [...visible].reverse().find((sample) => Number.isFinite(sample.pssMb))?.pssMb;
+  const pssDelta = firstPss !== undefined && lastPss !== undefined ? lastPss - firstPss : undefined;
+  const pssSlope = telemetrySlopePerMinute(visible.map((sample) => ({ timeMs: sample.elapsedMs ?? 0, value: sample.pssMb })).filter((point): point is { timeMs: number; value: number } => Number.isFinite(point.value)));
+  const grid = [0, 0.25, 0.5, 0.75, 1];
+  return <div className="live-time-series">
+    <div className="live-chart-summary">
+      <div><span>PSS 增量</span><b>{pssDelta === undefined ? "—" : `${pssDelta >= 0 ? "+" : ""}${pssDelta.toFixed(1)} MB`}</b></div>
+      <div><span>PSS 增长速率</span><b>{pssSlope === undefined ? "—" : `${pssSlope >= 0 ? "+" : ""}${pssSlope.toFixed(2)} MB/min`}</b></div>
+      <div><span>已录制</span><b>{((end - start) / 1000).toFixed(0)} s · {visible.length} 样本</b></div>
+    </div>
+    <div className="live-chart-legend"><span className="pss">PSS</span><span className="java">Java Heap</span><span className="native">Native Heap</span><span className="cpu">CPU</span></div>
+    <svg className="live-performance-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="实时性能时间序列：PSS、Java Heap、Native Heap 和 CPU">
+      {grid.map((ratio) => {
+        const y = pad.top + ratio * (height - pad.top - pad.bottom);
+        const memoryLabel = maxMemory - ratio * (maxMemory - minMemory);
+        const cpuLabel = maxCpu - ratio * maxCpu;
+        return <g key={ratio}><line x1={pad.left} x2={width - pad.right} y1={y} y2={y} className="chart-grid" /><text x={pad.left - 8} y={y + 4} textAnchor="end">{memoryLabel.toFixed(0)} MB</text><text x={width - pad.right + 8} y={y + 4}>{cpuLabel.toFixed(0)}%</text></g>;
+      })}
+      <text x={pad.left} y={height - 8}>{((start) / 1000).toFixed(0)}s</text><text x={width - pad.right} y={height - 8} textAnchor="end">{(end / 1000).toFixed(0)}s</text>
+      <path d={path((sample) => sample.pssMb, memoryY)} className="chart-line pss" />
+      <path d={path((sample) => sample.javaHeapMb, memoryY)} className="chart-line java" />
+      <path d={path((sample) => sample.nativeHeapMb, memoryY)} className="chart-line native" />
+      <path d={path((sample) => sample.cpuPct, cpuY)} className="chart-line cpu" />
+    </svg>
+  </div>;
 }
 
 function PreparationReview({ preparation }: { preparation: TrialPreparation }) {
@@ -2307,8 +2562,8 @@ function MemoryLeakEvidence({ report }: { report: NonNullable<NonNullable<Normal
   );
 }
 
-function formatMetric(value?: number) {
-  return value === undefined ? "—" : value.toFixed(1);
+function formatMetric(value?: number | null) {
+  return formatOptionalMetric(value);
 }
 
 function formatThermal(value?: number) {
