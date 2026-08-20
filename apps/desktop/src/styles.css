@@ -118,6 +118,24 @@ h1 { margin: 0; font-size: 25px; line-height: 1.2; letter-spacing: -.035em; }
 .chart-line.native { stroke: #ffad5c; }
 .chart-line.cpu { stroke: #56b7ff; stroke-dasharray: 6 4; }
 .live-chart-waiting { min-height: 96px; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); font-size: 9px; }
+.flow-performance-panel { position: sticky; top: 18px; padding: 14px; overflow: hidden; border-color: color-mix(in srgb, var(--purple) 32%, var(--line)); background: color-mix(in srgb, var(--purple) 4%, var(--surface)); }
+.flow-performance-panel.active { border-color: color-mix(in srgb, var(--green) 40%, var(--line)); box-shadow: 0 14px 36px rgba(0,0,0,.14); }
+.flow-performance-panel-heading { display: flex; align-items: center; gap: 9px; }
+.flow-performance-panel-heading > div:nth-child(2) { min-width: 0; flex: 1; }
+.flow-performance-panel-heading h3, .flow-performance-panel-heading p { margin: 0; }
+.flow-performance-panel-heading h3 { font-size: 11px; }
+.flow-performance-panel-heading p { margin-top: 3px; color: var(--muted); font-size: 8px; }
+.live-badge { padding: 4px 6px; display: inline-flex; align-items: center; gap: 5px; border-radius: 5px; color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); font: 7px DM Mono, monospace; }
+.live-badge span { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: pulse 1.4s ease-in-out infinite; }
+.flow-performance-empty { min-height: 178px; margin-top: 12px; padding: 18px; display: grid; place-content: center; justify-items: center; gap: 7px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--purple); text-align: center; }
+.flow-performance-empty b { color: var(--text-soft); font-size: 9px; }
+.flow-performance-empty span { max-width: 220px; color: var(--muted); font-size: 8px; line-height: 1.55; }
+.flow-performance-panel .live-performance-values.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.flow-performance-panel .live-performance-values.compact b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-performance-panel .live-chart-summary { grid-template-columns: 1fr; }
+.flow-performance-panel .live-chart-legend { gap: 8px; }
+.flow-performance-panel .live-performance-chart { min-height: 146px; }
+.flow-performance-note { margin: 8px 0 0; color: var(--muted); font-size: 7px; line-height: 1.5; }
 .diagnostic-live-entry { max-width: 1390px; margin: 0 auto 18px; padding: 13px 15px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .diagnostic-live-entry > div { display: flex; align-items: center; gap: 10px; }
 .diagnostic-live-entry svg { color: var(--muted); }
@@ -206,8 +224,9 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .flow-ready-banner b { font-size: 11px; }
 .flow-ready-banner span { margin-top: 3px; color: var(--text-soft); font-size: 9px; line-height: 1.5; }
 .flow-ready-banner .secondary-button { min-height: 32px; flex: 0 0 auto; }
-.flow-workbench { display: grid; grid-template-columns: minmax(0, 1fr) 310px; align-items: start; gap: 14px; }
+.flow-workbench { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 14px; }
 .flow-workbench > .flow-card { min-width: 0; }
+.flow-workbench > .flow-copilot { position: static; }
 .flow-copilot { position: sticky; top: 18px; min-width: 0; padding: 14px; display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--purple) 38%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--purple) 5%, var(--surface)); box-shadow: 0 12px 35px rgba(0,0,0,.12); }
 .flow-copilot-heading, .flow-copilot-heading > div { display: flex; align-items: center; gap: 8px; }
 .flow-copilot-heading { justify-content: space-between; color: var(--purple); }
@@ -1023,6 +1042,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .content-grid { grid-template-columns: 1fr; }
   .flow-workbench { grid-template-columns: 1fr; }
   .flow-copilot { position: static; }
+  .flow-performance-panel { position: static; }
   .inspector-column { grid-template-columns: repeat(3, 1fr); }
   .history-layout { grid-template-columns: 260px minmax(0, 1fr); }
   .history-facts { grid-template-columns: repeat(2, 1fr); }

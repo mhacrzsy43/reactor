@@ -1020,7 +1020,7 @@ function App() {
       </aside>
 
       <main className="workspace">
-        {activeJob && (page === "flow" || !["completed", "failed", "cancelled"].includes(activeJob.job.state)) && <RunStatus snapshot={activeJob} cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
+        {activeJob && (page === "flow" || !["completed", "failed", "cancelled"].includes(activeJob.job.state)) && <RunStatus snapshot={activeJob} showPerformance={page !== "flow"} cancelling={cancelling} stoppingManual={stoppingManual} onCancel={onCancel} onStopManual={onStopManual} />}
         {page === "explorer" ? (
           <FlowExplorer
             devices={environment?.devices ?? []}
@@ -1366,6 +1366,7 @@ function App() {
           </section>
 
           <aside className="inspector-column">
+            <FlowPerformancePanel snapshot={activeJob} />
             <div className="card environment-card">
               <div className="mini-heading"><h3>运行环境</h3><button className="icon-button small" onClick={onRefresh}><RefreshCw size={14} /></button></div>
               <div className="environment-list">
@@ -1767,12 +1768,14 @@ function VirtualEventList({ events }: { events: JobSnapshot["events"] }) {
 
 function RunStatus({
   snapshot,
+  showPerformance,
   cancelling,
   stoppingManual,
   onCancel,
   onStopManual,
 }: {
   snapshot: JobSnapshot;
+  showPerformance: boolean;
   cancelling: boolean;
   stoppingManual: boolean;
   onCancel: () => void;
@@ -1802,7 +1805,7 @@ function RunStatus({
           {latestEvents.map((event) => <div key={event.id}><span>{jobStateNames[event.phase]}</span><p>{event.message}</p></div>)}
         </div>
       )}
-      {(latestTelemetry || latestProgress) && (
+      {showPerformance && (latestTelemetry || latestProgress) && (
         <div className="live-performance">
           <div className="live-performance-heading"><div><span className="status-dot" /><b>Flow 执行中 · 实时性能观察</b></div><small>观察值不进入最终判定</small></div>
           <div className="live-performance-values">
@@ -1819,6 +1822,47 @@ function RunStatus({
       )}
       {snapshot.job.error && <p className="run-error">{snapshot.job.error}</p>}
     </section>
+  );
+}
+
+function FlowPerformancePanel({ snapshot }: { snapshot?: JobSnapshot }) {
+  const terminal = Boolean(snapshot && ["completed", "failed", "cancelled"].includes(snapshot.job.state));
+  const telemetry = snapshot?.events
+    .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "live_telemetry")
+    .map((event) => event.data as LiveTelemetrySample) ?? [];
+  const latestTelemetry = telemetry.at(-1);
+  const latestProgress = snapshot?.events
+    .filter((event) => event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).kind === "flow_progress")
+    .at(-1)?.data as { cycle?: number; totalCycles?: number; commandNumber?: number } | undefined;
+  const active = Boolean(snapshot && !terminal);
+  const hasPerformance = active || telemetry.length > 0 || Boolean(latestProgress);
+
+  return (
+    <div className={`card flow-performance-panel ${active ? "active" : "idle"}`} aria-live="polite">
+      <div className="flow-performance-panel-heading">
+        <div className="heading-icon purple"><Activity size={18} /></div>
+        <div><h3>实时性能</h3><p>{active ? "约每 2 秒更新 · 观察值" : hasPerformance ? "本次运行已结束 · 最终证据已保存" : "等待 Flow 或手动录制开始"}</p></div>
+        {active && <span className="live-badge"><span />LIVE</span>}
+      </div>
+      {!hasPerformance ? (
+        <div className="flow-performance-empty">
+          <Activity size={22} />
+          <b>运行时将在这里显示性能曲线</b>
+          <span>CPU、PSS、Java Heap、Native Heap，以及内存增量与增长速率。</span>
+        </div>
+      ) : (
+        <>
+          <div className="live-performance-values compact">
+            <div><span>{latestProgress?.cycle ? "循环 / 命令" : "已运行"}</span><b>{latestProgress?.cycle ? `${latestProgress.cycle}/${latestProgress.totalCycles ?? "—"} · #${latestProgress.commandNumber ?? "—"}` : `${((latestTelemetry?.elapsedMs ?? 0) / 1000).toFixed(1)} 秒`}</b></div>
+            <div><span>CPU</span><b>{formatMetric(latestTelemetry?.cpuPct)}%</b></div>
+            <div><span>PSS</span><b>{formatMetric(latestTelemetry?.pssMb)} MB</b></div>
+            <div><span>Java / Native</span><b>{formatMetric(latestTelemetry?.javaHeapMb)} / {formatMetric(latestTelemetry?.nativeHeapMb)} MB</b></div>
+          </div>
+          <LivePerformanceChart samples={telemetry} />
+          <p className="flow-performance-note">实时观察用于操作反馈；最终结论以录制结束后保存的原始证据为准。</p>
+        </>
+      )}
+    </div>
   );
 }
 
