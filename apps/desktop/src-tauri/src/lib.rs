@@ -65,6 +65,8 @@ const MANAGED_TOOLS_MANIFEST: &str = include_str!("../../../../tools/managed-too
 static BUNDLED_TOOL_ARCHIVES: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 static INSPECTOR_HIERARCHY_CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, String>>> =
     std::sync::OnceLock::new();
+static INSPECTOR_ACTION_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2034,21 +2036,18 @@ async fn capture_fast_inspector_pair(
     platform: Platform,
     device_id: &str,
 ) -> Result<(Vec<u8>, String, bool), String> {
-    let screenshot = async {
-        match platform {
-            Platform::Android => capture_android_screenshot(root, device_id).await,
-            Platform::Ios => capture_ios_screenshot(root, device_id).await,
-        }
-        .map_err(|error| error.to_string())
-    };
-    let hierarchy = async {
-        match platform {
-            Platform::Android => capture_android_current_ui_tree(root, device_id).await,
-            Platform::Ios => capture_ios_current_ui_tree(root, device_id).await,
-        }
-        .map_err(|error| error.to_string())
-    };
-    let (screenshot, hierarchy) = tokio::try_join!(screenshot, hierarchy)?;
+    // Android serializes these device-side capture commands; attempting both concurrently makes
+    // uiautomator and screencap contend and is slower than one hierarchy followed by one frame.
+    let hierarchy = match platform {
+        Platform::Android => capture_android_current_ui_tree(root, device_id).await,
+        Platform::Ios => capture_ios_current_ui_tree(root, device_id).await,
+    }
+    .map_err(|error| error.to_string())?;
+    let screenshot = match platform {
+        Platform::Android => capture_android_screenshot(root, device_id).await,
+        Platform::Ios => capture_ios_screenshot(root, device_id).await,
+    }
+    .map_err(|error| error.to_string())?;
     let changed = cache_inspector_hierarchy(platform, device_id, &hierarchy);
     Ok((screenshot, hierarchy, changed))
 }
@@ -2077,16 +2076,26 @@ fn cache_inspector_hierarchy(platform: Platform, device_id: &str, hierarchy: &st
 }
 
 fn validate_changed_hierarchy_in_background(root: PathBuf, platform: Platform, device_id: String) {
+    let expected_generation =
+        INSPECTOR_ACTION_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(180)).await;
-        if ensure_inspector_capture_allowed(&root).is_err() {
+        // Give the recorder priority. A subsequent click invalidates this optional verification
+        // before it can contend with the next low-latency ADB input command.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        if INSPECTOR_ACTION_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+            != expected_generation
+            || ensure_inspector_capture_allowed(&root).is_err()
+        {
             return;
         }
         let hierarchy = match platform {
             Platform::Android => capture_android_current_ui_tree(&root, &device_id).await,
             Platform::Ios => capture_ios_current_ui_tree(&root, &device_id).await,
         };
-        if let Ok(hierarchy) = hierarchy {
+        if let Ok(hierarchy) = hierarchy
+            && INSPECTOR_ACTION_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+                == expected_generation
+        {
             cache_inspector_hierarchy(platform, &device_id, &hierarchy);
         }
     });
@@ -2130,6 +2139,7 @@ async fn perform_explorer_step(
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
+    INSPECTOR_ACTION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if input.trusted_start {
         if !matches!(&input.step, Step::LaunchApp) {
             return Err("trustedStart 只允许与 launch_app 一起使用".to_owned());

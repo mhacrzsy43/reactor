@@ -1396,7 +1396,7 @@ export function FlowExplorer({
           </section>
           </div>
 
-          <aside className="card selector-inspector-card">
+          <aside className={`card selector-inspector-card ${mode === "record" ? "recording" : ""}`}>
             <div className="card-heading"><div className="heading-icon green"><Crosshair size={18} /></div><div><h2>Selector Inspector</h2><p>优先语义定位，坐标仅作显式降级。</p></div></div>
             <ExplorerPerformancePanel samples={performanceSamples} active={replaying || gateBusy} activeStep={activeReplayStep} platform={selectedDevice?.platform} />
               <section ref={flowPanelRef} className="recorded-flow-panel" aria-label="当前 Flow">
