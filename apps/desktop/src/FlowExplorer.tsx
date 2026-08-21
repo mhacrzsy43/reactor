@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Braces, Check, Code2, Copy, Crosshair, GitBranch, ListPlus, LockKeyhole, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Braces, Check, ChevronDown, Code2, Copy, Crosshair, GitBranch, ListPlus, LockKeyhole, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { captureDeviceInspector, captureDeviceReplayFrame, classifyFlowRequest, compileFlowPreview, confirmFlow, generateFlow, getFlowSecretStatus, modifyFlow, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, sampleTrialLivePerformance, saveFlowSecret, trialGeneratedFlow } from "./api";
@@ -158,6 +158,7 @@ export function FlowExplorer({
   const [clearBeforeInput, setClearBeforeInput] = useState(true);
   const [inputBusy, setInputBusy] = useState(false);
   const [secretStored, setSecretStored] = useState(false);
+  const [selectorCandidatesOpen, setSelectorCandidatesOpen] = useState(false);
   const [selectorRefreshAttempt, setSelectorRefreshAttempt] = useState(0);
   const [aiInput, setAiInput] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
@@ -638,6 +639,10 @@ export function FlowExplorer({
   }, [activeJobRunning, appId, gateBusy, replaying, selectedDevice]);
 
   const selectedElement = snapshot?.elements.find((element) => element.key === selectedElementKey);
+
+  useEffect(() => {
+    setSelectorCandidatesOpen(false);
+  }, [selectedElement?.key]);
 
   useEffect(() => {
     if (!selectedElement?.editable) return;
@@ -1396,7 +1401,7 @@ export function FlowExplorer({
           </section>
           </div>
 
-          <aside className={`card selector-inspector-card ${mode === "record" ? "recording" : ""}`}>
+          <aside className={`card selector-inspector-card ${replaying || gateBusy ? "playback" : mode === "record" ? "recording" : "inspecting"}`}>
             <div className="card-heading"><div className="heading-icon green"><Crosshair size={18} /></div><div><h2>Selector Inspector</h2><p>优先语义定位，坐标仅作显式降级。</p></div></div>
             <ExplorerPerformancePanel samples={performanceSamples} active={replaying || gateBusy} activeStep={activeReplayStep} platform={selectedDevice?.platform} />
               <section ref={flowPanelRef} className="recorded-flow-panel" aria-label="当前 Flow">
@@ -1512,8 +1517,8 @@ export function FlowExplorer({
                   </section>
                 ) : <button className="primary-button inspector-execute-button" disabled={!selectedElement.clickable || interacting || activeJobRunning} title={!appId.trim() ? "执行前需要填写当前 App 包名 / Bundle ID" : "在设备上执行并加入当前 Flow"} onClick={() => { void beginRecording().then((ready) => { if (ready) return recordTap(selectedElement); }); }}><Play size={15} />在设备上点击并继续</button>}
                 <div className="selector-candidates">
-                  <div className="selector-list-heading"><b>候选 Selector</b><span>按稳定性排序</span></div>
-                  {selectedElement.candidates.map((candidate) => (
+                  <div className="selector-list-heading"><b>候选 Selector</b><button type="button" className="selector-toggle" aria-expanded={selectorCandidatesOpen} onClick={() => setSelectorCandidatesOpen((open) => !open)}><ChevronDown size={13} />{selectorCandidatesOpen ? "收起" : `展开 ${selectedElement.candidates.length} 个`}</button></div>
+                  {selectorCandidatesOpen && selectedElement.candidates.map((candidate) => (
                     <article className={`selector-candidate ${candidate.stability}`} key={`${candidate.strategy}:${candidate.label}`}>
                       <div className="candidate-score"><strong>{candidate.score}</strong><span>/ 100</span></div>
                       <div className="candidate-main"><div><b>{candidate.strategy}</b><span className={`stability-badge ${candidate.stability}`}>{stabilityNames[candidate.stability]}</span></div><code>{candidate.label}</code><p>{candidate.reason}</p></div>
