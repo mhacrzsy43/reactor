@@ -141,7 +141,22 @@ dependencies {
 
 // Metro's deterministic fault selector is part of the bundle input. Declaring it here prevents
 // Gradle from reusing a normal bundle when Reactor asks for a render or memory fault build.
-tasks.matching { it.name.startsWith("createBundle") && it.name.endsWith("JsAndAssets") }.configureEach {
-    inputs.property("reactorDemoFault", providers.environmentVariable("REACTOR_DEMO_FAULT").orElse("normal"))
-    inputs.property("reactorRnProfile", providers.environmentVariable("REACTOR_RN_PROFILE").orElse("0"))
+afterEvaluate {
+    // React Native creates its bundle tasks from a variant callback after this
+    // build script is evaluated. Configure them after that callback so the
+    // plugin cannot overwrite the diagnostic CLI wrapper.
+    tasks.matching { it.name.startsWith("createBundle") && it.name.endsWith("JsAndAssets") }.configureEach {
+        inputs.property("reactorDemoFault", providers.environmentVariable("REACTOR_DEMO_FAULT").orElse("normal"))
+        // A diagnostic APK is the profile-capable test artifact. Keep the Metro
+        // renderer selection attached to the variant instead of relying on a
+        // shell environment variable that can silently produce a normal release.
+        def diagnosticBundle = name.toLowerCase().contains("diagnostic")
+        inputs.property("reactorRnProfile", diagnosticBundle ? "1" : providers.environmentVariable("REACTOR_RN_PROFILE").orElse("0"))
+        if (diagnosticBundle) {
+            // BundleHermesCTask is not an Exec task, so it has no environment()
+            // API. Run the React Native CLI in a child Node process with the
+            // profiling switch set before Metro itself starts.
+            nodeExecutableAndArgs.set(["node", project.file("../../ReactorProfileNode.cjs").absolutePath])
+        }
+    }
 }
