@@ -397,8 +397,10 @@ pub enum FlowValidationError {
         "{path}: sensitive action target requires an explicit non-automated workflow: {target}"
     )]
     SensitiveActionTarget { path: String, target: String },
-    #[error("{path}: reset_app_state is forbidden inside the measured window")]
-    ResetInsideMeasuredWindow { path: String },
+    #[error(
+        "{path}: {action} is a preparation action and is forbidden inside measured; move it to setup"
+    )]
+    PreparationInsideMeasuredWindow { path: String, action: &'static str },
     #[error("{path}: repeat count must be between 1 and {MAX_REPEAT_COUNT}")]
     InvalidRepeat { path: String },
     #[error("{path}: duration exceeds the limit")]
@@ -638,21 +640,50 @@ fn validate_steps(
             return Err(FlowValidationError::TooManySteps);
         }
         match step {
-            Step::ResetAppState if measured => {
-                return Err(FlowValidationError::ResetInsideMeasuredWindow { path });
+            Step::ResetAppState | Step::LaunchApp if measured => {
+                return Err(FlowValidationError::PreparationInsideMeasuredWindow {
+                    path,
+                    action: step.action_name(),
+                });
             }
             Step::Tap { target } => {
+                if measured && selector_is_authentication_preparation(target) {
+                    return Err(FlowValidationError::PreparationInsideMeasuredWindow {
+                        path,
+                        action: "authentication tap",
+                    });
+                }
                 validate_selector(target, &path, report)?;
                 validate_safe_action_target(target, &path)?;
             }
             Step::InputText { target, value, .. } => {
+                if measured && input_is_authentication_preparation(target, value) {
+                    return Err(FlowValidationError::PreparationInsideMeasuredWindow {
+                        path,
+                        action: "authentication input",
+                    });
+                }
                 validate_selector(target, &path, report)?;
                 validate_safe_action_target(target, &path)?;
                 validate_input_value(value, &path)?;
                 validate_sensitive_input_value(target, value, &path)?;
             }
-            Step::AssertVisible { target } => validate_selector(target, &path, report)?,
+            Step::AssertVisible { target } => {
+                if measured {
+                    return Err(FlowValidationError::PreparationInsideMeasuredWindow {
+                        path,
+                        action: step.action_name(),
+                    });
+                }
+                validate_selector(target, &path, report)?;
+            }
             Step::WaitFor { target, timeout_ms } => {
+                if measured {
+                    return Err(FlowValidationError::PreparationInsideMeasuredWindow {
+                        path,
+                        action: step.action_name(),
+                    });
+                }
                 validate_selector(target, &path, report)?;
                 if *timeout_ms > MAX_TIMEOUT_MS {
                     return Err(FlowValidationError::DurationTooLong { path });
@@ -687,6 +718,51 @@ fn validate_steps(
         }
     }
     Ok(())
+}
+
+fn input_is_authentication_preparation(target: &Selector, value: &InputValue) -> bool {
+    selector_is_authentication_preparation(target)
+        || matches!(value, InputValue::SecretRef(_) | InputValue::TotpRef(_))
+        || value
+            .reference()
+            .is_some_and(|(_, reference)| authentication_identity(reference))
+}
+
+fn selector_is_authentication_preparation(selector: &Selector) -> bool {
+    [
+        selector.semantic_id.as_deref(),
+        selector.accessibility_id.as_deref(),
+        selector.text.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(authentication_identity)
+}
+
+fn authentication_identity(value: &str) -> bool {
+    let value = value.to_lowercase();
+    [
+        "username",
+        "user name",
+        "email",
+        "password",
+        "passcode",
+        "sign in",
+        "signin",
+        "log in",
+        "login",
+        "auth-submit",
+        "one-time code",
+        "verification code",
+        "用户名",
+        "账号",
+        "邮箱",
+        "密码",
+        "登录",
+        "验证码",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
 }
 
 fn validate_sensitive_input_value(
@@ -946,17 +1022,14 @@ mod tests {
             app_id: "com.reactor.demo".to_owned(),
             platform: Platform::Android,
             intent: Some("measure list scrolling".to_owned()),
-            setup: vec![Step::ResetAppState],
-            measured: vec![
-                Step::LaunchApp,
-                Step::Repeat {
-                    times: 8,
-                    steps: vec![Step::Swipe {
-                        direction: SwipeDirection::Up,
-                        duration_ms: 800,
-                    }],
-                },
-            ],
+            setup: vec![Step::ResetAppState, Step::LaunchApp],
+            measured: vec![Step::Repeat {
+                times: 8,
+                steps: vec![Step::Swipe {
+                    direction: SwipeDirection::Up,
+                    duration_ms: 800,
+                }],
+            }],
             teardown: vec![],
         }
     }
@@ -966,9 +1039,9 @@ mod tests {
         let flow = valid_flow();
         let steps = flow.expanded_steps();
         assert_eq!(steps[0].id, "flow-step:setup[0]");
-        assert_eq!(steps[1].id, "flow-step:measured[0]");
-        assert_eq!(steps[2].id, "flow-step:measured[1].repeat[0].steps[0]");
-        assert_eq!(steps[9].id, "flow-step:measured[1].repeat[7].steps[0]");
+        assert_eq!(steps[1].id, "flow-step:setup[1]");
+        assert_eq!(steps[2].id, "flow-step:measured[0].repeat[0].steps[0]");
+        assert_eq!(steps[9].id, "flow-step:measured[0].repeat[7].steps[0]");
         assert_eq!(steps[2].action, "swipe");
         assert_eq!(steps, flow.expanded_steps());
     }
@@ -1006,8 +1079,48 @@ mod tests {
         flow.measured = vec![Step::ResetAppState];
         assert!(matches!(
             validate_flow(&flow),
-            Err(FlowValidationError::ResetInsideMeasuredWindow { .. })
+            Err(FlowValidationError::PreparationInsideMeasuredWindow {
+                action: "reset_app_state",
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn rejects_launch_readiness_and_authentication_inside_measurement() {
+        let mut flow = valid_flow();
+        for step in [
+            Step::LaunchApp,
+            Step::WaitFor {
+                target: Selector {
+                    text: Some("Ready".to_owned()),
+                    ..Selector::default()
+                },
+                timeout_ms: 1_000,
+            },
+            Step::InputText {
+                target: Selector {
+                    text: Some("Username".to_owned()),
+                    ..Selector::default()
+                },
+                value: InputValue::PromptRef(PromptInputReference {
+                    prompt_ref: "auth.username".to_owned(),
+                }),
+                clear_before: true,
+            },
+            Step::Tap {
+                target: Selector {
+                    semantic_id: Some("auth-submit-signin".to_owned()),
+                    ..Selector::default()
+                },
+            },
+        ] {
+            flow.measured = vec![step];
+            assert!(matches!(
+                validate_flow(&flow),
+                Err(FlowValidationError::PreparationInsideMeasuredWindow { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1189,7 +1302,7 @@ mod tests {
     #[test]
     fn rejects_empty_or_oversized_input_references() {
         let mut flow = valid_flow();
-        flow.measured = vec![Step::InputText {
+        flow.setup.push(Step::InputText {
             target: Selector {
                 accessibility_id: Some("username".to_owned()),
                 ..Selector::default()
@@ -1198,13 +1311,13 @@ mod tests {
                 variable_ref: "  ".to_owned(),
             }),
             clear_before: true,
-        }];
+        });
         assert!(matches!(
             validate_flow(&flow),
             Err(FlowValidationError::EmptyInputReference { .. })
         ));
 
-        if let Step::InputText { value, .. } = &mut flow.measured[0] {
+        if let Some(Step::InputText { value, .. }) = flow.setup.last_mut() {
             *value = InputValue::SecretRef(SecretInputReference {
                 secret_ref: "x".repeat(MAX_INPUT_REFERENCE_CHARS + 1),
             });
@@ -1218,14 +1331,14 @@ mod tests {
     #[test]
     fn rejects_literal_password_values_in_flow() {
         let mut flow = valid_flow();
-        flow.measured = vec![Step::InputText {
+        flow.setup.push(Step::InputText {
             target: Selector {
                 accessibility_id: Some("login-password".to_owned()),
                 ..Selector::default()
             },
             value: InputValue::Literal("must-not-be-stored".to_owned()),
             clear_before: true,
-        }];
+        });
         assert!(matches!(
             validate_flow(&flow),
             Err(FlowValidationError::SensitiveInputLiteral { .. })

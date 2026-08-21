@@ -280,6 +280,7 @@ export async function performExplorerStep(input: {
   viewportWidth?: number;
   viewportHeight?: number;
   runtimeInput?: string;
+  trustedStart?: boolean;
 }): Promise<DeviceInspectorSnapshot> {
   if (!inTauri) throw new Error("设备交互录制请在 Reactor 桌面应用中使用");
   return invoke("perform_explorer_step", { input });

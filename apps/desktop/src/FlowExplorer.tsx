@@ -751,17 +751,19 @@ export function FlowExplorer({
     setInteractingLabel("启动 App 并建立可信录制起点");
     setError("");
     try {
+      const reset: FlowStep = { action: "reset_app_state" };
       const initial: FlowStep = { action: "launch_app" };
       const next = await performExplorerStep({
         platform: selectedDevice.platform === "ios" ? "ios" : "android",
         deviceId: selectedDevice.id,
         appId: appId.trim(),
         step: initial,
+        trustedStart: true,
       });
       if (restart) rememberEditorState();
-      setRecordedSteps([initial]);
-      teardownStartRef.current = 1;
-      setTeardownStart(1);
+      setRecordedSteps([reset, initial]);
+      teardownStartRef.current = 2;
+      setTeardownStart(2);
       setMeasurementStart(undefined);
       setTargetAssertion(undefined);
       setTargetCheckpoint(undefined);
@@ -774,7 +776,7 @@ export function FlowExplorer({
       return true;
     } catch (reason) {
       setMode("inspect");
-      setError(`无法建立录制起点，Flow 未写入 launch_app：${cleanError(reason)}`);
+      setError(`无法建立录制起点，Flow 未写入 reset_app_state / launch_app：${cleanError(reason)}`);
       return false;
     } finally {
       setInteracting(false);

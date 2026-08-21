@@ -46,8 +46,8 @@ use reactor_runner::{
     delete_all_flow_secrets, delete_flow_secret, discover_android_devices, discover_ios_simulators,
     doctor, enqueue_android, enqueue_demo, enqueue_ios, execute_android_job, execute_demo_job,
     execute_explorer_step, execute_ios_job, has_flow_secret, recover_orphaned_jobs,
-    replay_explorer_flow_with_progress, sample_android_live_performance, save_flow_secret,
-    trial_android, trial_ios_simulator,
+    replay_explorer_flow_with_progress, reset_explorer_app_state,
+    sample_android_live_performance, save_flow_secret, trial_android, trial_ios_simulator,
 };
 use reactor_store::{DiagnosticRunCatalogEntry, DiagnosticRunFilter, Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
@@ -142,6 +142,8 @@ struct PerformExplorerStepInput {
     viewport_height: Option<f64>,
     #[serde(default)]
     runtime_input: Option<String>,
+    #[serde(default)]
+    trusted_start: bool,
 }
 
 #[derive(Deserialize)]
@@ -2050,6 +2052,14 @@ async fn perform_explorer_step(
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
+    if input.trusted_start {
+        if !matches!(&input.step, Step::LaunchApp) {
+            return Err("trustedStart 只允许与 launch_app 一起使用".to_owned());
+        }
+        reset_explorer_app_state(&root, input.platform, &input.device_id, &input.app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let mut viewport_size = input.viewport_width.zip(input.viewport_height);
     if input.platform == Platform::Android
         && matches!(&input.step, Step::Swipe { .. })

@@ -220,23 +220,21 @@ mod tests {
             app_id: "com.reactor.demo".to_owned(),
             platform: Platform::Android,
             intent: None,
-            setup: vec![Step::ResetAppState],
-            measured: vec![
-                Step::LaunchApp,
-                Step::Tap {
-                    target: Selector {
-                        text: Some("List scenario".to_owned()),
-                        ..Selector::default()
-                    },
+            setup: vec![Step::ResetAppState, Step::LaunchApp],
+            measured: vec![Step::Tap {
+                target: Selector {
+                    text: Some("List scenario".to_owned()),
+                    ..Selector::default()
                 },
-            ],
+            }],
             teardown: vec![],
         };
         let output = compile_maestro(&flow).unwrap();
         assert!(output.setup.contains("clearState"));
         assert!(output.measured.contains("tapOn: \"List scenario\""));
         assert_eq!(output.expanded_steps[0].id, "flow-step:setup[0]");
-        assert_eq!(output.expanded_steps[1].id, "flow-step:measured[0]");
+        assert_eq!(output.expanded_steps[1].id, "flow-step:setup[1]");
+        assert_eq!(output.expanded_steps[2].id, "flow-step:measured[0]");
     }
 
     #[test]
@@ -270,20 +268,20 @@ mod tests {
             app_id: "com.reactor.demo".to_owned(),
             platform: Platform::Android,
             intent: None,
-            setup: vec![],
-            measured: vec![Step::AssertVisible {
+            setup: vec![Step::AssertVisible {
                 target: Selector {
                     text: Some("Continue".to_owned()),
                     enabled: Some(true),
                     ..Selector::default()
                 },
             }],
+            measured: vec![Step::Pause { duration_ms: 1 }],
             teardown: vec![],
         };
         let output = compile_maestro(&flow).unwrap();
         assert!(
             output
-                .measured
+                .setup
                 .contains("assertVisible: { text: \"Continue\", enabled: true }")
         );
     }
@@ -300,7 +298,7 @@ mod tests {
             setup: vec![],
             measured: vec![Step::Tap {
                 target: Selector {
-                    text: Some("Sign in".to_owned()),
+                    text: Some("Continue".to_owned()),
                     index: Some(3),
                     ..Selector::default()
                 },
@@ -311,7 +309,7 @@ mod tests {
         assert!(
             output
                 .measured
-                .contains("tapOn: { text: \"Sign in\", index: 3 }")
+                .contains("tapOn: { text: \"Continue\", index: 3 }")
         );
     }
 
@@ -324,8 +322,7 @@ mod tests {
             app_id: "com.reactor.demo".to_owned(),
             platform: Platform::Android,
             intent: None,
-            setup: vec![],
-            measured: vec![Step::AssertVisible {
+            setup: vec![Step::AssertVisible {
                 target: Selector {
                     semantic_id: Some("submit".to_owned()),
                     index: Some(1),
@@ -333,12 +330,13 @@ mod tests {
                     ..Selector::default()
                 },
             }],
+            measured: vec![Step::Pause { duration_ms: 1 }],
             teardown: vec![],
         };
         let output = compile_maestro(&flow).unwrap();
         assert!(
             output
-                .measured
+                .setup
                 .contains("assertVisible: { id: \"submit\", index: 1, enabled: true }")
         );
     }
@@ -352,30 +350,33 @@ mod tests {
             app_id: "com.reactor.demo".to_owned(),
             platform: Platform::Android,
             intent: None,
-            setup: vec![Step::InputText {
-                target: Selector {
-                    accessibility_id: Some("password".to_owned()),
-                    ..Selector::default()
+            setup: vec![
+                Step::LaunchApp,
+                Step::InputText {
+                    target: Selector {
+                        accessibility_id: Some("password".to_owned()),
+                        ..Selector::default()
+                    },
+                    value: InputValue::SecretRef(SecretInputReference {
+                        secret_ref: "test-account.password".to_owned(),
+                    }),
+                    clear_before: true,
                 },
-                value: InputValue::SecretRef(SecretInputReference {
-                    secret_ref: "test-account.password".to_owned(),
-                }),
-                clear_before: true,
-            }],
-            measured: vec![Step::LaunchApp],
+            ],
+            measured: vec![Step::Pause { duration_ms: 1 }],
             teardown: vec![],
         };
         let output = compile_maestro(&flow).unwrap();
         assert!(
             output
                 .setup
-                .contains("inputText: \"${MAESTRO_REACTOR_INPUT_SETUP_0_}\"")
+                .contains("inputText: \"${MAESTRO_REACTOR_INPUT_SETUP_1_}\"")
         );
         assert!(!output.setup.contains("test-account.password"));
         assert_eq!(output.input_bindings.len(), 1);
         assert_eq!(
             output.input_bindings[0].environment_key,
-            "MAESTRO_REACTOR_INPUT_SETUP_0_"
+            "MAESTRO_REACTOR_INPUT_SETUP_1_"
         );
     }
 }

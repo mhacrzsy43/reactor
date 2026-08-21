@@ -2009,7 +2009,9 @@ impl FlowAiProvider for OfflineFlowComposer {
         request: FlowGenerationRequest,
     ) -> Result<GeneratedFlow, AiProviderError> {
         let intent = request.intent.to_lowercase();
-        let mut measured = vec![Step::LaunchApp];
+        let mut setup = vec![Step::ResetAppState, Step::LaunchApp];
+        let mut measured = Vec::new();
+        let mut teardown = Vec::new();
         let (id, entry, ready, complete) =
             if contains_any(&intent, &["list", "scroll", "列表", "滚动"]) {
                 ("list", Some("List scenario"), Some("List ready"), None)
@@ -2032,13 +2034,13 @@ impl FlowAiProvider for OfflineFlowComposer {
             };
 
         if let Some(entry) = entry {
-            measured.push(wait_for("Reactor ready", 10_000));
-            measured.push(Step::Tap {
+            setup.push(wait_for("Reactor ready", 10_000));
+            setup.push(Step::Tap {
                 target: text_selector(entry),
             });
         }
         if let Some(ready) = ready {
-            measured.push(wait_for(ready, 10_000));
+            setup.push(wait_for(ready, 10_000));
         }
         if id == "list" {
             measured.push(Step::Repeat {
@@ -2050,7 +2052,10 @@ impl FlowAiProvider for OfflineFlowComposer {
             });
         }
         if let Some(complete) = complete {
-            measured.push(wait_for(complete, 12_000));
+            teardown.push(wait_for(complete, 12_000));
+        }
+        if measured.is_empty() {
+            measured.push(Step::Pause { duration_ms: 500 });
         }
         let flow = Flow {
             schema_version: 1,
@@ -2059,9 +2064,9 @@ impl FlowAiProvider for OfflineFlowComposer {
             app_id: request.app_id,
             platform: request.platform,
             intent: Some(request.intent),
-            setup: vec![Step::ResetAppState],
+            setup,
             measured,
-            teardown: vec![],
+            teardown,
         };
         validate_flow(&flow)
             .map_err(|error| AiProviderError::InvalidResponse(error.to_string()))?;
@@ -2310,7 +2315,7 @@ mod tests {
     }
 
     fn valid_flow_json() -> &'static str {
-        r#"{"schemaVersion":1,"id":"cli-flow","name":"CLI flow","appId":"com.example.app","platform":"android","intent":"launch","setup":[{"action":"reset_app_state"}],"measured":[{"action":"launch_app"}],"teardown":[]}"#
+        r#"{"schemaVersion":1,"id":"cli-flow","name":"CLI flow","appId":"com.example.app","platform":"android","intent":"launch","setup":[{"action":"reset_app_state"},{"action":"launch_app"}],"measured":[{"action":"pause","duration_ms":500}],"teardown":[]}"#
     }
 
     fn generation_request() -> FlowGenerationRequest {
@@ -2744,7 +2749,7 @@ exit 1"#,
             .await
             .unwrap();
         assert_eq!(result.flow.id, "list-generated");
-        assert!(result.flow.measured.len() >= 4);
+        assert!(matches!(result.flow.measured.last(), Some(Step::Repeat { times: 10, .. })));
     }
 
     #[tokio::test]

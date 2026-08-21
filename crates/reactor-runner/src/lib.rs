@@ -909,24 +909,7 @@ pub async fn capture_android_ui_tree(
     let adb = resolve_tools(workspace)
         .adb
         .ok_or(RunnerError::MissingTool("adb"))?;
-    let adb = adb.to_string_lossy().into_owned();
-    command_text(
-        &adb,
-        &[
-            "-s",
-            device_id,
-            "shell",
-            "monkey",
-            "-p",
-            app_id,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
-        ],
-        "launch Android app for UI context",
-        Duration::from_secs(15),
-    )
-    .await?;
+    start_android_launcher_activity(&adb, device_id, app_id).await?;
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     capture_android_current_ui_tree(workspace, device_id).await
@@ -1358,33 +1341,17 @@ async fn relaunch_explorer_app(
             let adb = resolve_tools(workspace)
                 .adb
                 .ok_or(RunnerError::MissingTool("adb"))?;
-            let adb = adb.to_string_lossy();
-            command_text(
+            android_shell_text(
                 &adb,
-                &["-s", device_id, "shell", "am", "force-stop", app_id],
+                device_id,
+                &["am", "force-stop", app_id],
                 "stop Android app for Flow Explorer relaunch",
-                Duration::from_secs(10),
             )
             .await?;
             tokio::time::sleep(Duration::from_millis(250)).await;
-            command_text(
-                &adb,
-                &[
-                    "-s",
-                    device_id,
-                    "shell",
-                    "monkey",
-                    "-p",
-                    app_id,
-                    "-c",
-                    "android.intent.category.LAUNCHER",
-                    "1",
-                ],
-                "launch Android app for Flow Explorer replay",
-                Duration::from_secs(15),
-            )
-            .await
-            .map(|_| ())
+            start_android_launcher_activity(&adb, device_id, app_id)
+                .await
+                .map(|_| ())
         }
         reactor_protocol::Platform::Ios => {
             let _ = command_text(
@@ -1396,6 +1363,59 @@ async fn relaunch_explorer_app(
             .await;
             tokio::time::sleep(Duration::from_millis(250)).await;
             ensure_ios_app_running(device_id, app_id).await
+        }
+    }
+}
+
+/// Clears application state before a user explicitly starts a new trusted recording. This is
+/// deliberately separate from single-step replay because clearing data is destructive and must
+/// never happen from an ordinary recorded-step click.
+///
+/// # Errors
+///
+/// Returns an error when the target cannot be cleared with the platform's deterministic Flow
+/// mechanism.
+pub async fn reset_explorer_app_state(
+    workspace: &Path,
+    platform: reactor_protocol::Platform,
+    device_id: &str,
+    app_id: &str,
+) -> Result<(), RunnerError> {
+    match platform {
+        reactor_protocol::Platform::Android => {
+            validate_android_package_id(app_id)?;
+            let adb = resolve_tools(workspace)
+                .adb
+                .ok_or(RunnerError::MissingTool("adb"))?;
+            let output = android_shell_text(
+                &adb,
+                device_id,
+                &["pm", "clear", app_id],
+                "clear Android app state for trusted recording",
+            )
+            .await?;
+            if output.lines().any(|line| line.trim() == "Success") {
+                Ok(())
+            } else {
+                Err(RunnerError::CommandFailed {
+                    command: "clear Android app state for trusted recording".to_owned(),
+                    output,
+                })
+            }
+        }
+        reactor_protocol::Platform::Ios => {
+            let reset_flow = Flow {
+                schema_version: 1,
+                id: "reactor-trusted-recording-reset".to_owned(),
+                name: "Trusted recording reset".to_owned(),
+                app_id: app_id.to_owned(),
+                platform,
+                intent: None,
+                setup: vec![Step::ResetAppState],
+                measured: vec![Step::Pause { duration_ms: 1 }],
+                teardown: vec![],
+            };
+            replay_explorer_flow(workspace, platform, device_id, &reset_flow, None).await
         }
     }
 }
@@ -2727,29 +2747,63 @@ async fn measure_android_startup(
     device_id: &str,
     app_id: &str,
 ) -> Result<Option<f64>, RunnerError> {
-    let resolved = android_shell_text(
-        adb,
-        device_id,
-        &["cmd", "package", "resolve-activity", "--brief", app_id],
-        "resolve-activity",
-    )
-    .await?;
-    let Some(component) = resolved
-        .lines()
-        .rev()
-        .find(|line| line.contains('/') && !line.contains(' '))
-    else {
-        return Ok(None);
-    };
+    let component = resolve_android_launcher_component(adb, device_id, app_id).await?;
     android_shell_text(adb, device_id, &["am", "force-stop", app_id], "force-stop").await?;
     let output = android_shell_text(
         adb,
         device_id,
-        &["am", "start", "-W", "-n", component],
+        &["am", "start", "-W", "-n", &component],
         "am-start",
     )
     .await?;
     Ok(parse_startup_total_time(&output))
+}
+
+async fn resolve_android_launcher_component(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+) -> Result<String, RunnerError> {
+    let resolved = android_shell_text(
+        adb,
+        device_id,
+        &["cmd", "package", "resolve-activity", "--brief", app_id],
+        "resolve Android launcher activity",
+    )
+    .await?;
+    parse_android_launcher_component(&resolved).ok_or_else(|| RunnerError::CommandFailed {
+        command: "resolve Android launcher activity".to_owned(),
+        output: format!("package {app_id} has no resolvable Launcher Activity"),
+    })
+}
+
+fn parse_android_launcher_component(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|line| {
+            let Some((package, activity)) = line.split_once('/') else {
+                return false;
+            };
+            !package.is_empty() && !activity.is_empty() && !line.chars().any(char::is_whitespace)
+        })
+        .map(ToOwned::to_owned)
+}
+
+async fn start_android_launcher_activity(
+    adb: &Path,
+    device_id: &str,
+    app_id: &str,
+) -> Result<String, RunnerError> {
+    let component = resolve_android_launcher_component(adb, device_id, app_id).await?;
+    android_shell_text(
+        adb,
+        device_id,
+        &["am", "start", "-W", "-n", &component],
+        "start Android launcher activity",
+    )
+    .await
 }
 
 fn parse_startup_total_time(output: &str) -> Option<f64> {
@@ -6894,8 +6948,8 @@ mod tests {
             app_id: "com.example".to_owned(),
             platform: reactor_protocol::Platform::Android,
             intent: None,
-            setup: vec![],
-            measured: vec![Step::LaunchApp],
+            setup: vec![Step::LaunchApp],
+            measured: vec![Step::Pause { duration_ms: 1 }],
             teardown: vec![],
         };
         let foundation = flow_marker_foundation(&flow);
@@ -7024,6 +7078,24 @@ mod tests {
         assert_eq!(devices[0].id, "ABC");
         assert_eq!(devices[0].name.as_deref(), Some("Pixel_8"));
         assert!(devices[0].physical);
+    }
+
+    #[test]
+    fn parses_only_a_resolved_android_launcher_component() {
+        assert_eq!(
+            parse_android_launcher_component(
+                "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\ncom.example/.MainActivity\n"
+            ),
+            Some("com.example/.MainActivity".to_owned())
+        );
+        assert_eq!(
+            parse_android_launcher_component("No activity found\n"),
+            None
+        );
+        assert_eq!(
+            parse_android_launcher_component("com.example / .MainActivity\n"),
+            None
+        );
     }
 
     #[test]
