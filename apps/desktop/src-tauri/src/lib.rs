@@ -67,6 +67,9 @@ static INSPECTOR_HIERARCHY_CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<
     std::sync::OnceLock::new();
 static INSPECTOR_ACTION_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+static EXPLORER_REPLAY_PROGRESS: std::sync::OnceLock<
+    std::sync::Mutex<Option<TrackedReplayProgress>>,
+> = std::sync::OnceLock::new();
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +177,7 @@ struct ReplayExplorerFlowInput {
     platform: Platform,
     device_id: String,
     flow: Flow,
+    replay_id: String,
     #[serde(default)]
     prompt_values: std::collections::BTreeMap<String, String>,
 }
@@ -182,6 +186,26 @@ struct ReplayExplorerFlowInput {
 #[serde(rename_all = "camelCase")]
 struct ReplayProgress {
     completed_step_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TrackedReplayProgress {
+    replay_id: String,
+    current_step_index: Option<usize>,
+    finished: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayProgressInput {
+    replay_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayProgressSnapshot {
+    current_step_index: Option<usize>,
+    finished: bool,
 }
 
 const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
@@ -2233,20 +2257,96 @@ async fn perform_explorer_step(
 }
 
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn get_explorer_replay_progress(
+    input: ReplayProgressInput,
+) -> Result<Option<ReplayProgressSnapshot>, String> {
+    validate_replay_id(&input.replay_id)?;
+    let progress = EXPLORER_REPLAY_PROGRESS.get_or_init(Default::default);
+    let progress = progress
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(progress.as_ref().and_then(|tracked| {
+        (tracked.replay_id == input.replay_id).then_some(ReplayProgressSnapshot {
+            current_step_index: tracked.current_step_index,
+            finished: tracked.finished,
+        })
+    }))
+}
+
+fn validate_replay_id(replay_id: &str) -> Result<(), String> {
+    if replay_id.is_empty()
+        || replay_id.len() > 64
+        || !replay_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err("回放进度 ID 无效".to_owned());
+    }
+    Ok(())
+}
+
+fn begin_tracked_replay(replay_id: &str) {
+    let progress = EXPLORER_REPLAY_PROGRESS.get_or_init(Default::default);
+    let mut progress = progress
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *progress = Some(TrackedReplayProgress {
+        replay_id: replay_id.to_owned(),
+        current_step_index: None,
+        finished: false,
+    });
+}
+
+fn update_tracked_replay(replay_id: &str, current_step_index: usize) {
+    let progress = EXPLORER_REPLAY_PROGRESS.get_or_init(Default::default);
+    let mut progress = progress
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(tracked) = progress
+        .as_mut()
+        .filter(|tracked| tracked.replay_id == replay_id)
+    {
+        tracked.current_step_index = Some(current_step_index);
+    }
+}
+
+fn finish_tracked_replay(replay_id: &str) {
+    let progress = EXPLORER_REPLAY_PROGRESS.get_or_init(Default::default);
+    let mut progress = progress
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(tracked) = progress
+        .as_mut()
+        .filter(|tracked| tracked.replay_id == replay_id)
+    {
+        tracked.finished = true;
+    }
+}
+
+#[tauri::command]
 async fn replay_recorded_flow(
     input: ReplayExplorerFlowInput,
     on_progress: Channel<ReplayProgress>,
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
+    validate_replay_id(&input.replay_id)?;
+    begin_tracked_replay(&input.replay_id);
+    let replay_id = input.replay_id.clone();
+    let step_count = input.flow.setup.len() + input.flow.measured.len() + input.flow.teardown.len();
     let prompt_values = input
         .prompt_values
         .into_iter()
         .map(|(reference, value)| (reference, Zeroizing::new(value)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
     let progress_forwarder = tokio::spawn(async move {
         while let Some(completed_step_index) = progress_rx.recv().await {
+            let current_step_index = completed_step_index
+                .saturating_add(1)
+                .min(step_count.saturating_sub(1));
+            update_tracked_replay(&replay_id, current_step_index);
             let _ = on_progress.send(ReplayProgress {
                 completed_step_index,
             });
@@ -2261,9 +2361,9 @@ async fn replay_recorded_flow(
         Some(progress_tx),
     )
     .await;
-    progress_forwarder
-        .await
-        .map_err(|error| error.to_string())?;
+    let progress_forward_result = progress_forwarder.await;
+    finish_tracked_replay(&input.replay_id);
+    progress_forward_result.map_err(|error| error.to_string())?;
     replay_result.map_err(|error| error.to_string())?;
     capture_device_inspector_for(CaptureDeviceInspectorInput {
         platform: input.platform,
@@ -4376,6 +4476,7 @@ pub fn run() {
             doctor_local_model,
             compile_flow_preview,
             replay_recorded_flow,
+            get_explorer_replay_progress,
             save_flow_secret_value,
             get_flow_secret_status,
             delete_flow_secret_value,
@@ -4423,6 +4524,49 @@ mod tests {
         let path = std::env::temp_dir().join(format!("reactor-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn replay_progress_is_scoped_validated_and_tracks_lifecycle() {
+        assert!(validate_replay_id("").is_err());
+        assert!(validate_replay_id("contains spaces").is_err());
+        assert!(validate_replay_id(&"a".repeat(65)).is_err());
+
+        let replay_id = uuid::Uuid::new_v4().to_string();
+        let other_replay_id = uuid::Uuid::new_v4().to_string();
+        validate_replay_id(&replay_id).unwrap();
+        begin_tracked_replay(&replay_id);
+
+        let initial = get_explorer_replay_progress(ReplayProgressInput {
+            replay_id: replay_id.clone(),
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(initial.current_step_index, None);
+        assert!(!initial.finished);
+        assert!(
+            get_explorer_replay_progress(ReplayProgressInput {
+                replay_id: other_replay_id,
+            })
+            .unwrap()
+            .is_none()
+        );
+
+        update_tracked_replay(&replay_id, 3);
+        let active = get_explorer_replay_progress(ReplayProgressInput {
+            replay_id: replay_id.clone(),
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(active.current_step_index, Some(3));
+        assert!(!active.finished);
+
+        finish_tracked_replay(&replay_id);
+        let finished = get_explorer_replay_progress(ReplayProgressInput { replay_id })
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.current_step_index, Some(3));
+        assert!(finished.finished);
     }
 
     #[test]

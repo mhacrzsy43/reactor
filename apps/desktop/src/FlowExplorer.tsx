@@ -1,7 +1,7 @@
 import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Braces, Check, ChevronDown, Code2, Copy, Crosshair, GitBranch, ListPlus, LockKeyhole, MousePointer2, Pause, Play, RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, Smartphone, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { captureDeviceInspector, captureDeviceReplayFrame, classifyFlowRequest, compileFlowPreview, confirmFlow, generateFlow, getFlowSecretStatus, modifyFlow, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, sampleTrialLivePerformance, saveFlowSecret, trialGeneratedFlow } from "./api";
+import { captureDeviceInspector, captureDeviceReplayFrame, classifyFlowRequest, compileFlowPreview, confirmFlow, generateFlow, getExplorerReplayProgress, getFlowSecretStatus, modifyFlow, performExplorerStep, previewGenerationContext, probeFlow, replayRecordedFlow, sampleTrialLivePerformance, saveFlowSecret, trialGeneratedFlow } from "./api";
 import type { FlowModificationProposal, TrialLivePerformanceSample } from "./api";
 import type { CompiledFlow, Device, DeviceInspectorSnapshot, Flow, FlowLock, FlowStep, GeneratedFlow, InputValue, InspectorElement, InspectorSelectorCandidate, RedactedUiContext, TrialPreparation } from "./types";
 
@@ -999,12 +999,31 @@ export function FlowExplorer({
     setPoint(undefined);
     setEditorError("");
     setReplayFailure(undefined);
+    const replayId = crypto.randomUUID();
+    let progressPolling = true;
+    let progressPollPending = false;
+    const pollProgress = async () => {
+      if (!progressPolling || progressPollPending) return;
+      progressPollPending = true;
+      try {
+        const progress = await getExplorerReplayProgress(replayId);
+        if (progressPolling && typeof progress?.currentStepIndex === "number") {
+          setActiveReplayStep(Math.min(progress.currentStepIndex, recordedSteps.length - 1));
+        }
+      } catch {
+        // The Tauri Channel remains the primary path; polling is a local fallback only.
+      } finally {
+        progressPollPending = false;
+      }
+    };
+    const progressTimer = window.setInterval(() => void pollProgress(), 250);
     try {
       await compileFlowPreview(flowToReplay);
       const next = await replayRecordedFlow({
         platform: flowToReplay.platform,
         deviceId: selectedDevice.id,
         flow: flowToReplay,
+        replayId,
         promptValues,
       }, (completedStepIndex) => {
         setActiveReplayStep(Math.min(completedStepIndex + 1, recordedSteps.length - 1));
@@ -1019,6 +1038,8 @@ export function FlowExplorer({
       setEditorError(`整体回放失败：${failure.message}`);
       window.setTimeout(() => editorErrorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
     } finally {
+      progressPolling = false;
+      window.clearInterval(progressTimer);
       setReplaying(false);
       setReplayKind(undefined);
       setActiveReplayStep(undefined);

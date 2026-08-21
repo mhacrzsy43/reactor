@@ -291,12 +291,21 @@ export async function replayRecordedFlow(input: {
   platform: Platform;
   deviceId: string;
   flow: Flow;
+  replayId: string;
   promptValues?: Record<string, string>;
 }, onProgress?: (completedStepIndex: number) => void): Promise<DeviceInspectorSnapshot> {
   if (!inTauri) throw new Error("完整 Flow 回放请在 Reactor 桌面应用中使用");
   const channel = new Channel<{ completedStepIndex: number }>();
   channel.onmessage = (message) => onProgress?.(message.completedStepIndex);
   return invoke("replay_recorded_flow", { input, onProgress: channel });
+}
+
+export async function getExplorerReplayProgress(replayId: string): Promise<{
+  currentStepIndex?: number;
+  finished: boolean;
+} | undefined> {
+  if (!inTauri) throw new Error("完整 Flow 回放进度请在 Reactor 桌面应用中使用");
+  return invoke("get_explorer_replay_progress", { input: { replayId } });
 }
 
 export async function saveFlowSecret(reference: string, value: string): Promise<{ reference: string; stored: boolean }> {
