@@ -11,7 +11,7 @@ use chrono::Utc;
 use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, Mac};
 use reactor_core::{
-    CompiledInputBinding, aggregate_iterations, compile_maestro, mean, percentile,
+    CompiledFlow, CompiledInputBinding, aggregate_iterations, compile_maestro, mean, percentile,
     render_html_report,
 };
 use reactor_protocol::{
@@ -1432,9 +1432,9 @@ fn validate_explorer_single_step(step: &Step) -> Result<(), RunnerError> {
     Ok(())
 }
 
-/// Replays a complete edited Flow outside the measurement window with one Maestro process. The
-/// three Flow sections remain separate YAML documents but are passed to the same invocation in
-/// setup → measured → teardown order.
+/// Replays a complete edited Flow outside the measurement window with one Maestro process and one
+/// YAML document. Reactor retains the setup → measured → teardown boundaries in the source Flow,
+/// while the single replay document keeps Maestro in command-progress mode instead of batch mode.
 ///
 /// # Errors
 ///
@@ -1466,6 +1466,7 @@ pub async fn replay_explorer_flow_with_progress(
     progress: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
 ) -> Result<(), RunnerError> {
     let compiled = compile_maestro(flow)?;
+    let replay_yaml = combined_explorer_replay_yaml(&compiled);
     let (maestro_progress, progress_forwarder) = if let Some(progress) = progress {
         let top_level_steps = maestro_progress_top_level_steps(flow);
         let (raw_progress, mut raw_progress_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1495,19 +1496,9 @@ pub async fn replay_explorer_flow_with_progress(
         .join(".reactor/runtime")
         .join(format!("explorer-replay-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&directory).await?;
-    let sections = [
-        ("setup.yaml", &flow.setup, compiled.setup),
-        ("measured.yaml", &flow.measured, compiled.measured),
-        ("teardown.yaml", &flow.teardown, compiled.teardown),
-    ];
-    let mut paths = Vec::new();
-    for (name, steps, yaml) in sections {
-        if !steps.is_empty() {
-            let path = directory.join(name);
-            fs::write(&path, yaml).await?;
-            paths.push(path);
-        }
-    }
+    let path = directory.join("replay.yaml");
+    fs::write(&path, replay_yaml).await?;
+    let paths = [path];
     let result = match platform {
         reactor_protocol::Platform::Android => {
             let adb = tools.adb.ok_or(RunnerError::MissingTool("adb"))?;
@@ -1541,6 +1532,19 @@ pub async fn replay_explorer_flow_with_progress(
     result
 }
 
+fn combined_explorer_replay_yaml(compiled: &CompiledFlow) -> String {
+    let mut replay = compiled.setup.clone();
+    append_maestro_section_commands(&mut replay, &compiled.measured);
+    append_maestro_section_commands(&mut replay, &compiled.teardown);
+    replay
+}
+
+fn append_maestro_section_commands(replay: &mut String, section: &str) {
+    if let Some((_, commands)) = section.split_once("---\n") {
+        replay.push_str(commands);
+    }
+}
+
 fn maestro_progress_top_level_steps(flow: &Flow) -> Vec<usize> {
     flow.setup
         .iter()
@@ -1556,6 +1560,7 @@ fn maestro_progress_top_level_steps(flow: &Flow) -> Vec<usize> {
 fn maestro_observable_completion_count(step: &Step) -> usize {
     match step {
         Step::InputText { clear_before, .. } => usize::from(*clear_before) + 2,
+        Step::Swipe { .. } => 2,
         Step::Repeat { steps, .. } => {
             1 + steps
                 .iter()
@@ -6356,7 +6361,41 @@ mod tests {
             teardown: vec![],
         };
 
-        assert_eq!(maestro_progress_top_level_steps(&flow), [0, 1, 1, 1, 2]);
+        assert_eq!(maestro_progress_top_level_steps(&flow), [0, 1, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn combines_explorer_sections_into_one_maestro_flow_in_source_order() {
+        let flow = Flow {
+            schema_version: 1,
+            id: "combined-replay".to_owned(),
+            name: "Combined replay".to_owned(),
+            app_id: "com.example.app".to_owned(),
+            platform: reactor_protocol::Platform::Android,
+            intent: None,
+            setup: vec![Step::LaunchApp],
+            measured: vec![Step::Tap {
+                target: reactor_protocol::Selector {
+                    text: Some("Measure".to_owned()),
+                    ..reactor_protocol::Selector::default()
+                },
+            }],
+            teardown: vec![Step::Tap {
+                target: reactor_protocol::Selector {
+                    text: Some("Close".to_owned()),
+                    ..reactor_protocol::Selector::default()
+                },
+            }],
+        };
+        let compiled = compile_maestro(&flow).unwrap();
+        let replay = combined_explorer_replay_yaml(&compiled);
+
+        assert_eq!(replay.matches("appId:").count(), 1);
+        assert_eq!(replay.matches("\n---\n").count(), 1);
+        let launch = replay.find("- launchApp").unwrap();
+        let measure = replay.find("\"Measure\"").unwrap();
+        let close = replay.find("\"Close\"").unwrap();
+        assert!(launch < measure && measure < close);
     }
 
     #[test]
@@ -6368,6 +6407,52 @@ mod tests {
             b"Tap on Sign in... FAILED\r\n"
         ));
         assert!(!maestro_line_reports_completion(b"Repeat 100 times...\r\n"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the managed RN Demo on emulator-5554"]
+    async fn manual_explorer_replay_streams_top_level_progress() {
+        let workspace = PathBuf::from(
+            std::env::var("REACTOR_MANUAL_WORKSPACE")
+                .expect("set REACTOR_MANUAL_WORKSPACE for the managed runtime"),
+        );
+        let flow = Flow {
+            schema_version: 1,
+            id: "manual-progress-probe".to_owned(),
+            name: "Manual progress probe".to_owned(),
+            app_id: "com.reactor.bench.reactnative".to_owned(),
+            platform: reactor_protocol::Platform::Android,
+            intent: None,
+            setup: vec![
+                Step::ResetAppState,
+                Step::LaunchApp,
+                Step::AssertVisible {
+                    target: reactor_protocol::Selector {
+                        text: Some("Sign in".to_owned()),
+                        ..reactor_protocol::Selector::default()
+                    },
+                },
+            ],
+            measured: vec![Step::Pause { duration_ms: 100 }],
+            teardown: vec![],
+        };
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        replay_explorer_flow_with_progress(
+            &workspace,
+            reactor_protocol::Platform::Android,
+            "emulator-5554",
+            &flow,
+            None,
+            Some(progress_tx),
+        )
+        .await
+        .unwrap();
+        let mut progress = Vec::new();
+        while let Some(step) = progress_rx.recv().await {
+            progress.push(step);
+        }
+        assert_eq!(progress, [0, 1, 2, 3]);
     }
 
     #[test]
