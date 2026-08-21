@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     fs::{self, File, OpenOptions},
     future::Future,
@@ -46,8 +47,8 @@ use reactor_runner::{
     delete_all_flow_secrets, delete_flow_secret, discover_android_devices, discover_ios_simulators,
     doctor, enqueue_android, enqueue_demo, enqueue_ios, execute_android_job, execute_demo_job,
     execute_explorer_step, execute_ios_job, has_flow_secret, recover_orphaned_jobs,
-    replay_explorer_flow_with_progress, reset_explorer_app_state,
-    sample_android_live_performance, save_flow_secret, trial_android, trial_ios_simulator,
+    replay_explorer_flow_with_progress, reset_explorer_app_state, sample_android_live_performance,
+    save_flow_secret, trial_android, trial_ios_simulator,
 };
 use reactor_store::{DiagnosticRunCatalogEntry, DiagnosticRunFilter, Job, JobEvent, Store};
 use reactor_toolchain::{InstalledManifest, ManagedToolsManifest, SetupOptions};
@@ -62,6 +63,8 @@ mod updater;
 
 const MANAGED_TOOLS_MANIFEST: &str = include_str!("../../../../tools/managed-tools-v1.json");
 static BUNDLED_TOOL_ARCHIVES: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static INSPECTOR_HIERARCHY_CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, String>>> =
+    std::sync::OnceLock::new();
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +80,8 @@ struct Bootstrap {
 struct CaptureDeviceInspectorInput {
     platform: Platform,
     device_id: String,
+    #[serde(default)]
+    fast_refresh: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1981,8 +1986,14 @@ async fn capture_device_inspector_for(
 ) -> Result<DeviceInspectorSnapshot, String> {
     let root = workspace();
     ensure_inspector_capture_allowed(&root)?;
-    let (screenshot, hierarchy) =
-        capture_synchronized_inspector_pair(&root, input.platform, &input.device_id).await?;
+    let (screenshot, hierarchy, hierarchy_changed) = if input.fast_refresh {
+        capture_fast_inspector_pair(&root, input.platform, &input.device_id).await?
+    } else {
+        let (screenshot, hierarchy) =
+            capture_synchronized_inspector_pair(&root, input.platform, &input.device_id).await?;
+        let changed = cache_inspector_hierarchy(input.platform, &input.device_id, &hierarchy);
+        (screenshot, hierarchy, changed)
+    };
     // A worker may have been started by another Reactor process while capture was in flight. In
     // that case discard the snapshot so inspection can never be mistaken for measurement data.
     ensure_inspector_capture_allowed(&root)?;
@@ -1996,7 +2007,11 @@ async fn capture_device_inspector_for(
         screenshot_height,
         &elements,
     );
-    let warnings = inspector_warnings(&elements, viewport_width, viewport_height);
+    let mut warnings = inspector_warnings(&elements, viewport_width, viewport_height);
+    if input.fast_refresh && hierarchy_changed {
+        warnings.push("页面层级已变化；Selector 已恢复，后台正在复核稳定性".to_owned());
+        validate_changed_hierarchy_in_background(root, input.platform, input.device_id.clone());
+    }
     Ok(DeviceInspectorSnapshot {
         platform: input.platform,
         device_id: input.device_id,
@@ -2012,6 +2027,69 @@ async fn capture_device_inspector_for(
         elements,
         warnings,
     })
+}
+
+async fn capture_fast_inspector_pair(
+    root: &Path,
+    platform: Platform,
+    device_id: &str,
+) -> Result<(Vec<u8>, String, bool), String> {
+    let screenshot = async {
+        match platform {
+            Platform::Android => capture_android_screenshot(root, device_id).await,
+            Platform::Ios => capture_ios_screenshot(root, device_id).await,
+        }
+        .map_err(|error| error.to_string())
+    };
+    let hierarchy = async {
+        match platform {
+            Platform::Android => capture_android_current_ui_tree(root, device_id).await,
+            Platform::Ios => capture_ios_current_ui_tree(root, device_id).await,
+        }
+        .map_err(|error| error.to_string())
+    };
+    let (screenshot, hierarchy) = tokio::try_join!(screenshot, hierarchy)?;
+    let changed = cache_inspector_hierarchy(platform, device_id, &hierarchy);
+    Ok((screenshot, hierarchy, changed))
+}
+
+fn inspector_cache_key(platform: Platform, device_id: &str) -> String {
+    format!(
+        "{}:{device_id}",
+        match platform {
+            Platform::Android => "android",
+            Platform::Ios => "ios",
+        }
+    )
+}
+
+fn cache_inspector_hierarchy(platform: Platform, device_id: &str, hierarchy: &str) -> bool {
+    let cache = INSPECTOR_HIERARCHY_CACHE.get_or_init(Default::default);
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .insert(
+            inspector_cache_key(platform, device_id),
+            hierarchy.to_owned(),
+        )
+        .is_some_and(|previous| previous != hierarchy)
+}
+
+fn validate_changed_hierarchy_in_background(root: PathBuf, platform: Platform, device_id: String) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+        if ensure_inspector_capture_allowed(&root).is_err() {
+            return;
+        }
+        let hierarchy = match platform {
+            Platform::Android => capture_android_current_ui_tree(&root, &device_id).await,
+            Platform::Ios => capture_ios_current_ui_tree(&root, &device_id).await,
+        };
+        if let Ok(hierarchy) = hierarchy {
+            cache_inspector_hierarchy(platform, &device_id, &hierarchy);
+        }
+    });
 }
 
 async fn capture_synchronized_inspector_pair(
@@ -2133,6 +2211,7 @@ async fn perform_explorer_step(
     let mut snapshot = capture_device_inspector_for(CaptureDeviceInspectorInput {
         platform: input.platform,
         device_id: input.device_id,
+        fast_refresh: false,
     })
     .await?;
     if !stable {
@@ -2179,6 +2258,7 @@ async fn replay_recorded_flow(
     capture_device_inspector_for(CaptureDeviceInspectorInput {
         platform: input.platform,
         device_id: input.device_id,
+        fast_refresh: false,
     })
     .await
 }
@@ -4877,6 +4957,26 @@ mod tests {
             (393.0, 852.0)
         );
         assert!(png_dimensions(b"not a png").is_err());
+    }
+
+    #[test]
+    fn inspector_hierarchy_cache_only_marks_real_changes() {
+        let device_id = format!("cache-test-{}", uuid::Uuid::new_v4());
+        assert!(!cache_inspector_hierarchy(
+            Platform::Android,
+            &device_id,
+            "screen-a"
+        ));
+        assert!(!cache_inspector_hierarchy(
+            Platform::Android,
+            &device_id,
+            "screen-a"
+        ));
+        assert!(cache_inspector_hierarchy(
+            Platform::Android,
+            &device_id,
+            "screen-b"
+        ));
     }
 
     #[test]

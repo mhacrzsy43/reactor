@@ -167,7 +167,6 @@ export function FlowExplorer({
   const [repairingReplay, setRepairingReplay] = useState(false);
   const [performanceSamples, setPerformanceSamples] = useState<Array<TrialLivePerformanceSample & { step?: number }>>([]);
   const performanceStartedAt = useRef(0);
-  const replayProgressReceived = useRef(false);
   const captureInFlight = useRef(false);
   const interactionInFlight = useRef(false);
   const snapshotRef = useRef<DeviceInspectorSnapshot | undefined>(undefined);
@@ -508,7 +507,7 @@ export function FlowExplorer({
     setGateError("");
   }, [explorerFlow, initialFlowLock, initialPreparation]);
 
-  const capture = useCallback(async () => {
+  const capture = useCallback(async (fastRefresh = false) => {
     if (!selectedDevice || activeJobRunning || captureInFlight.current) return;
     captureInFlight.current = true;
     setLoading(true);
@@ -517,6 +516,7 @@ export function FlowExplorer({
       const next = await captureDeviceInspector({
         platform: selectedDevice.platform === "ios" ? "ios" : "android",
         deviceId: selectedDevice.id,
+        fastRefresh,
       });
       setSnapshot(next);
       const pendingStep = pendingGraphStepRef.current;
@@ -551,7 +551,7 @@ export function FlowExplorer({
   useEffect(() => {
     if (!snapshot || snapshot.elements.length > 0 || !pendingGraphStepRef.current || activeJobRunning || selectorRefreshAttempt >= 5) return undefined;
     const timer = window.setTimeout(() => {
-      void capture().finally(() => setSelectorRefreshAttempt((attempt) => attempt + 1));
+      void capture(true).finally(() => setSelectorRefreshAttempt((attempt) => attempt + 1));
     }, 300 + selectorRefreshAttempt * 250);
     return () => window.clearTimeout(timer);
   }, [activeJobRunning, capture, selectorRefreshAttempt, snapshot?.capturedAt, snapshot?.elements.length]);
@@ -607,16 +607,6 @@ export function FlowExplorer({
       window.clearInterval(timer);
     };
   }, [activeJobRunning, gateBusy, replaying, selectedDevice]);
-
-  useEffect(() => {
-    if (!replaying || replayKind !== "whole") return undefined;
-    // Maestro does not guarantee command-level events. Do not falsely leave the first
-    // item highlighted when its TTY output only reports a whole-flow summary.
-    const timer = window.setTimeout(() => {
-      if (!replayProgressReceived.current) setActiveReplayStep(undefined);
-    }, 6_000);
-    return () => window.clearTimeout(timer);
-  }, [replayKind, replaying]);
 
   useEffect(() => {
     const observing = replaying || gateBusy;
@@ -908,7 +898,7 @@ export function FlowExplorer({
       setSelectedElementKey(undefined);
       setPoint(undefined);
       if (next.platform === "android" && next.elements.length === 0) {
-        window.setTimeout(() => void capture(), 0);
+        window.setTimeout(() => void capture(true), 0);
       }
     } catch (reason) {
       setError(`交互执行失败，步骤未加入 Flow：${String(reason)}`);
@@ -995,7 +985,6 @@ export function FlowExplorer({
     const flowToReplay = flowOverride ? { ...flowOverride, intent: undefined } : draftReplayFlow;
     setPerformanceSamples([]);
     setReplayKind("whole");
-    replayProgressReceived.current = false;
     setActiveReplayStep(0);
     setReplaying(true);
     setLive(false);
@@ -1011,7 +1000,6 @@ export function FlowExplorer({
         flow: flowToReplay,
         promptValues,
       }, (completedStepIndex) => {
-        replayProgressReceived.current = true;
         setActiveReplayStep(Math.min(completedStepIndex + 1, recordedSteps.length - 1));
       });
       setSnapshot(next);
@@ -1535,7 +1523,7 @@ export function FlowExplorer({
                 </div>
               </>
             ) : (
-              <div className="selector-empty"><ScanSearch size={28} /><h3>点击设备画面中的控件</h3><p>Reactor 会在 UI 树中命中面积最小的元素，并解释每个 Selector 为什么稳定或脆弱。</p></div>
+              <div className={`selector-empty ${mode === "record" ? "compact" : ""}`}><ScanSearch size={28} /><h3>{mode === "record" ? "点击左侧控件继续录制" : "点击设备画面中的控件"}</h3><p>{mode === "record" ? "选中后才展开 Selector 与输入配置。" : "Reactor 会在 UI 树中命中面积最小的元素，并解释每个 Selector 为什么稳定或脆弱。"}</p></div>
             )}
           </aside>
         </div>

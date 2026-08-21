@@ -258,6 +258,7 @@ export async function previewGenerationContext(input: {
 export async function captureDeviceInspector(input: {
   platform: Platform;
   deviceId: string;
+  fastRefresh?: boolean;
 }): Promise<DeviceInspectorSnapshot> {
   if (!inTauri) throw new Error("Flow Explorer 请在 Reactor 桌面应用中使用");
   return invoke("capture_device_inspector", { input });

@@ -567,6 +567,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .stability-badge.stable { color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
 .stability-badge.brittle { color: var(--orange); background: color-mix(in srgb, var(--orange) 10%, transparent); }
 .selector-empty { min-height: 430px; display: grid; align-content: center; justify-items: center; gap: 8px; color: var(--purple); text-align: center; }
+.selector-empty.compact { min-height: 82px; grid-template-columns: auto minmax(0, 1fr); align-content: center; justify-items: start; column-gap: 10px; padding: 10px 2px; text-align: left; }
+.selector-empty.compact > svg { grid-row: 1 / span 2; width: 22px; }
+.selector-empty.compact h3 { margin: 0; }
+.selector-empty.compact p { max-width: none; }
 .selector-empty h3 { margin: 4px 0 0; color: var(--text); font-size: 13px; }
 .selector-empty p { max-width: 290px; margin: 0; color: var(--muted); font-size: 9px; line-height: 1.6; }
 .explorer-empty { max-width: 1390px; min-height: 430px; margin: 0 auto; display: grid; align-content: center; justify-items: center; gap: 10px; color: var(--purple); text-align: center; }
