@@ -486,6 +486,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .measurement-boundary > span { color: var(--muted); font-size: 7px; }
 .measurement-boundary select { min-width: 0; height: 30px; font-size: 8px; }
 .recorded-flow-list { max-height: 280px; margin: 12px 0 0; padding: 0; display: grid; gap: 7px; overflow-y: auto; list-style: none; }
+.replay-progress-pending { margin-top: 10px; padding: 9px; display: flex; align-items: center; gap: 8px; border: 1px dashed color-mix(in srgb, var(--purple) 48%, var(--line)); border-radius: 8px; color: var(--purple); background: color-mix(in srgb, var(--purple) 7%, transparent); }
+.replay-progress-pending span, .replay-progress-pending b, .replay-progress-pending small { display: block; }
+.replay-progress-pending b { font-size: 8px; }
+.replay-progress-pending small { margin-top: 3px; color: var(--muted); font-size: 7px; line-height: 1.45; }
 .recorded-flow-list li { padding: 9px; display: grid; grid-template-columns: 25px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); }
 .recorded-flow-list li.replay-active { border-color: var(--purple); background: color-mix(in srgb, var(--purple) 18%, var(--surface-raised)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--purple) 18%, transparent), 0 0 22px color-mix(in srgb, var(--purple) 14%, transparent); }
 .recorded-flow-list li.replay-active > span { color: #fff; background: var(--purple); }

@@ -990,7 +990,9 @@ export function FlowExplorer({
     const flowToReplay = flowOverride ? { ...flowOverride, intent: undefined } : draftReplayFlow;
     setPerformanceSamples([]);
     setReplayKind("whole");
-    setActiveReplayStep(0);
+    // Do not claim that step 1 is executing while Maestro/JVM is still starting. The first
+    // trustworthy position arrives after Maestro reports a completed command.
+    setActiveReplayStep(undefined);
     setReplaying(true);
     setLive(false);
     setSelectedElementKey(undefined);
@@ -1416,7 +1418,7 @@ export function FlowExplorer({
                 </div>
                 <label className="measurement-boundary"><span>测量窗口</span><select value={measurementStart ?? ""} onChange={(event) => { rememberEditorState(); setMeasurementStart(event.target.value === "" ? undefined : Number(event.target.value)); setJsonDirty(false); }}><option value="">尚未指定（全部属于 setup）</option>{recordedSteps.map((_, index) => <option value={index} key={index}>从步骤 {index + 1} 开始 measured</option>)}{measurementStart === recordedSteps.length && <option value={recordedSteps.length}>从下一条性能操作开始 measured（已自动建议）</option>}</select></label>
                 {flowView === "steps" && (recordedSteps.length > 0 ? (
-                  <ol className="recorded-flow-list">
+                  <>{replaying && replayKind === "whole" && activeReplayStep === undefined && <div className="replay-progress-pending"><RefreshCw size={13} className="spin" /><span><b>Maestro 启动中 · 等待可靠步骤事件</b><small>设备画面可能仍是上一次状态；收到首个完成事件后才会高亮下一条真实步骤。</small></span></div>}<ol className="recorded-flow-list">
                     {recordedSteps.map((step, index) => (
                       <li ref={(node) => { replayStepRefs.current[index] = node; }} className={activeReplayStep === index ? "replay-active" : undefined} aria-current={activeReplayStep === index ? "step" : undefined} key={`${step.action}-${index}`}>
                         <span>{index + 1}</span>
@@ -1424,7 +1426,7 @@ export function FlowExplorer({
                         <div className="recorded-step-actions"><button title={step.action === "reset_app_state" ? "清除应用数据属于破坏性操作，只能通过整体回放执行" : "逐步回放"} disabled={replaying || step.action === "reset_app_state"} onClick={() => void replayOneStep(step, index)}><Play size={12} /></button><button title="上移" onClick={() => moveRecordedStep(index, -1)}><ArrowUp size={12} /></button><button title="下移" onClick={() => moveRecordedStep(index, 1)}><ArrowDown size={12} /></button><button title="删除" onClick={() => removeRecordedStep(index)}><Trash2 size={12} /></button></div>
                       </li>
                     ))}
-                  </ol>
+                  </ol></>
                 ) : (
                   <div className="recorded-flow-empty"><ListPlus size={20} /><span>尚无步骤。点击、返回或滑动设备镜像后，会按执行顺序持续追加在这里。</span></div>
                 ))}
