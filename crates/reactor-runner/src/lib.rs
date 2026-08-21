@@ -2959,6 +2959,11 @@ fn summarize_live_rn_events(output: &str) -> Value {
     let mut hermes_heap = 0_u64;
     let mut duplicate_renders = 0_u64;
     let mut rendered_components = BTreeSet::new();
+    let mut component_render_window_ms = (None, None);
+    // Live diagnostics are deliberately a bounded observation window. Keep the
+    // per-component breakdown alongside the totals so the UI can explain a
+    // repeated render without inventing Profiler timings for release builds.
+    let mut components = BTreeMap::<String, (u64, u64, u64, Option<f64>)>::new();
     let mut slowest_commit_ms = None::<f64>;
     let mut slowest_commit_name = None::<String>;
     let mut latest_kind = None;
@@ -2980,10 +2985,14 @@ fn summarize_live_rn_events(output: &str) -> Value {
         match kind {
             "component_render" => {
                 renders = renders.saturating_add(1);
-                if let Some(name) = event_name.as_ref()
-                    && !rendered_components.insert(name.clone())
-                {
-                    duplicate_renders = duplicate_renders.saturating_add(1);
+                update_observed_time_window(&mut component_render_window_ms, &event);
+                if let Some(name) = event_name.as_ref() {
+                    let component = components.entry(name.clone()).or_default();
+                    component.0 = component.0.saturating_add(1);
+                    if !rendered_components.insert(name.clone()) {
+                        duplicate_renders = duplicate_renders.saturating_add(1);
+                        component.1 = component.1.saturating_add(1);
+                    }
                 }
             }
             "component_tree" => tree_commits = tree_commits.saturating_add(1),
@@ -3004,6 +3013,15 @@ fn summarize_live_rn_events(output: &str) -> Value {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
+                if let Some(name) = event_name.as_ref() {
+                    let component = components.entry(name.clone()).or_default();
+                    component.2 = component.2.saturating_add(1);
+                    if let Some(duration) = duration
+                        && component.3.is_none_or(|current| duration > current)
+                    {
+                        component.3 = Some(duration);
+                    }
+                }
             }
             "console" => console = console.saturating_add(1),
             "network" => network = network.saturating_add(1),
@@ -3013,14 +3031,19 @@ fn summarize_live_rn_events(output: &str) -> Value {
         latest_kind = Some(kind.to_owned());
         latest_name = event_name;
     }
+    let component_rows = live_component_rows(components);
     serde_json::json!({
         "sampledEventCount": total,
         "componentRenderCount": renders,
         "duplicateComponentRenderCount": duplicate_renders,
+        "componentRenderWindowStartMs": component_render_window_ms.0,
+        "componentRenderWindowEndMs": component_render_window_ms.1,
+        "componentRenderWindowDurationMs": component_render_window_ms.0.zip(component_render_window_ms.1).map(|(start, end)| end.saturating_sub(start)),
         "componentTreeCommitCount": tree_commits,
         "profileCommitCount": commits,
         "slowestCommitMs": slowest_commit_ms,
         "slowestCommitName": slowest_commit_name,
+        "components": component_rows,
         "consoleEventCount": console,
         "networkEventCount": network,
         "hermesHeapSampleCount": hermes_heap,
@@ -3028,6 +3051,40 @@ fn summarize_live_rn_events(output: &str) -> Value {
         "latestName": latest_name,
         "windowLimit": 1000,
     })
+}
+
+fn update_observed_time_window(window: &mut (Option<u64>, Option<u64>), event: &Value) {
+    let Some(timestamp_ms) = event.get("timestampMs").and_then(Value::as_u64) else {
+        return;
+    };
+    window.0 = Some(window.0.map_or(timestamp_ms, |start| start.min(timestamp_ms)));
+    window.1 = Some(window.1.map_or(timestamp_ms, |end| end.max(timestamp_ms)));
+}
+
+fn live_component_rows(components: BTreeMap<String, (u64, u64, u64, Option<f64>)>) -> Vec<Value> {
+    let mut rows = components
+        .into_iter()
+        .map(|(name, (render_count, duplicate_render_count, profile_commit_count, max_commit_ms))| {
+            serde_json::json!({
+                "name": name,
+                "renderCount": render_count,
+                "duplicateRenderCount": duplicate_render_count,
+                "profileCommitCount": profile_commit_count,
+                "maxCommitMs": max_commit_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        let left_duplicate = left["duplicateRenderCount"].as_u64().unwrap_or_default();
+        let right_duplicate = right["duplicateRenderCount"].as_u64().unwrap_or_default();
+        let left_renders = left["renderCount"].as_u64().unwrap_or_default();
+        let right_renders = right["renderCount"].as_u64().unwrap_or_default();
+        right_duplicate
+            .cmp(&left_duplicate)
+            .then_with(|| right_renders.cmp(&left_renders))
+            .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
+    });
+    rows
 }
 
 async fn sample_android_cpu_pct(
@@ -6439,17 +6496,26 @@ mod tests {
     #[test]
     fn live_rn_summary_counts_repeated_component_renders() {
         let summary = summarize_live_rn_events(
-            r#"{"kind":"component_render","payload":{"name":"ListRow"}}
-{"kind":"component_render","payload":{"name":"ListRow"}}
-{"kind":"component_render","payload":{"name":"Header"}}
+            r#"{"kind":"component_render","timestampMs":1000,"payload":{"name":"ListRow"}}
+{"kind":"component_render","timestampMs":3200,"payload":{"name":"ListRow"}}
+{"kind":"component_render","timestampMs":4300,"payload":{"name":"Header"}}
 {"kind":"react_profile","payload":{"id":"List","actualDuration":1.5}}
 {"kind":"react_profile","payload":{"id":"Header","actualDuration":3.25}}"#,
         );
         assert_eq!(summary["componentRenderCount"], 3);
         assert_eq!(summary["duplicateComponentRenderCount"], 1);
+        assert_eq!(summary["componentRenderWindowStartMs"], 1000);
+        assert_eq!(summary["componentRenderWindowEndMs"], 4300);
+        assert_eq!(summary["componentRenderWindowDurationMs"], 3300);
         assert_eq!(summary["profileCommitCount"], 2);
         assert_eq!(summary["slowestCommitName"], "Header");
         assert_eq!(summary["slowestCommitMs"], 3.25);
+        assert_eq!(summary["components"][0]["name"], "ListRow");
+        assert_eq!(summary["components"][0]["renderCount"], 2);
+        assert_eq!(summary["components"][0]["duplicateRenderCount"], 1);
+        assert_eq!(summary["components"][1]["name"], "Header");
+        assert_eq!(summary["components"][1]["profileCommitCount"], 1);
+        assert_eq!(summary["components"][1]["maxCommitMs"], 3.25);
     }
 
     #[tokio::test]

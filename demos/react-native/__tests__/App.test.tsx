@@ -42,7 +42,11 @@ test('authenticates before exposing shared workloads and memory verification', a
     inputs[0].props.onChangeText('test');
     inputs[1].props.onChangeText('test');
   });
-  await ReactTestRenderer.act(() => buttonByLabel(renderer, 'Sign in').props.onPress());
+  const signInSubmit = renderer.root.findAll(
+    node => node.props.testID === 'auth-submit-signin' && typeof node.props.onPress === 'function',
+  ).at(-1)!;
+  expect(signInSubmit.props.accessibilityRole).toBe('button');
+  await ReactTestRenderer.act(() => signInSubmit.props.onPress());
 
   const home = JSON.stringify(renderer.toJSON());
   expect(home).toContain('Reactor ready');

@@ -308,23 +308,28 @@ fn score_elements(raw: Vec<RawElement>) -> Vec<InspectorElement> {
         if let Some(resource_id) = &element.resource_id {
             *resource_counts.entry(resource_id.clone()).or_default() += 1;
         }
-        for text in [&element.text, &element.accessibility_text]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(text) = selector_text(element) {
             *text_counts.entry(text.clone()).or_default() += 1;
             if (element.clickable || element.editable) && element.enabled {
                 *clickable_text_counts.entry(text.clone()).or_default() += 1;
             }
         }
     }
+    let mut text_occurrences = HashMap::<String, u32>::new();
     raw.into_iter()
         .map(|element| {
+            let text_index = selector_text(&element).map(|text| {
+                let entry = text_occurrences.entry(text.clone()).or_default();
+                let index = *entry;
+                *entry += 1;
+                index
+            });
             let candidates = selector_candidates(
                 &element,
                 &resource_counts,
                 &text_counts,
                 &clickable_text_counts,
+                text_index,
             );
             InspectorElement {
                 key: element.key,
@@ -346,11 +351,19 @@ fn score_elements(raw: Vec<RawElement>) -> Vec<InspectorElement> {
         .collect()
 }
 
+fn selector_text(element: &RawElement) -> Option<&String> {
+    element
+        .text
+        .as_ref()
+        .or(element.accessibility_text.as_ref())
+}
+
 fn selector_candidates(
     element: &RawElement,
     resource_counts: &HashMap<String, usize>,
     text_counts: &HashMap<String, usize>,
     clickable_text_counts: &HashMap<String, usize>,
+    text_index: Option<u32>,
 ) -> Vec<SelectorCandidate> {
     let mut candidates = Vec::new();
     if let Some(resource_id) = &element.resource_id {
@@ -375,19 +388,17 @@ fn selector_candidates(
             },
         });
     }
-    if let Some(text) = element
-        .text
-        .as_ref()
-        .or(element.accessibility_text.as_ref())
-    {
+    if let Some(text) = selector_text(element) {
         let unique_interactive =
             (element.clickable || element.editable) && clickable_text_counts.get(text) == Some(&1);
         let unique = unique_interactive || text_counts.get(text) == Some(&1);
+        let index = (!unique).then_some(text_index).flatten();
         candidates.push(SelectorCandidate {
             strategy: "text".to_owned(),
             label: text.clone(),
             selector: Selector {
                 text: Some(text.clone()),
+                index,
                 ..Selector::default()
             },
             score: if unique { 82 } else { 58 },
@@ -401,7 +412,10 @@ fn selector_candidates(
             } else if unique {
                 "当前页面唯一的可见/无障碍文本".to_owned()
             } else {
-                "文本在当前页面重复".to_owned()
+                format!(
+                    "文本在当前页面重复；已绑定同名控件第 {} 个",
+                    index.map_or(0, |value| value + 1)
+                )
             },
         });
     }
@@ -468,9 +482,32 @@ mod tests {
         let elements = inspect_hierarchy(Platform::Android, hierarchy).unwrap();
         let text = &elements[0].candidates[0];
         assert_eq!(text.stability, SelectorStability::Contextual);
+        assert_eq!(text.selector.index, Some(0));
+        assert_eq!(elements[1].candidates[0].selector.index, Some(1));
         assert!(
             (hit_test(&elements, 50.0, 50.0).unwrap().bounds.width - 80.0).abs() < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn duplicate_interactive_labels_keep_their_accessibility_tree_index() {
+        let hierarchy = r#"<hierarchy>
+          <node text="Sign in" clickable="false" enabled="true" bounds="[0,0][100,20]" />
+          <node text="" content-desc="Sign in" clickable="true" enabled="true" bounds="[0,30][100,70]" />
+          <node text="Sign in" clickable="false" enabled="true" bounds="[20,40][80,60]" />
+          <node text="" content-desc="Sign in" clickable="true" enabled="true" bounds="[0,80][100,120]" />
+          <node text="Sign in" clickable="false" enabled="true" bounds="[20,90][80,110]" />
+        </hierarchy>"#;
+        let elements = inspect_hierarchy(Platform::Android, hierarchy).unwrap();
+        let submit = hit_test(&elements, 50.0, 100.0).unwrap();
+        let selector = submit
+            .candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "text")
+            .unwrap();
+        assert_eq!(selector.selector.text.as_deref(), Some("Sign in"));
+        assert_eq!(selector.selector.index, Some(3));
+        assert!(selector.reason.contains("第 4 个"));
     }
 
     #[test]

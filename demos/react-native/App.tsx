@@ -70,8 +70,10 @@ function App() {
   recordComponent('App');
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
-      <BenchApp palette={palette} />
+      <Profiler id="BenchApp" onRender={recordProfilerCommit}>
+        <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
+        <BenchApp palette={palette} />
+      </Profiler>
     </SafeAreaProvider>
   );
 }
@@ -131,9 +133,9 @@ function Home({palette, session, onSignOut, onSelect}: {palette: Palette; sessio
   );
 }
 
-function BenchButton({text, palette, onPress}: {text: string; palette: Palette; onPress: () => void}) {
+function BenchButton({text, palette, onPress, testID}: {text: string; palette: Palette; onPress: () => void; testID?: string}) {
   return (
-    <Pressable accessibilityRole="button" onPress={onPress} style={({pressed}) => [styles.button, {backgroundColor: palette.accent, opacity: pressed ? 0.82 : 1}]}>
+    <Pressable testID={testID} accessibilityRole="button" onPress={onPress} style={({pressed}) => [styles.button, {backgroundColor: palette.accent, opacity: pressed ? 0.82 : 1}]}>
       <Text style={[styles.buttonText, {color: palette.accentText}]}>{text}</Text>
     </Pressable>
   );
@@ -290,7 +292,7 @@ function AuthScenario({palette, onSignedIn}: {palette: Palette; onSignedIn: (ses
           <TextInput accessibilityLabel="Confirm password" placeholder="Confirm password" placeholderTextColor={palette.muted} value={confirm} onChangeText={setConfirm} secureTextEntry autoCapitalize="none" style={[styles.input, {borderColor: palette.line, color: palette.text, backgroundColor: palette.surface}]} />
         )}
         {error && <Text accessibilityRole="alert" style={[styles.authError, {color: '#d33'}]}>{error}</Text>}
-        <BenchButton text={tab === 'signin' ? 'Sign in' : 'Create account'} palette={palette} onPress={submit} />
+        <BenchButton text={tab === 'signin' ? 'Sign in' : 'Create account'} testID={tab === 'signin' ? 'auth-submit-signin' : 'auth-submit-signup'} palette={palette} onPress={submit} />
       </View>
     </View>
   );

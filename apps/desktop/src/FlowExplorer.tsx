@@ -26,6 +26,11 @@ interface TargetPageCheckpoint {
   afterStep: number;
 }
 
+export interface ExplorerFlowListItem {
+  flow: Flow;
+  updatedAt: string;
+}
+
 interface ExplorerSuggestion {
   step: FlowStep;
   label: string;
@@ -61,12 +66,15 @@ interface FlowExplorerProps {
   initialFlow?: Flow;
   initialFlowLock?: FlowLock;
   initialPreparation?: TrialPreparation;
+  flowLibrary: ExplorerFlowListItem[];
+  selectedFlowId?: string;
   onGoalChange: (goal: string) => void;
   onAiProviderChange: (provider: "codex" | "claude" | "cloud") => void;
   onSelectDevice: (device: Device) => void;
   onAppIdChange: (appId: string) => void;
   onRefreshDevices: () => void;
   onDraftChange: (flow: Flow) => void;
+  onSelectFlow: (flow: Flow) => void;
   onPerformanceHandoff: (lock: FlowLock, preparation: TrialPreparation, compiled: CompiledFlow) => void;
 }
 
@@ -86,12 +94,15 @@ export function FlowExplorer({
   initialFlow,
   initialFlowLock,
   initialPreparation,
+  flowLibrary,
+  selectedFlowId,
   onGoalChange,
   onAiProviderChange,
   onSelectDevice,
   onAppIdChange,
   onRefreshDevices,
   onDraftChange,
+  onSelectFlow,
   onPerformanceHandoff,
 }: FlowExplorerProps) {
   const selectedDevice = useMemo(
@@ -155,6 +166,7 @@ export function FlowExplorer({
   const [repairingReplay, setRepairingReplay] = useState(false);
   const [performanceSamples, setPerformanceSamples] = useState<Array<TrialLivePerformanceSample & { step?: number }>>([]);
   const performanceStartedAt = useRef(0);
+  const replayProgressReceived = useRef(false);
   const captureInFlight = useRef(false);
   const interactionInFlight = useRef(false);
   const snapshotRef = useRef<DeviceInspectorSnapshot | undefined>(undefined);
@@ -596,6 +608,16 @@ export function FlowExplorer({
   }, [activeJobRunning, gateBusy, replaying, selectedDevice]);
 
   useEffect(() => {
+    if (!replaying || replayKind !== "whole") return undefined;
+    // Maestro does not guarantee command-level events. Do not falsely leave the first
+    // item highlighted when its TTY output only reports a whole-flow summary.
+    const timer = window.setTimeout(() => {
+      if (!replayProgressReceived.current) setActiveReplayStep(undefined);
+    }, 6_000);
+    return () => window.clearTimeout(timer);
+  }, [replayKind, replaying]);
+
+  useEffect(() => {
     const observing = replaying || gateBusy;
     if (!observing || !selectedDevice || selectedDevice.platform !== "android" || !appId.trim() || activeJobRunning) return undefined;
     let cancelled = false;
@@ -758,6 +780,29 @@ export function FlowExplorer({
       setInteractingLabel("");
       interactionInFlight.current = false;
     }
+  }
+
+  async function startNewFlowFromTrustedStart() {
+    if (interacting || replaying || gateBusy || activeJobRunning) return;
+    const timestamp = new Date();
+    setRecordedSteps([]);
+    setMeasurementStart(undefined);
+    setTeardownStart(0);
+    teardownStartRef.current = 0;
+    setFlowMetadata({
+      id: `recording-${timestamp.getTime().toString(36)}`,
+      name: `新录制 Flow · ${timestamp.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`,
+    });
+    setJsonDraft("");
+    setJsonDirty(false);
+    setEditorUndo(undefined);
+    setTargetAssertion(undefined);
+    setTargetCheckpoint(undefined);
+    setGatePreparation(undefined);
+    setGateLock(undefined);
+    setReplayFailure(undefined);
+    setPerformanceSamples([]);
+    await beginRecording(true);
   }
 
   async function recordSwipe(direction: "up" | "down") {
@@ -947,6 +992,7 @@ export function FlowExplorer({
     const flowToReplay = flowOverride ? { ...flowOverride, intent: undefined } : draftReplayFlow;
     setPerformanceSamples([]);
     setReplayKind("whole");
+    replayProgressReceived.current = false;
     setActiveReplayStep(0);
     setReplaying(true);
     setLive(false);
@@ -962,6 +1008,7 @@ export function FlowExplorer({
         flow: flowToReplay,
         promptValues,
       }, (completedStepIndex) => {
+        replayProgressReceived.current = true;
         setActiveReplayStep(Math.min(completedStepIndex + 1, recordedSteps.length - 1));
       });
       setSnapshot(next);
@@ -999,7 +1046,8 @@ export function FlowExplorer({
         setEditorError("当前镜像还没有 Selector 索引（可能正在后台刷新）；请稍候点击「刷新画面」，完成后即可逐步回放。");
         return;
       }
-      const hitElement = snapshot.elements.find((element) => selectorsOverlap(element, tapTarget));
+      const matchingElements = snapshot.elements.filter((element) => selectorsOverlap(element, tapTarget));
+      const hitElement = tapTarget.index === undefined ? matchingElements[0] : matchingElements[tapTarget.index];
       if (!hitElement) {
         setEditorError(`逐步回放需要在当前真实页面命中「${selectorLabel(tapTarget)}」；当前镜像没有该控件，请把设备导航到录制时的页面后刷新画面。`);
         return;
@@ -1268,7 +1316,7 @@ export function FlowExplorer({
         <label className="recording-app-id"><span>当前 App 包名 / Bundle ID</span><input value={appId} onChange={(event) => onAppIdChange(event.target.value)} placeholder="com.example.app" /></label>
         <div className="recording-progress"><ListPlus size={17} /><div><b>{recordedSteps.length} 个已录制步骤</b><span>{mode === "record" ? "点击画面后 Reactor 使用最佳语义 Selector 真实执行，并等待下一页面稳定。" : "切换到录制/交互模式后才会操作设备。"}</span></div></div>
         <div className="recording-actions">
-          <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting || replaying || activeJobRunning} title="真实重启 App，并用新的 launch_app 替换当前草稿；可撤销" onClick={() => void beginRecording(true)}><RotateCcw size={15} />从可信起点重新录制</button>
+          <button className="secondary-button" disabled={interacting || replaying || gateBusy || activeJobRunning} title="真实启动 App，创建一条独立的新 Flow；不会覆盖当前选中的 Flow" onClick={() => void startNewFlowFromTrustedStart()}><ListPlus size={15} />新增 · 从可信起点录制</button>
           <button className="secondary-button" disabled={recordedSteps.length === 0 || interacting} title="只修改当前 Flow 记录，不会操作或回退设备页面" onClick={() => removeRecordedStep(recordedSteps.length - 1)}><Undo2 size={15} />移除记录最后一步</button>
         </div>
       </section>
@@ -1350,6 +1398,10 @@ export function FlowExplorer({
               <button className="primary-button" disabled={aiBusy || activeJobRunning || !aiInput.trim() || !appId.trim() || ai.provider === "local"} onClick={() => void submitFlowAi()}>{aiBusy ? <RefreshCw size={14} className="spin" /> : <Sparkles size={14} />}{aiBusy ? "处理中" : "发送"}</button>
             </div>
             {ai.provider === "local" && <p className="flow-editor-error">Local Model 暂不用于 Flow AI；请选择 Codex CLI、Claude Code 或 Cloud AI。</p>}
+          </section>
+          <section className="explorer-flow-library card" aria-label="Flow 列表">
+            <div className="explorer-flow-library-heading"><div><p className="eyebrow">FLOW LIBRARY</p><h3>历史 Flow</h3><span>选中后直接对齐编辑与回放。</span></div><button className="secondary-button" disabled={interacting || replaying || gateBusy || activeJobRunning} onClick={() => void startNewFlowFromTrustedStart()}><ListPlus size={14} />新增</button></div>
+            <div className="explorer-flow-library-list">{flowLibrary.length ? flowLibrary.map((item) => <button type="button" key={item.flow.id} className={item.flow.id === selectedFlowId ? "active" : ""} disabled={interacting || replaying || gateBusy || activeJobRunning} onClick={() => onSelectFlow(item.flow)}><b>{item.flow.name}</b><span>{item.flow.appId} · {item.flow.platform === "ios" ? "iOS" : "Android"}</span><small>{item.flow.setup.length + item.flow.measured.length + item.flow.teardown.length} 步 · {new Date(item.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</small></button>) : <div className="explorer-flow-library-empty">还没有已保存的 Flow。新增会先真实启动 App，建立可信起点后再开始录制。</div>}</div>
           </section>
           </div>
 
@@ -1489,25 +1541,116 @@ export function FlowExplorer({
   );
 }
 
+type ExplorerPerformanceDetail = "cpu" | "memory" | "heap" | "renders" | "profile" | "slowest" | "trend";
+type ExplorerTimeWindow = 30_000 | 60_000 | 300_000;
+type LiveRnComponent = NonNullable<NonNullable<TrialLivePerformanceSample["rn"]>["components"]>[number];
+
+const explorerTimeWindows: Array<{ value: ExplorerTimeWindow; label: string }> = [
+  { value: 30_000, label: "30 秒" },
+  { value: 60_000, label: "1 分钟" },
+  { value: 300_000, label: "5 分钟" },
+];
+
+function formatObservedEventWindow(startMs?: number, endMs?: number) {
+  if (typeof startMs !== "number" || !Number.isFinite(startMs) || typeof endMs !== "number" || !Number.isFinite(endMs)) return "时间戳不可用";
+  const formatter = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const durationMs = Math.max(0, endMs - startMs);
+  const duration = durationMs >= 60_000 ? `${(durationMs / 60_000).toFixed(durationMs % 60_000 ? 1 : 0)} 分钟` : `${(durationMs / 1_000).toFixed(durationMs >= 10_000 ? 0 : 1)} 秒`;
+  return `${formatter.format(new Date(startMs))}–${formatter.format(new Date(endMs))}（${duration}）`;
+}
+
+function ExplorerPerformanceTimeline({ samples, windowMs, onWindowChange, onExpand, expanded = false }: { samples: Array<TrialLivePerformanceSample & { step?: number }>; windowMs: ExplorerTimeWindow; onWindowChange: (windowMs: ExplorerTimeWindow) => void; onExpand?: () => void; expanded?: boolean }) {
+  const finiteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+  const metrics = [
+    { key: "cpuPct", label: "CPU", unit: "%", color: "#f29d49", value: (sample: TrialLivePerformanceSample) => sample.cpuPct },
+    { key: "pssMb", label: "PSS", unit: " MB", color: "#8a6cff", value: (sample: TrialLivePerformanceSample) => sample.pssMb },
+    { key: "javaHeapMb", label: "Java Heap", unit: " MB", color: "#2ca8a0", value: (sample: TrialLivePerformanceSample) => sample.javaHeapMb },
+    { key: "nativeHeapMb", label: "Native Heap", unit: " MB", color: "#e05d93", value: (sample: TrialLivePerformanceSample) => sample.nativeHeapMb },
+  ];
+  const elapsed = samples.map((sample, index) => finiteNumber(sample.elapsedMs) ? sample.elapsedMs : index * 2_000);
+  const start = elapsed[0] ?? 0;
+  const end = elapsed.at(-1) ?? start;
+  const range = Math.max(1, end - start);
+  const x = (index: number) => 34 + ((elapsed[index] - start) / range) * 580;
+  const lines = metrics.map((metric) => {
+    const values = samples.map(metric.value).filter(finiteNumber);
+    if (!values.length) return { ...metric, path: "", latest: undefined, min: 0, max: 0 };
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const paddedRange = Math.max(1, max - min);
+    let started = false;
+    const path = samples.flatMap((sample, index) => {
+      const value = metric.value(sample);
+      if (!finiteNumber(value)) return [];
+      const y = 134 - ((value - min) / paddedRange) * 100;
+      const command = started ? "L" : "M";
+      started = true;
+      return [`${command}${x(index).toFixed(1)},${y.toFixed(1)}`];
+    }).join(" ");
+    return { ...metric, path, latest: values.at(-1), min, max };
+  });
+  const formatElapsed = (value: number) => value >= 60_000 ? `${(value / 60_000).toFixed(value % 60_000 ? 1 : 0)} 分` : `${Math.round(value / 1_000)} 秒`;
+  return <section className={`explorer-performance-timeline ${expanded ? "expanded" : ""}`} aria-label="实时性能趋势">
+    <div className="explorer-performance-timeline-heading"><div><b>实时性能趋势</b><span>每条曲线按自身窗口范围缩放；用于观察变化，非正式基准。{onExpand ? " 点击曲线可放大。" : ""}</span></div><div className="explorer-time-window" aria-label="趋势时间范围">{explorerTimeWindows.map((option) => <button key={option.value} type="button" className={option.value === windowMs ? "active" : ""} onClick={(event) => { event.stopPropagation(); onWindowChange(option.value); }}>{option.label}</button>)}</div></div>
+    <svg viewBox="0 0 648 164" role={onExpand ? "button" : "img"} tabIndex={onExpand ? 0 : undefined} onClick={onExpand} onKeyDown={onExpand ? (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onExpand(); } } : undefined} aria-label={`${onExpand ? "点击放大；" : ""}最近 ${formatElapsed(Math.min(windowMs, range))} 的 CPU 与内存趋势`} preserveAspectRatio="none">
+      {[34, 84, 134].map((y) => <line key={y} x1="34" x2="614" y1={y} y2={y} className="explorer-timeline-grid" />)}
+      {lines.map((line) => line.path && <path key={line.key} d={line.path} fill="none" stroke={line.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />)}
+      <text x="34" y="156">{formatElapsed(0)}</text><text x="614" y="156" textAnchor="end">{formatElapsed(range)}</text>
+    </svg>
+    <div className="explorer-timeline-legend">{lines.map((line) => <span key={line.key}><i style={{ background: line.color }} /><b>{line.label}</b>{line.latest === undefined ? "—" : `${line.latest.toFixed(1)}${line.unit}`}<small>{line.min.toFixed(1)}–{line.max.toFixed(1)}</small></span>)}</div>
+  </section>;
+}
+
 function ExplorerPerformancePanel({ samples, active, activeStep, platform }: {
   samples: Array<TrialLivePerformanceSample & { step?: number }>;
   active: boolean;
   activeStep?: number;
   platform?: Device["platform"];
 }) {
+  const [detail, setDetail] = useState<ExplorerPerformanceDetail>();
+  const [timeWindowMs, setTimeWindowMs] = useState<ExplorerTimeWindow>(30_000);
+  const [trendExpanded, setTrendExpanded] = useState(false);
   const latest = samples.at(-1);
   const finite = (value: unknown, suffix = "") => typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : "—";
-  const points = samples.slice(-36);
-  const maxPss = Math.max(1, ...points.map((sample) => sample.pssMb ?? 0));
+  const timeWindowSamples = useMemo(() => {
+    const newestElapsed = latest?.elapsedMs;
+    if (typeof newestElapsed !== "number" || !Number.isFinite(newestElapsed)) return samples;
+    const cutoff = newestElapsed - timeWindowMs;
+    return samples.filter((sample) => typeof sample.elapsedMs === "number" && sample.elapsedMs >= cutoff);
+  }, [latest?.elapsedMs, samples, timeWindowMs]);
+  const profileCount = latest?.rn?.profileCommitCount;
+  const profileUnavailable = profileCount === undefined;
+  const profileEmpty = profileCount === 0;
+  const componentRows = latest?.rn?.components ?? [];
+  const profiledComponents = componentRows.filter((component) => component.profileCommitCount > 0);
+  const componentWindow = formatObservedEventWindow(latest?.rn?.componentRenderWindowStartMs, latest?.rn?.componentRenderWindowEndMs);
+  const details: Record<ExplorerPerformanceDetail, { title: string; latest: string; description: string }> = {
+    cpu: { title: "CPU 详情", latest: finite(latest?.cpuPct, "%"), description: "通过 Android 进程采样获得；用于观察回放期间的即时变化，不计入正式基准。" },
+    memory: { title: "PSS / RSS 详情", latest: `${finite(latest?.pssMb, " MB")} / ${finite(latest?.rssMb, " MB")}`, description: "PSS 表示按比例归属的物理内存，RSS 表示常驻内存；上方曲线会按所选时间范围显示变化。" },
+    heap: { title: "Java / Native Heap 详情", latest: `${finite(latest?.javaHeapMb, " MB")} / ${finite(latest?.nativeHeapMb, " MB")}`, description: "来自 Android runtime 内存分解。它们用于定位增长方向，不能替代 Stop 后保存的正式原始证据。" },
+    renders: { title: "组件 Render 详情", latest: latest?.rn ? `${latest.rn.componentRenderCount ?? 0} Render / ${latest.rn.duplicateComponentRenderCount ?? 0} 重复` : "当前构建未提供", description: "统计最近 1,000 条 RN 诊断事件中的组件 Render；下表按组件列出实际 Render 与重复次数。" },
+    profile: { title: "React Profile Commit 详情", latest: profileUnavailable ? "当前构建未提供" : `${profileCount} Commit`, description: profileUnavailable ? "当前 App 没有可读的 RN 诊断事件文件。" : profileEmpty && (latest?.rn?.componentRenderCount ?? 0) > 0 ? "当前 Release 已输出组件 Render 事件，但没有输出 React Profiler 回调；因此不能把 Render 数伪装成 Commit。" : profileEmpty ? "当前回放页尚未产生 React Profiler 回调，因此没有可展示的 Commit；这不是性能为 0 ms。" : "来自 React Profiler 的 onRender 回调，可用于关联组件提交与性能样本。" },
+    slowest: { title: "最慢 Commit 详情", latest: latest?.rn?.slowestCommitMs === undefined ? profileUnavailable ? "当前构建未提供" : profileEmpty ? "暂无 Profiler Commit" : "Commit 未附带耗时" : `${latest.rn.slowestCommitName ?? "未知组件"} · ${finite(latest.rn.slowestCommitMs, " ms")}`, description: latest?.rn?.slowestCommitMs === undefined ? "最慢 Commit 只会在收到带 actualDuration 的 React Profiler 事件后计算。" : "取当前 1,000 条事件窗口中 actualDuration 最大的 React Profiler 回调。" },
+    trend: { title: "实时趋势详情", latest: `${timeWindowSamples.length} 个样本 · 最新 ${finite(latest?.pssMb, " MB")}`, description: "CPU、PSS、Java Heap 和 Native Heap 按所选 30 秒、1 分钟或 5 分钟窗口绘制为连续曲线。" },
+  };
+  const selectedDetail = detail ? details[detail] : undefined;
   return <section className={`card explorer-performance-panel ${active ? "active" : "idle"}`} aria-live="polite">
     <div className="explorer-performance-heading"><div><div className="heading-icon purple"><RefreshCw size={17} className={active ? "spin" : ""} /></div><span><b>Flow 回放性能观察</b><small>{active ? `LIVE · ${activeStep === undefined ? "整体回放" : `步骤 ${activeStep + 1}`} · 约每 2 秒更新` : samples.length ? "本次回放已结束 · 观察值已保留" : "回放 Flow 时自动开始"}</small></span></div><em>观察值不作为正式基准</em></div>
     {platform === "ios" ? <div className="flow-performance-empty"><b>iOS Explorer 暂无轻量实时采样</b><span>整体回放仍可验证 Flow；性能采集请使用 iOS xctrace 运行。</span></div> : !latest ? <div className="flow-performance-empty"><b>等待回放开始</b><span>这里会显示 CPU、PSS、Heap、组件 Render、Commit 和最慢 Commit。</span></div> : <>
       <div className="explorer-performance-values">
-        <div><span>CPU</span><b>{finite(latest.cpuPct, "%")}</b></div><div><span>PSS / RSS</span><b>{finite(latest.pssMb, " MB")} / {finite(latest.rssMb, " MB")}</b></div><div><span>Java / Native Heap</span><b>{finite(latest.javaHeapMb, " MB")} / {finite(latest.nativeHeapMb, " MB")}</b></div><div><span>组件 Render / 重复</span><b>{latest.rn ? `${latest.rn.componentRenderCount ?? 0} / ${latest.rn.duplicateComponentRenderCount ?? 0}` : "当前构建未提供"}</b></div><div><span>Profile Commit</span><b>{latest.rn?.profileCommitCount ?? "当前构建未提供"}</b></div><div><span>最慢 Commit</span><b>{latest.rn?.slowestCommitMs === undefined ? "当前构建未提供" : `${latest.rn.slowestCommitName ?? "未知组件"} · ${finite(latest.rn.slowestCommitMs, " ms")}`}</b></div>
+        <button type="button" onClick={() => setDetail("cpu")}><span>CPU</span><b>{finite(latest.cpuPct, "%")}</b></button><button type="button" onClick={() => setDetail("memory")}><span>PSS / RSS</span><b>{finite(latest.pssMb, " MB")} / {finite(latest.rssMb, " MB")}</b></button><button type="button" onClick={() => setDetail("heap")}><span>Java / Native Heap</span><b>{finite(latest.javaHeapMb, " MB")} / {finite(latest.nativeHeapMb, " MB")}</b></button><button type="button" onClick={() => setDetail("renders")}><span>组件 Render / 重复</span><b>{latest.rn ? `${latest.rn.componentRenderCount ?? 0} / ${latest.rn.duplicateComponentRenderCount ?? 0}` : "当前构建未提供"}</b></button><button type="button" onClick={() => setDetail("profile")}><span>Profile Commit</span><b>{profileUnavailable ? "当前构建未提供" : profileEmpty ? "暂无 Profiler Commit" : profileCount}</b></button><button type="button" onClick={() => setDetail("slowest")}><span>最慢 Commit</span><b>{latest.rn?.slowestCommitMs === undefined ? profileUnavailable ? "当前构建未提供" : profileEmpty ? "暂无 Commit" : "未提供耗时" : `${latest.rn.slowestCommitName ?? "未知组件"} · ${finite(latest.rn.slowestCommitMs, " ms")}`}</b></button>
       </div>
-      <div className="explorer-performance-spark" aria-label="PSS 变化趋势">{points.map((sample, index) => <i key={`${sample.elapsedMs ?? index}-${index}`} title={`${finite(sample.pssMb, " MB")} · ${sample.step === undefined ? "整体" : `步骤 ${sample.step + 1}`}`} style={{ height: `${Math.max(4, ((sample.pssMb ?? 0) / maxPss) * 100)}%` }} />)}</div>
+      <section className="explorer-performance-timeline-wrap"><ExplorerPerformanceTimeline samples={timeWindowSamples} windowMs={timeWindowMs} onWindowChange={setTimeWindowMs} onExpand={() => setTrendExpanded(true)} /></section>
+      {selectedDetail && <section className="explorer-performance-detail" aria-label={selectedDetail.title}><div><span>{selectedDetail.title}</span><b>{selectedDetail.latest}</b><p>{selectedDetail.description}</p>{detail === "renders" && <><p className="explorer-observation-window">统计窗口：{componentWindow} · 当前 {latest?.rn?.componentRenderCount ?? 0} 次 Render（诊断窗口最多 {latest?.rn?.windowLimit ?? 1_000} 条事件）。</p><ExplorerComponentTable rows={componentRows} mode="renders" finite={finite} /></>}{detail === "profile" && <ExplorerComponentTable rows={profiledComponents} mode="profile" finite={finite} unavailable={profileEmpty && componentRows.length > 0} />}{detail === "slowest" && <ExplorerComponentTable rows={profiledComponents} mode="slowest" finite={finite} unavailable={profileEmpty && componentRows.length > 0} />}</div><button type="button" className="icon-button small" aria-label="关闭性能详情" onClick={() => setDetail(undefined)}>×</button></section>}
+      {trendExpanded && <div className="explorer-trend-modal-backdrop" role="presentation" onMouseDown={() => setTrendExpanded(false)}><section className="explorer-trend-modal" role="dialog" aria-modal="true" aria-label="放大实时性能趋势" onMouseDown={(event) => event.stopPropagation()}><div className="explorer-trend-modal-heading"><div><span>LIVE OBSERVATION</span><h3>Flow 回放性能趋势</h3></div><button type="button" className="icon-button small" aria-label="关闭放大趋势" onClick={() => setTrendExpanded(false)}>×</button></div><ExplorerPerformanceTimeline samples={timeWindowSamples} windowMs={timeWindowMs} onWindowChange={setTimeWindowMs} expanded /></section></div>}
     </>}
   </section>;
+}
+
+function ExplorerComponentTable({ rows, mode, finite, unavailable }: { rows: LiveRnComponent[]; mode: "renders" | "profile" | "slowest"; finite: (value: unknown, suffix?: string) => string; unavailable?: boolean }) {
+  if (!rows.length) return <p className="explorer-component-empty">{unavailable ? "当前 Release 只输出 Render 事件，未输出 React Profiler 回调，因此没有真实 Commit 或最大耗时可展示。" : "当前 1,000 条诊断事件窗口没有可展开的组件明细。"}</p>;
+  const ordered = mode === "renders" ? rows : [...rows].sort((left, right) => (right.maxCommitMs ?? -1) - (left.maxCommitMs ?? -1));
+  return <div className="explorer-component-table"><table><thead><tr><th>组件</th>{mode === "renders" ? <><th>Render</th><th>重复</th></> : <><th>Commit</th><th>最大耗时</th></>}</tr></thead><tbody>{ordered.map((component) => <tr key={component.name}><td>{component.name}</td>{mode === "renders" ? <><td>{component.renderCount}</td><td>{component.duplicateRenderCount}</td></> : <><td>{component.profileCommitCount}</td><td>{component.maxCommitMs === undefined ? "未提供" : finite(component.maxCommitMs, " ms")}</td></>}</tr>)}</tbody></table></div>;
 }
 
 function hitTest(elements: InspectorElement[], x: number, y: number): InspectorElement | undefined {
@@ -1536,7 +1679,8 @@ function isDangerousElement(element: InspectorElement): boolean {
 
 function selectorLabel(selector: InspectorSelectorCandidate["selector"]): string {
   const identity = selector.accessibilityId ?? selector.semanticId ?? selector.text ?? (selector.coordinate ? `${Math.round(selector.coordinate.x)},${Math.round(selector.coordinate.y)}` : "未知 Selector");
-  return selector.enabled === undefined ? identity : `${identity} · enabled=${selector.enabled}`;
+  const indexed = selector.index === undefined ? identity : `${identity} · 同名第 ${selector.index + 1} 个`;
+  return selector.enabled === undefined ? indexed : `${indexed} · enabled=${selector.enabled}`;
 }
 
 function flowStepName(step: FlowStep): string {

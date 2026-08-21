@@ -78,13 +78,24 @@ export interface TrialLivePerformanceSample {
     sampledEventCount?: number;
     componentRenderCount?: number;
     duplicateComponentRenderCount?: number;
+    componentRenderWindowStartMs?: number;
+    componentRenderWindowEndMs?: number;
+    componentRenderWindowDurationMs?: number;
     componentTreeCommitCount?: number;
     profileCommitCount?: number;
     slowestCommitMs?: number;
     slowestCommitName?: string;
+    components?: Array<{
+      name: string;
+      renderCount: number;
+      duplicateRenderCount: number;
+      profileCommitCount: number;
+      maxCommitMs?: number;
+    }>;
     consoleEventCount?: number;
     networkEventCount?: number;
     hermesHeapSampleCount?: number;
+    windowLimit?: number;
   };
   officialMetric?: boolean;
 }

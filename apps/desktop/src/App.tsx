@@ -34,7 +34,7 @@ import { conservativeAndroidDiagnosticPlan, formatOptionalMetric, telemetrySlope
 import type { CliProviderStatus, FlowModificationProposal, LocalModelStatus, MaintenanceStatus, StagedUpdate } from "./api";
 import { DiagnosticCenter } from "./DiagnosticCenter";
 import { FlowCopilot } from "./FlowCopilot";
-import { FlowExplorer } from "./FlowExplorer";
+import { FlowExplorer, type ExplorerFlowListItem } from "./FlowExplorer";
 import type {
   Bootstrap,
   AnalysisExplanation,
@@ -77,7 +77,13 @@ interface PersistedFlowDraft {
 }
 
 const FLOW_DRAFT_KEY = "reactor.flow-draft.v1";
+const FLOW_LIBRARY_KEY = "reactor.flow-library.v1";
 const PROVIDER_SETTINGS_KEY = "reactor.provider-settings.v1";
+
+interface PersistedFlowLibrary {
+  version: 1;
+  flows: ExplorerFlowListItem[];
+}
 
 interface PersistedProviderSettings {
   version: 1;
@@ -199,6 +205,8 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
   const [draftHydrated, setDraftHydrated] = useState(false);
+  const [flowLibrary, setFlowLibrary] = useState<ExplorerFlowListItem[]>(() => loadFlowLibrary());
+  const [selectedFlowId, setSelectedFlowId] = useState<string>();
   const flowCardRef = useRef<HTMLDivElement>(null);
   const explorerDraftIdentityRef = useRef("");
 
@@ -237,6 +245,7 @@ function App() {
       setFlowLock(draft.flowLock);
       setRunPreset(draft.runPreset);
       setStage(draft.flowLock ? "locked" : draft.generated ? "generated" : "compose");
+      setSelectedFlowId(draft.generated?.flow.id);
       if (draft.generated) {
         void compileFlowPreview(draft.generated.flow)
           .then(setCompiledFlow)
@@ -292,6 +301,22 @@ function App() {
       setError(`保存 Flow 草稿失败：${String(reason)}`);
     }
   }, [draftHydrated, intent, appId, framework, platform, providerMode, generated, compiledFlow, preparation, flowLock, runPreset]);
+
+  useEffect(() => {
+    if (!draftHydrated) return;
+    try {
+      window.localStorage.setItem(FLOW_LIBRARY_KEY, JSON.stringify({ version: 1, flows: flowLibrary } satisfies PersistedFlowLibrary));
+    } catch (reason) {
+      setError(`保存 Flow 列表失败：${String(reason)}`);
+    }
+  }, [draftHydrated, flowLibrary]);
+
+  useEffect(() => {
+    if (!draftHydrated || !generated) return;
+    const flow = generated.flow;
+    setFlowLibrary((current) => upsertFlowLibrary(current, flow));
+    setSelectedFlowId(flow.id);
+  }, [draftHydrated, generated]);
 
   useEffect(() => {
     bootstrap()
@@ -1085,6 +1110,7 @@ function App() {
     const serialized = JSON.stringify(flow);
     if (explorerDraftIdentityRef.current === serialized) return;
     explorerDraftIdentityRef.current = serialized;
+    setSelectedFlowId(flow.id);
     setGenerated((current) => {
       if (current && JSON.stringify(current.flow) === serialized) return current;
       return {
@@ -1100,6 +1126,31 @@ function App() {
     setResults([]);
     setReportPath("");
   }, [providerMode]);
+
+  function selectFlowFromLibrary(flow: Flow) {
+    const compatibleDevice = environment?.devices.find((device) => device.platform === flow.platform);
+    explorerDraftIdentityRef.current = JSON.stringify(flow);
+    setSelectedFlowId(flow.id);
+    setIntent(flow.intent ?? "");
+    setAppId(flow.appId);
+    setPlatform(flow.platform);
+    if (compatibleDevice) setSelectedDeviceId(compatibleDevice.id);
+    setGenerated({
+      flow,
+      provider: providerMode,
+      model: "flow-library",
+      promptTemplateVersion: "flow-library-v1",
+      notes: ["从本机 Flow 列表加载；编辑或回放前会重新对齐当前设备。"],
+    });
+    setCompiledFlow(undefined);
+    setFlowLock(undefined);
+    setPreparation(undefined);
+    setResults([]);
+    setReportPath("");
+    setStage("generated");
+    setFlowEditing(false);
+    setFlowEditNotice("已切换到所选 Flow；可直接编辑、整体回放，或从可信起点新增一条独立录制。历史锁定与结果不会被复用。");
+  }
 
   return (
     <div className="app-shell">
@@ -1134,6 +1185,8 @@ function App() {
             initialFlow={generated?.flow}
             initialFlowLock={flowLock}
             initialPreparation={preparation}
+            flowLibrary={flowLibrary}
+            selectedFlowId={selectedFlowId}
             ai={{
               provider: providerMode,
               endpoint: providerMode === "local" ? localEndpoint : endpoint,
@@ -1157,6 +1210,7 @@ function App() {
             }}
             onRefreshDevices={() => void onRefresh()}
             onDraftChange={syncExplorerDraft}
+            onSelectFlow={selectFlowFromLibrary}
             onPerformanceHandoff={(lock, nextPreparation, compiled) => {
               setGenerated(nextPreparation.generated);
               setCompiledFlow(compiled);
@@ -1943,6 +1997,39 @@ function loadFlowDraft(): PersistedFlowDraft | undefined {
   }
 }
 
+function loadFlowLibrary(): ExplorerFlowListItem[] {
+  try {
+    const raw = window.localStorage.getItem(FLOW_LIBRARY_KEY);
+    if (!raw) return [];
+    const value = JSON.parse(raw) as Partial<PersistedFlowLibrary>;
+    if (value.version !== 1 || !Array.isArray(value.flows)) return [];
+    return value.flows
+      .filter((entry): entry is ExplorerFlowListItem => Boolean(
+        entry
+        && typeof entry.updatedAt === "string"
+        && entry.flow
+        && typeof entry.flow.id === "string"
+        && typeof entry.flow.name === "string"
+        && typeof entry.flow.appId === "string"
+        && (entry.flow.platform === "android" || entry.flow.platform === "ios")
+        && Array.isArray(entry.flow.setup)
+        && Array.isArray(entry.flow.measured)
+        && Array.isArray(entry.flow.teardown),
+      ))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
+function upsertFlowLibrary(current: ExplorerFlowListItem[], flow: Flow): ExplorerFlowListItem[] {
+  const existing = current.find((entry) => entry.flow.id === flow.id);
+  if (existing && JSON.stringify(existing.flow) === JSON.stringify(flow)) return current;
+  const entry: ExplorerFlowListItem = { flow, updatedAt: new Date().toISOString() };
+  return [entry, ...current.filter((candidate) => candidate.flow.id !== flow.id)].slice(0, 50);
+}
+
 function loadProviderSettings(): PersistedProviderSettings | undefined {
   try {
     const raw = window.localStorage.getItem(PROVIDER_SETTINGS_KEY);
@@ -2262,6 +2349,7 @@ function SettingsCenter({
     try {
       await erasePrivateData("all_local_data");
       window.localStorage.removeItem(FLOW_DRAFT_KEY);
+      window.localStorage.removeItem(FLOW_LIBRARY_KEY);
       window.localStorage.removeItem(PROVIDER_SETTINGS_KEY);
       window.location.reload();
     } catch (reason) {
